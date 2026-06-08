@@ -1,0 +1,16 @@
+[project]
+name = "capacity"
+version = "0.1.0"
+description = "Vertex AI Capacity Planner"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "google-cloud-monitoring>=2.0",
+    "google-cloud-resource-manager>=1.0",
+    "typer>=0.15",
+    "uvicorn>=0.34",
+]
+
+[project.scripts]
+capacity = "capacity.cli:app"
