@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from typing import Annotated
+
 from fastapi import FastAPI, HTTPException, Query
+from pydantic import Field
 
 from .capacity import build_response
 from .core import DEFAULT_DAYS, DEFAULT_PERCENTILES, fetch_throughput
@@ -18,7 +21,7 @@ async def healthz():
 async def get_recommendations(
     project: str,
     days: int = Query(default=DEFAULT_DAYS, ge=1, le=365),
-    percentile: list[int] = Query(default=list(DEFAULT_PERCENTILES), ge=0, le=100),
+    percentile: list[Annotated[int, Field(ge=0, le=100)]] = Query(default=list(DEFAULT_PERCENTILES)),
     model: list[str] = Query(default=[]),
     region: list[str] = Query(default=[]),
 ):
