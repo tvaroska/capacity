@@ -12,5 +12,8 @@ dependencies = [
     "uvicorn>=0.34",
 ]
 
+[tool.uv]
+package = true
+
 [project.scripts]
 capacity = "capacity.cli:app"
