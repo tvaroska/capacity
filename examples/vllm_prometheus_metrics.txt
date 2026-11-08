@@ -1,0 +1,18 @@
+# HELP vllm:prompt_tokens_total Number of prefill prompt tokens processed.
+# TYPE vllm:prompt_tokens_total counter
+vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"} 480000
+# HELP vllm:generation_tokens_total Number of decode generation tokens processed.
+# TYPE vllm:generation_tokens_total counter
+vllm:generation_tokens_total{model_name="llama-3.3-70b-fp8"} 64000
+# HELP vllm:gpu_cache_usage_perc vLLM GPU KV-cache block occupancy ratio (0.0 to 1.0).
+# TYPE vllm:gpu_cache_usage_perc gauge
+vllm:gpu_cache_usage_perc{model_name="llama-3.3-70b-fp8"} 0.915
+# HELP vllm:num_requests_waiting Number of requests waiting in the prefill/decode queue.
+# TYPE vllm:num_requests_waiting gauge
+vllm:num_requests_waiting{model_name="llama-3.3-70b-fp8"} 14
+# HELP vllm:prefix_cache_queries_total Total prefix cache lookup queries.
+# TYPE vllm:prefix_cache_queries_total counter
+vllm:prefix_cache_queries_total{model_name="llama-3.3-70b-fp8"} 1000
+# HELP vllm:prefix_cache_hits_total Total prefix cache hits.
+# TYPE vllm:prefix_cache_hits_total counter
+vllm:prefix_cache_hits_total{model_name="llama-3.3-70b-fp8"} 125

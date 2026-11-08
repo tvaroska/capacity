@@ -1,0 +1,47 @@
+# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.2.0)
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: containers
+  _IMAGE_NAME: capacity
+  _PUSH: "auto"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+steps:
+  - id: python-lint-and-tests
+    name: ghcr.io/astral-sh/uv:0.9.1-python3.13-bookworm-slim
+    waitFor: ["-"]
+    entrypoint: bash
+    env:
+      - UV_COMPILE_BYTECODE=1
+      - UV_LINK_MODE=copy
+      - UV_PROJECT_ENVIRONMENT=/workspace/.venv
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        uv sync
+        /workspace/.venv/bin/ruff check capacity/ tests/
+        /workspace/.venv/bin/pytest tests/ -v
+
+  - id: docker-build
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - python-lint-and-tests
+    entrypoint: bash
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        IMAGE_REPO="${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/${_IMAGE_NAME}"
+        BUILD_TAG="$${IMAGE_REPO}:${SHORT_SHA:-local}"
+        docker build -t "$${BUILD_TAG}" -f Dockerfile .
+        if [[ -n "${TAG_NAME}" || "${_PUSH}" == "true" ]]; then
+          docker tag "$${BUILD_TAG}" "$${IMAGE_REPO}:latest"
+          docker push "$${BUILD_TAG}"
+          docker push "$${IMAGE_REPO}:latest"
+        fi

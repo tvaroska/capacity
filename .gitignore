@@ -1,8 +1,13 @@
 __pycache__/
-*.pyc
+*.py[cod]
 *.egg-info/
 .venv/
 dist/
+build/
 .claude/
-CLAUDE.md
-AGENTS.md
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.env
+.env.*
+!.env.example
