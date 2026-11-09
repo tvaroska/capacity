@@ -1,6 +1,6 @@
 """Sub-second token-bucket micro-burst and prefix-cache dilution physics (`ADR-002`).
 
-Models three production failure modes that cause HTTP 429s or 2x-4x GSU/replica over-sizing:
+Models four production failure modes that cause HTTP 429s or 2x-4x GSU/replica over-sizing:
 1. Weighted Burndown Multipliers & the `>200K` Long-Context Cliff:
    - Standard (`<=200K` tokens): `1.0x` uncached + `0.1x` cached + `4.0x` (output + thoughts).
    - Long-Context (`>200K` tokens): `2.0x` uncached + `0.2x` cached + `7.5x` (output + thoughts).
@@ -10,15 +10,36 @@ Models three production failure modes that cause HTTP 429s or 2x-4x GSU/replica 
 3. Round-Robin Prefix-Cache Dilution ($h_{\\text{eff}} = h / N$):
    - Stateless round-robin load balancing across $N$ endpoints/replicas dilutes replica-local KV
      cache hit rates by $1/N$, inflating uncached prefill burndown and wasting GSUs or replicas.
+4. Model-Tier Prefix-Cache Block Alignment & Routing Hash Mechanics:
+   - Flash/Flash-Lite (`gemini-3.8-flash`, `gemini-3.5-flash-lite`): `6,144`-token minimum floor
+     and `4,096`-token block alignment (dynamic tokens at offset `<4,096` cause Block 0
+     contamination and `0%` cache hit).
+   - Argon/Pro (`gemini-4-argon`, `gemini-4.0-pro`, `gemini-3.1-pro`): `2,048`-token minimum floor
+     and token-level boundary checkpointing (`system_instruction >= 1,024` and `tools`).
+   - Single-turn routing hash degradation and `thought_signature` stripping penalties.
 """
 
 from __future__ import annotations
 
 import math
+import re
 
-from capacity.models import MicroBurstAudit, PrefixCacheAudit
+from capacity.models import MicroBurstAudit, ModelTierPrefixCacheAudit, PrefixCacheAudit
 
 LONG_CONTEXT_THRESHOLD_TOKENS = 200_000
+_SUFFIX_RE = re.compile(
+    r"(?:-(?:00\d|preview(?:-\d{2}-\d{2})?|exp(?:-\d{4})?|rc\d*|ga|qcd|latest|v\d+))+$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_model(model_id: str) -> str:
+    cleaned = model_id.strip().lower()
+    if "@" in cleaned:
+        cleaned = cleaned.split("@", 1)[0]
+    if "/" in cleaned:
+        cleaned = cleaned.rsplit("/", 1)[-1]
+    return _SUFFIX_RE.sub("", cleaned)
 
 
 def compute_weighted_burndown_tokens(
@@ -181,4 +202,162 @@ def evaluate_prefix_cache_dilution(
         round_robin_gsus=rr_gsus,
         wasted_gsus=wasted_gsus,
         gsu_savings_pct=round(savings_pct, 2),
+    )
+
+
+def evaluate_model_tier_prefix_cache(
+    model: str = "gemini-3.8-flash",
+    total_input_tokens: int = 18_000,
+    static_prefix_tokens: int = 14_000,
+    output_tokens: int = 800,
+    thoughts_tokens: int = 400,
+    dynamic_header_offset_tokens: int | None = 120,
+    single_turn_request: bool = False,
+    dummy_turn_anchor_applied: bool = False,
+    strip_thought_signatures: bool = False,
+    num_replicas: int = 8,
+) -> ModelTierPrefixCacheAudit:
+    """Evaluate model-tier prefix-cache block alignment, Block-0 contamination, and routing hash."""
+    norm = _normalize_model(model)
+    total_in = max(1, total_input_tokens)
+    static_in = min(max(0, static_prefix_tokens), total_in)
+    replicas = max(1, num_replicas)
+
+    is_pro_or_argon = "argon" in norm or "pro" in norm
+    if is_pro_or_argon:
+        granularity = "token_boundary"
+        min_floor = 2_048
+        block_size = 1
+        spillover_pct = 75.0
+    else:
+        granularity = "block_4096"
+        min_floor = 6_144
+        block_size = 4_096
+        spillover_pct = 50.0
+
+    fast_speedup = 2.5 if "-fast" in norm else 1.0
+    fast_cost = 2.0 if "-fast" in norm else 1.0
+
+    remediations: list[str] = []
+    below_floor = static_in < min_floor
+    if below_floor:
+        remediations.append(
+            f"Static prefix ({static_in:,} tokens) is below the {min_floor:,}-token minimum "
+            f"floor for {norm}; consolidate static reference context above {min_floor:,} tokens."
+        )
+
+    # Check Block-0 contamination or early dynamic offset
+    block_zero_contaminated = False
+    effective_static_span = static_in
+    if dynamic_header_offset_tokens is not None and dynamic_header_offset_tokens < static_in:
+        effective_static_span = max(0, dynamic_header_offset_tokens)
+        if granularity == "block_4096" and dynamic_header_offset_tokens < block_size:
+            block_zero_contaminated = True
+            remediations.append(
+                f"Dynamic token injected at offset {dynamic_header_offset_tokens:,} (<4,096) "
+                "contaminates Block 0 and invalidates 100% of downstream 4,096-token cache blocks. "
+                "Move timestamps, request UUIDs, and user state to the end of the prompt."
+            )
+        elif granularity == "token_boundary" and dynamic_header_offset_tokens < min_floor:
+            block_zero_contaminated = True
+            remediations.append(
+                f"Dynamic token injected at offset {dynamic_header_offset_tokens:,} "
+                f"(<{min_floor:,}) prevents prefix checkpointing. Move variable headers "
+                "to the final user turn."
+            )
+
+    if below_floor or block_zero_contaminated or effective_static_span < min_floor:
+        aligned_cacheable = 0
+        trailing_uncached = static_in
+    elif granularity == "block_4096":
+        aligned_cacheable = (effective_static_span // block_size) * block_size
+        trailing_uncached = static_in - aligned_cacheable
+        if trailing_uncached > 0:
+            remediations.append(
+                f"Pad or align static system/tool prefix to a multiple of 4,096 tokens "
+                f"({trailing_uncached:,} trailing static tokens currently re-prefill at 1.0x)."
+            )
+    else:
+        aligned_cacheable = effective_static_span
+        trailing_uncached = static_in - aligned_cacheable
+
+    # Routing affinity & multi-turn thought_signature continuity
+    if single_turn_request and not dummy_turn_anchor_applied:
+        routing_affinity = 1.0 / replicas
+        remediations.append(
+            "Single-turn request omits multi-turn prefix router hash; prepend a 2-token static "
+            "dummy (user + model) turn pair after system_instruction to enable sticky routing."
+        )
+    else:
+        routing_affinity = 0.90
+
+    if strip_thought_signatures:
+        routing_affinity = min(routing_affinity, 0.0077)
+        remediations.append(
+            "Stripping thought_signature on multi-turn tool loops collapses prefix cache hits "
+            "to ~0.77%; preserve full modelContent (including thought_signature) across turns."
+        )
+
+    current_cached_tokens = round(aligned_cacheable * routing_affinity)
+    effective_hit_rate = current_cached_tokens / total_in if total_in > 0 else 0.0
+
+    # Optimized target: move dynamic tokens to tail, apply dummy turn anchor, keep signatures
+    if static_in < min_floor:
+        opt_aligned = 0
+    elif granularity == "block_4096":
+        opt_aligned = (static_in // block_size) * block_size
+    else:
+        opt_aligned = static_in
+    opt_cached_tokens = round(opt_aligned * 0.90)
+    optimized_hit_rate = opt_cached_tokens / total_in if total_in > 0 else 0.0
+
+    current_burndown = compute_weighted_burndown_tokens(
+        input_tokens=total_in,
+        output_tokens=output_tokens,
+        thoughts_tokens=thoughts_tokens,
+        cached_tokens=current_cached_tokens,
+    )
+    optimized_burndown = compute_weighted_burndown_tokens(
+        input_tokens=total_in,
+        output_tokens=output_tokens,
+        thoughts_tokens=thoughts_tokens,
+        cached_tokens=opt_cached_tokens,
+    )
+    waste_pct = (
+        ((current_burndown - optimized_burndown) / current_burndown) * 100.0
+        if current_burndown > 0 and current_burndown > optimized_burndown
+        else 0.0
+    )
+
+    if not remediations:
+        remediations.append(
+            "Prefix structure is block-aligned and preserves multi-turn router hash affinity."
+        )
+
+    return ModelTierPrefixCacheAudit(
+        model=model,
+        normalized_model=norm,
+        checkpoint_granularity=granularity,
+        min_prefix_floor_tokens=min_floor,
+        block_size_tokens=block_size,
+        total_input_tokens=total_in,
+        static_prefix_tokens=static_in,
+        dynamic_header_offset_tokens=dynamic_header_offset_tokens,
+        below_minimum_floor=below_floor,
+        block_zero_contaminated=block_zero_contaminated,
+        aligned_cacheable_tokens=aligned_cacheable,
+        trailing_uncached_prefix_tokens=trailing_uncached,
+        single_turn_request=single_turn_request,
+        dummy_turn_anchor_applied=dummy_turn_anchor_applied,
+        strip_thought_signatures=strip_thought_signatures,
+        routing_affinity_hit_rate=round(routing_affinity, 4),
+        effective_cache_hit_rate=round(effective_hit_rate, 4),
+        optimized_cache_hit_rate=round(optimized_hit_rate, 4),
+        current_burndown_tokens=round(current_burndown, 2),
+        optimized_burndown_tokens=round(optimized_burndown, 2),
+        burndown_waste_pct=round(waste_pct, 2),
+        prefill_spillover_threshold_pct=spillover_pct,
+        fast_decode_speedup_multiplier=fast_speedup,
+        fast_decode_cost_multiplier=fast_cost,
+        remediation_steps=remediations,
     )

@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "capacity"
-version = "0.2.0"
-description = "Gemini Platform GSU & Self-Hosted Model Capacity Planner, Micro-Burst Simulator, and FOCUS 1.2 FinOps Engine"
+version = "0.3.0"
+description = "Gemini Platform GSU & Self-Hosted Model Capacity Planner, Micro-Burst Simulator, Multi-Gateway Config Generator, and FOCUS 1.2 FinOps Showcase"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [

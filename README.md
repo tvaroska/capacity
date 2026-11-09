@@ -1,139 +1,174 @@
-# Capacity — Enterprise AI Capacity Planner, Micro-Burst Simulator & FOCUS 1.2 FinOps Engine
+# capacity: your AI reservation throttles at peak and sits idle overnight
 
-`capacity` (`v0.2.0`) is an open-source capacity sizing, sub-second token-bucket & KV-cache simulator, Newsvendor hybrid commitment optimizer, and **FinOps FOCUS 1.2 Two-Pool Chargeback** engine for both **Managed Gemini Platform GSUs (`--mode gsu`)** and **Self-Hosted Open-Weight Models (`--mode self-hosted` on Vertex AI Endpoints & vLLM / SGLang clusters)**.
+![Capacity Architecture](docs/assets/architecture_card.svg)
 
----
+Enterprise AI reservations fail in month one because 60-second monitoring averages hide `1s` and `10s` weighted-burndown `429` throttles, stateless round-robin routing dilutes replica KV and prefix caches to `1/N`, and routing overnight batch workloads to "50%-off" Batch APIs pays twice on top of idle 24x7 commitments. **`capacity`** is a stateless offline compiler that ingests Cloud Monitoring, Prometheus `vLLM`, or OpenTelemetry `gen_ai.*` traces to size **Provisioned Throughput (`PT`)** **Generative Serving Units (`GSUs`)** (`--mode gsu`) and **Self-Hosted GPU/TPU Pools** (`--mode self-hosted`), emit drop-in **LiteLLM, Envoy AI Gateway, or GKE Inference Gateway (`epp`)** configs, and export overnight schedules and **FinOps FOCUS 1.2** ledgers into Kueue, Airflow, and BigQuery.
 
-## Why Enterprise AI Capacity & Chargeback Models Break
-
-Most teams size reserved AI capacity from monthly token totals or 60-second dashboard averages, then allocate the reservation invoice across business units by raw token count. In production, five physics and accounting traps break those spreadsheets in the first month:
-
-1. **The 8x5 Diurnal Zero-Padding Trap (`ADR-001`):** An enterprise workload active `8 hours × 5 days` (`23.8%` weekly duty cycle) has `76.2%` zero-traffic minutes on nights and weekends. Computing `P50` or `P75` across all `10,080` weekly minutes recommends **`0 GSUs`**, starving daytime production. `capacity recommend --active-only` separates `active_hours` from `all_hours` and projects 24-hour growth via **Holt's Double Exponential Smoothing**.
-2. **The 60-Second Monitoring Illusion (`1s` / `10s` Token Bucket, `ADR-002`):** Cloud Monitoring charts average throughput over 60 seconds, but admission control enforces a **`1-second` token bucket (`>=50 GSUs`)** or **`10-second` token bucket (`<50 GSUs`)** with a `5%` burst credit. A cluster appearing **`62%` utilized on a 60-second chart** still triggers HTTP 429s or PayGo spillover during sub-second agent fan-out bursts (`illusion_detected=True`).
-3. **The `>200K` Context & Reasoning Burndown Cliff (`ADR-002`):** On reserved throughput pools, `1` output or reasoning token consumes **`4.0x`** the capacity of `1` input token (andcached prefixes consume `0.1x`). Crossing `200,000` input tokens doubles input weight to **`2.0x`** and jumps output/reasoning weight to **`7.5x`**.
-4. **The Round-Robin $1/N$ Prefix-Cache Trap (`ADR-002` & `ADR-006`):** Behind $N = 8$ load-balanced endpoints or GPU replicas (`DeployedModel` / vLLM / SGLang), stateless L7 round-robin routes Turn 1 to Replica 1 and Turn 2 to Replica 2. Because KV-cache lives in replica-local HBM, an `80%` prefix-cache hit rate drops to **$h / N = 10.0\%$**, inflating uncached prefill burndown by `2.65x`.
-5. **The Self-Hosted GPU Quota Lock & Duty-Cycle Illusion (`ADR-006`) + FOCUS 1.2 Idle Tax (`ADR-003`):**
-   - On self-hosted GPU endpoints, regional accelerator quota locks upfront against **`max_replica_count × accelerators_per_replica`**, and `accelerator/duty_cycle` stays `<60%` during memory-bound decoding while `vllm:gpu_cache_usage_perc` hits `>90%` and triggers KV preemption.
-   - In FinOps chargeback, billing teams by **unweighted raw tokens** underbills reasoning agents by `4x`, while dividing 24x7 commitment costs across active tokens punishes early adopters for 2 AM idle capacity.
+> **Scope Boundary (One Stateless Compiler, Not Seven Daemons):** You do not deploy `capacity` in the request hot path or run all targets at once. Teams feed usage traces in, compile manifests for their **single** chosen gateway (`--target litellm | envoy | epp`), and export JSON sizing/chargeback tables to existing schedulers and data warehouses.
 
 ---
 
-## Architecture Overview
+## 1. Six Month-1 Reservation Traps & Who Uses This
+
+### Why Standard Capacity & Chargeback Models Break in Month 1
+
+| Default Industry Habit | Month-1 Production or Financial Failure | Underlying Serving & FinOps Physics | Compiled `capacity` Output |
+| :--- | :--- | :--- | :--- |
+| **1. Sizing from 24x7 averages or per-project `P99`** | `P50 = 0 GSUs` on 8x5 workloads, or `60%+` overnight waste when each project reserves its own peak; self-hosted autoscaling locks `max_replicas * GPUs` upfront. | Business traffic runs `~23.8%` of the 168h week; `accelerator/duty_cycle` stays `<60%` while `vLLM` KV-cache hits `>85%` preemption. | Active-hours **Newsvendor** sizing, **Shared Folder Provisioned Throughput (`RHPT`)** follow-the-sun spoke pooling (`-33%` GSUs), and **Disaggregated Prefill/Decode** replica pools. |
+| **2. Watching 60-second Cloud Monitoring charts** | Sudden HTTP `429` storms fire while 1-minute throughput charts sit calmly below `70%` utilization. | Serving quotas enforce **`1s` (`>=50` GSUs) or `10s` (`<50` GSUs)** token buckets (`+5%` burst credit), and `>200K` context prompts jump from `1x/4x` to **`2.0x` input / `7.5x` output+reasoning** burndown. | Sub-second burst simulator (`illusion_detected`) and exact `<=200K` vs. `>200K` weighted burndown calculator (`capacity optimize`). |
+| **3. Injecting dynamic UUIDs/timestamps at prompt top & round-robin GPU routing** | Prefix cache hit rate collapses to `0%` on block-aligned tiers (`89.9%` down to `0.77%` when proxies strip `thought_signature`), and `N` replicas dilute hits to `h / N`. | Block-aligned tiers (`4,096`-token blocks, `6,144` floor) invalidate everything after a mutated **Block 0**; stateless load balancers re-prefill identical system prompts across every pod. | Model-tier prefix-cache linter (Block-0 check, Turn-0 dummy-turn anchor, `thought_signature` audit) and `GKE epp` prefix/KV scorer weights. |
+| **4. Enforcing LiteLLM raw `tpm_limit` & default router `cooldown_time`** | Reasoning-heavy tenants blow through unweighted quotas, a 1s PT micro-burst `429` blackholes the entire PT deployment for 60s, and Prisma locks Postgres above `500 RPS`. | LiteLLM's native `tpm_limit` counts unweighted 60s raw tokens, and each Uvicorn worker spawns a separate Rust Prisma engine (`pods * workers` connections). | Tag-routed `litellm_config.yaml` (`cooldown_time` matched to `1s`/`10s` buckets + `use_redis_transaction_buffer`), `litellm_burndown_callback.py`, Envoy post-SSE `CEL`, and PgBouncer scale audit. |
+| **5. Sending overnight async jobs to the `0.5x` Batch API** | Enterprise pays a **second variable invoice (`+0.5x`)** while already-paid 24x7 `PT` reservations sit `75%` idle from 8 PM to 6 AM. | Batch API jobs bypass `PT` reservations completely, whereas paced online calls with `X-Vertex-AI-LLM-Request-Type: dedicated` consume idle `PT` at **`$0.00` marginal cost**. | **Batch Double-Payment Auditor** and **3-Tier Earliest-Deadline-First (`EDF`) Residual Scheduler** (`Tier-0 Revenue > Tier-1 Deadline EDF > Tier-2 Evergreen Water-Fill`). |
+| **6. Dividing the monthly reservation invoice by raw token counts** | Reasoning agents (`4x-7.5x` decode weight) get subsidized up to `4x` by high-cache RAG teams (`0.1x`), and early adopters get punished `3x` for unallocated corporate headroom. | Raw token counts ignore compute burndown weights and conflate active consumption with unallocated capacity growth buffers. | **FinOps FOCUS 1.2 Two-Pool Chargeback** (*Active Consumed Pool* billed by weighted burndown vs. *Unallocated Idle Pool* held by platform) + **5 FinOps for AI KPIs**. |
+
+### Who Uses `capacity`?
+
+| Persona | Core Problem Solved | Primary Entrypoints |
+| :--- | :--- | :--- |
+| **1. AI Platform & Gateway Engineers** *(LiteLLM, Envoy AI Gateway, GKE `epp`)* | Stop unweighted `tpm_limit` leaks, `429` router cooldown blackholing, `>500 RPS` Prisma/Postgres locks, and `1/N` replica KV-cache dilution. | `capacity gateway --target litellm\|envoy\|epp`<br>`POST /api/v1/gateway/config` |
+| **2. Cloud FinOps & Capacity Planners** *(GSU, Flexible Spend Plan `FSP`, GPU commitments & BU chargeback)* | Right-size commitments with Newsvendor quantiles, pool spoke projects under Shared Folder `RHPT`, stop `+0.5x` Batch double-pay, and run auditable FOCUS 1.2 chargeback. | `capacity recommend` · `capacity schedule`<br>`capacity chargeback` · `capacity demo` |
+| **3. Applied AI & Self-Hosted Model Architects** *(Prompt caching & `vLLM` / `SGLang` clusters)* | Catch Block-0 prompt cache contamination and `thought_signature` stripping; separate compute-bound Prefill pools from bandwidth-bound Decode pools. | `capacity optimize --mode self-hosted`<br>`POST /api/v1/prefix-cache/model-tier` |
+
+---
+
+## 2. Quick Start: Run Locally in 10 Seconds (`0` Cloud Credentials)
+
+Clone the repository and run either the built-in reference showcase or your own exported traces (`--trace-file` / `--vllm-file`):
+
+```bash
+# 1. Run the End-to-End Showcase Scorecard & generate the self-contained 4-tab GM3 Light HTML workbench
+uv run capacity demo --html-out /tmp/capacity_scorecard.html
+
+# 2. Bring Your Own Traces (JSON minute TPM, vLLM Prometheus /metrics, or OTel gen_ai.* JSONL)
+uv run capacity recommend --trace-file examples/diurnal_8x5_trace.json --active-only
+uv run capacity recommend --mode self-hosted --vllm-file examples/vllm_requests.jsonl --active-only
+
+# 3. Built-in Multi-Region Reference Sizing + Short-Horizon Active-Window Holt (+24h) Trend
+uv run capacity recommend --demo --active-only --by-region
+uv run capacity recommend --demo --mode self-hosted --active-only --by-region
+
+# 4. Newsvendor Hybrid Commitment, 1s/10s Micro-Burst & Self-Hosted vLLM KV-Cache Audit
+uv run capacity optimize --model gemini-3.8-flash
+uv run capacity optimize --mode self-hosted --model llama-3.3-70b-fp8 --vllm-file examples/vllm_prometheus_metrics.txt
+
+# 5. Compile Production LiteLLM Proxy, Envoy AI Gateway (CEL) & GKE Inference Gateway (epp) Configs
+uv run capacity gateway --target all --model gemini-3.8-flash --gsus 20 --rps 650
+
+# 6. Compute 3-Tier EDF Overnight Residual Schedule & FOCUS 1.2 Two-Pool Chargeback
+uv run capacity schedule --model gemini-3.8-flash --gsus 20
+uv run capacity chargeback --model gemini-3.8-flash --gsus 10 --waterfill-tpm 300000
+
+# 7. Launch the Interactive 4-Tab Web Workbench & OpenAPI Server (http://localhost:8080)
+uv run capacity serve --port 8080
+```
+
+---
+
+## 3. Gateway Enforcement: Two-Phase Weighted Burndown & 8 Header Policies
+
+Output and reasoning token counts (`4.0x` at `<=200K` prompt tokens; `7.5x` at `>200K`) are unknown until streaming finishes. `capacity gateway` solves this across stateful proxies (**LiteLLM**) and stateless C++ data planes (**Envoy AI Gateway**):
 
 ```mermaid
-flowchart LR
-    subgraph Telemetry["Telemetry & Log Sources"]
-        T1["Managed GSU Telemetry<br>(consumed_token_throughput)"]
-        T2["Phase 1: Vertex Self-Hosted<br>(prediction_count, duty_cycle,<br>vertex_vllm_gpu_cache_usage_perc)"]
-        T3["Phase 2: Direct vLLM / SGLang<br>(Prometheus /metrics & JSONL Logs)"]
+sequenceDiagram
+    participant App as Caller (BU Tag)
+    participant GW as AI Gateway (LiteLLM / Envoy)
+    participant Bucket as Burndown Counter (Redis / Envoy Global RL)
+    participant Upstream as Reserved PT or Spillover Pool
+
+    App->>GW: Request (prompt + x-business-unit)
+    GW->>Bucket: Pre-flight check (rolling team burndown vs funded PT share; Envoy cost=0)
+    alt Within Funded PT Share
+        GW->>Upstream: X-Vertex-AI-LLM-Request-Type: <unset> + Shared: priority
+    else Team Bursting Above Funded Share
+        GW->>Upstream: X-Vertex-AI-LLM-Request-Type: shared + Shared: priority (protects peer PT)
     end
-
-    subgraph Engine["Capacity & FOCUS 1.2 FinOps Engine"]
-        S1["1. Active-Hours Sizing<br>& Holt +24h Forecast"]
-        S2["2. 1s/10s Burst, >200K Cliff<br>& 1/N KV-Cache Dilution"]
-        S3["3. Newsvendor Hybrid Solver<br>(Base GSU / Reserved Replicas<br>+ Priority / Elastic Spillover)"]
-        S4["4. FOCUS 1.2 Two-Pool Ledger<br>(Weighted Active vs Idle Pool<br>+ Async Batch Water-Filling)"]
-    end
-
-    T1 --> S1
-    T2 --> S1
-    T3 --> S1
-    S1 --> S2 --> S3 --> S4
+    Upstream-->>GW: SSE Stream + final usage_metadata (input, cached, output, thoughts)
+    GW->>Bucket: Post-SSE exact deduction (1x/0.1x/4x <=200K or 2x/0.2x/7.5x >200K)
 ```
+
+### Generated Envoy AI Gateway Post-SSE `CEL` Snippet (`capacity gateway --target envoy`)
+
+```yaml
+apiVersion: aigateway.envoyproxy.io/v1alpha1
+kind: AIGatewayRoute
+metadata:
+  name: gemini-3.8-flash-weighted-burndown-route
+spec:
+  rules:
+    - llmRequestCosts:
+        - metadataKey: vertex_burndown_tokens
+          type: CEL
+          cel: >
+            input_tokens > 200000
+              ? int(double(input_tokens - cached_input_tokens) * 2.0
+                  + double(cached_input_tokens) * 0.2
+                  + double(output_tokens) * 7.5)
+              : int(double(input_tokens - cached_input_tokens) * 1.0
+                  + double(cached_input_tokens) * 0.1
+                  + double(output_tokens) * 4.0)
+```
+
+### The 8 Canonical Header-Pair Routing Policies (`capacity/gateway.py`)
+
+Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Request-Type`:
+
+| Tier | Workload Scenario | `Request-Type` | `Shared-Request-Type` | Capacity & Billing Behavior |
+| :---: | :--- | :---: | :---: | :--- |
+| **1** | Prod within funded `PT` share | `<unset>` | `priority` | Consumes reserved `PT` first; spills automatically to `1.8x` Priority PayGo on saturation. |
+| **2** | Prod bursting past funded `PT` share | `shared` | `priority` | Bypasses `PT` so a bursting team never starves peer reservations; bills caller at `1.8x` Priority. |
+| **3** | Standard interactive prod | `<unset>` or `shared` | `standard` | Uses spare `PT` (if unset) and spills over to `1.0x` Standard PayGo. |
+| **4** | Hard-capped prod (`$0` overage) | `dedicated` | `<ignored>` | Consumes `PT` only; returns HTTP `429` immediately on saturation (`$0.00` variable overage). |
+| **5** | Daytime dev, UAT & eval | `shared` | `flex` | Bypasses `PT` and Priority completely; runs on `0.5x` Flex PayGo (`50%` discount). |
+| **6** | Off-peak `$0` `PT` scavenger | `dedicated` | `<ignored>` | Harvests idle overnight/weekend `PT` at `$0.00` marginal cost; backs off on HTTP `429`. |
+| **7** | Off-peak hybrid `PT` + Flex spill | `<unset>` | `flex` | Drains `$0.00` idle `PT` first, then spills excess batch volume to `0.5x` Flex PayGo. |
+| **8** | Off-peak batch without `PT` | `shared` | `offpeak` | Executes on `0.5x` off-peak PayGo in projects with no reserved `PT`. |
 
 ---
 
-## Capability Status (`v0.2.0`)
+## 4. Reference Scorecard, Plain-English 5-KPI Glossary & EDF Schedule
 
-| Capability | Mode / Flag | Status |
-| :--- | :--- | :---: |
-| **Managed GSU Percentile Sizing (`all_hours` + `active_hours`) & Holt `+24h` Forecast** | `capacity recommend --mode gsu` (`--demo` or live GCP) | **Implemented** |
-| **Multi-Project & Departmental Folder Roll-Up** | `capacity recommend --project ... --folder-map ...` | **Implemented** |
-| **Self-Hosted Vertex AI GPU Endpoint Sizing, Quota-Lock & KV-Cache Audit (Phase 1)** | `capacity recommend\|optimize --mode self-hosted` | **Implemented** |
-| **vLLM / SGLang Prometheus `/metrics` & JSONL Request Log Ingestion (Phase 2 Seam)** | `--vllm-file examples/vllm_prometheus_metrics.txt` / `.jsonl` | **Implemented** |
-| **Newsvendor Hybrid Commitment (`PT + Priority PayGo 1.8x` / `FSP`) & Micro-Burst Audit** | `capacity optimize` / `POST /api/v1/optimize` | **Implemented** |
-| **FOCUS 1.2 Two-Pool Chargeback (Weighted vs. Raw Tokens + Batch Water-Filling)** | `capacity chargeback` / `POST /api/v1/chargeback` | **Implemented** |
-| **Interactive GM3 Light Web Portal & OpenAPI REST Service** | `capacity serve` (`GET /`, `/docs`, `/healthz`) | **Implemented** |
-| **Live K8s Pod `/metrics` Polling Daemon & Disaggregated Prefill/Decode Sizer** | Roadmap [`docs/roadmap.md`](docs/roadmap.md) (`v0.3.0`) | **Planned** |
+> **Physics vs. Reference Fixture Provenance:** Serving mechanics (`1s`/`10s` token buckets, `<=200K` `1x/0.1x/4x` vs. `>200K` `2x/0.2x/7.5x` burndown weights, `4,096`-token block alignment, and `$0` `PT` vs. `+0.5x` Batch billing) encode deterministic platform rules; Holt's double-exponential smoothing tracks short-horizon active-window trend rather than multi-week seasonal quantiles. Model IDs (`gemini-3.8-flash` `4,096`-block profile, `gemini-4-argon` token-boundary profile, `llama-3.3-70b-fp8`) and `--demo` dollar outputs below come from deterministic built-in reference traces so every check runs offline in `<2s`.
+
+### 4A. Executive Showcase Scorecard (`capacity demo`) & 5-KPI Definitions
+
+```text
+=== Capacity v0.3.0 — End-to-End Executive Showcase Scorecard ===
+1. FinOps for AI KPIs:    CPVO=$0.1750/outcome | CPWT_1M=$5.6193 | TER=7.4% | CSR=68.4% | ECUR_168h=57.0%
+2. Folder RHPT Pooling:   Siloed=15 GSUs -> Pooled=10 GSUs (Saved=5 GSUs / $10,000/mo)
+3. Batch 0.5x Trap Saved: $11,250.00/mo (Lifts PT utilization 24% -> 67.1%)
+4. Disaggregated P/D:     8 Prefill + 3 Decode Replicas (vs 12 Monolithic, saves 1 replica[s])
+5. Multi-Gateway Audit:   LiteLLM (48 Prisma engines, cooldown=5s, status=tune_required) + Envoy CEL + GKE epp
+```
+
+- **`CPWT_1M` (Cost per 1M Weighted Burndown Tokens):** Total amortized spend divided by millions of compute-weighted burndown tokens (`1x` uncached input + `0.1x` cached input + `4x` output, reasoning, and retry tokens).
+- **`CPVO` (Cost per Verified Outcome):** Total amortized spend divided by evaluation-passing business outcomes, bridging capacity spend directly to [`bq-eval`](https://github.com/tvaroska/bq-eval) (`v_step1_cost_per_outcome`).
+- **`TER` (Token Efficiency Ratio):** Delivered user-facing output tokens divided by total raw tokens (uncached input + cached input + output + thinking + retries).
+- **`CSR` (Cache Savings Rate):** Share of total prompt compute saved through prefix caching (`(cached_input / total_prompt) * (1 - 0.10)`).
+- **`ECUR_168h` (168-Hour Effective Capacity Utilization Rate):** Percentage of weekly 24x7 reserved burndown capacity (`168h * hourly_ceiling`) actively consumed after overnight batch scavenging.
+
+### 4B. 3-Tier Residual Capacity Scheduler (`capacity schedule`)
+
+Ranks `Tier-1` deadline jobs by value density (`USD / 1M burndown tokens`) subject to cumulative hourly residual headroom `A(h) = 0.85 * C_hour - R(h)` at each job's deadline cutoff `T+d`:
+
+```text
+=== 3-Tier Residual Capacity Schedule (gemini-3.8-flash, 20 GSUs) ===
+Residual PT Budget (8h): 703,872,000 burndown tokens
+Tier-1 Admitted (EDF PT):    420,000,000 tokens ($0 marginal)
+Tier-1 Spilled (0.5x Flex):  320,000,000 tokens ($80.00)
+Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
+  - regulatory-risk-digest: status=admitted_edf_pt | deadline=T+5h | density=$66.67/1M | cost=$0.00
+  - premarket-portfolio-briefings: status=admitted_edf_pt | deadline=T+6h | density=$75.00/1M | cost=$0.00
+  - low-density-archive-sweep: status=spilled_or_aborted | deadline=T+6h | density=$2.81/1M | cost=$80.00
+```
+
+*(Note: `low-density-archive-sweep` exceeds cumulative `PT` headroom inside the `T+6h` cutoff and spills to `0.5x` Flex, leaving post-`T+6h` residual headroom (`T+6h..T+8h`) for deadline-free `Tier-2` evergreen water-filling at `$0.00` marginal cost.)*
 
 ---
 
-## Quickstart (Zero Cloud Credentials Required)
+## 5. Documentation & Trade-Offs
 
-Every command runs offline out of the box using built-in enterprise traces or [`examples/`](examples/):
-
-### 1. Empirical Active-Hours Sizing + Holt 24h Forecast (`recommend --demo`)
-
-```bash
-uv run capacity recommend --demo --active-only --by-region
-```
-
-```text
-Model             Region         TPM/GSU  Duty%  P50 TPM  P50 GSU  P75 TPM  P75 GSU  P90 TPM  P90 GSU  P95 TPM  P95 GSU  Forecast+24h TPM  Forecast GSU
-————————————————  ————————————  ————————  —————  ———————  ———————  ———————  ———————  ———————  ———————  ———————  ———————  ————————————————  ————————————
-gemini-3.8-flash  europe-west4   120,900  23.8%  241,800        2  241,800        2  241,800        2  241,800        2           120,900             1
-gemini-3.8-flash  us-central1    120,900  23.8%  483,600        4  483,600        4  483,600        4  483,600        4           241,800             2
-gemini-4-argon    us-central1     30,000  23.8%   90,000        3   90,000        3   90,000        3   90,000        3            60,000             2
-```
-
-### 2. Newsvendor Hybrid Commitment, `1s`/`10s` Micro-Burst & $1/N$ Prefix-Cache Audit (`optimize`)
-
-```bash
-uv run capacity optimize --model gemini-3.8-flash
-```
-
-```text
-=== Newsvendor Hybrid Commitment (gemini-3.8-flash) ===
-Optimal PT Base: 1 GSUs (Quantile=0.57, Break-Even Util=42.5%)
-Monthly Cost:    $5,412.65 (PT=$2,000.00 + Spillover=$3,412.65)
-Savings:         $553.58/mo vs 100% PayGo (9.3%), $2,587.35/mo vs P99 PT (32.3%)
-Request Weight:  11,600 weighted burndown tokens (in=20,000, cached=16,000, out=1,000, thoughts=500)
-Micro-Burst:     10s window | 60s Util=62.0% | Peak Window Util=112.2% | Spillover=True | Illusion=True
-Prefix Cache:    Sticky=4 GSUs vs Round-Robin(8)=9 GSUs (Effective Hit=10.0%, Wasted=5 GSUs, Savings=56.0%)
-```
-
-### 3. Self-Hosted GPU Endpoint Audit & Phase 2 vLLM Log Ingestion (`--mode self-hosted`)
-
-```bash
-uv run capacity optimize --mode self-hosted --model llama-3.3-70b-fp8 --vllm-file examples/vllm_prometheus_metrics.txt
-```
-
-```text
-=== Self-Hosted GPU Endpoint Audit (llama-3.3-70b-fp8 @ a3-highgpu-8g) ===
-Upfront GPU Quota Lock: 64x NVIDIA_H100_80GB (min=2 reps -> 16 GPUs, stranded lock=48 GPUs)
-Autoscaler Illusion:    Duty Cycle=52.0% (<60%) vs vLLM KV-Cache=91.5% (Wait Queue=14, Illusion=True)
-Newsvendor Replicas:    2 Reserved CUD Reps (P99=3 Reps, Break-Even Util=66.2%)
-Monthly Hybrid Cost:    $43,984.00 (Reserved=$37,000.00 + Elastic Burst=$6,984.00; Non-Prod ScaleToZero Saves=$35,923.20/mo)
-Replica KV Dilution:    Sticky=3 Reps vs Round-Robin(8)=6 Reps (Effective Hit=10.0%, Savings=56.0%)
-```
-
-### 4. FinOps FOCUS 1.2 Two-Pool Chargeback (`chargeback`)
-
-Shows both **Weighted Burndown vs. Unweighted Raw-Token Distortion** and **Active Pool vs. Naive Full-Pool Idle Penalty**:
-
-```bash
-uv run capacity chargeback --model gemini-3.8-flash --gsus 10 --waterfill-tpm 300000
-```
-
-```text
-=== FOCUS 1.2 Two-Pool Chargeback (10 GSUs @ $2,000/mo) ===
-Total Monthly Commitment:      $20,000.00
-Active Consumed Capacity Pool: $6,617.04 (33.1% util)
-Reclaimed Batch Water-Fill:    $3,970.22 (+19.9% util -> 52.9% effective)
-Net Unallocated Idle Pool:     $9,412.74
-
-Tenant                Weighted %  Raw Tok %  FOCUS Active $  Unweighted Raw $  Naive Full-Pool $  Idle Tax Avoided $
-————————————————————  ——————————  —————————  ——————————————  ————————————————  —————————————————  ——————————————————
-claims-triage              46.7%      27.8%       $3,087.95         $1,841.36          $9,333.33           $6,245.38
-policy-audit               20.0%      49.0%       $1,323.41         $3,241.00          $4,000.00           $2,676.59
-underwriting-copilot       33.3%      23.2%       $2,205.68         $1,534.68          $6,666.67           $4,460.99
-```
-
----
-
-## Documentation & Governance
-
-- [`AGENTS.md`](AGENTS.md) — Repository map and verification commands
-- [`CRITICAL.md`](CRITICAL.md) — Hard engineering and FinOps invariants
-- [`DECISIONS.md`](DECISIONS.md) — Architectural Decision Records (`ADR-001`–`ADR-006`)
-- [`docs/roadmap.md`](docs/roadmap.md) — Two-Phase roadmap (Managed GSUs + Self-Hosted Vertex AI -> Direct vLLM/SGLang Collectors)
+- [`AGENTS.md`](AGENTS.md): Repository module map and local verification commands
+- [`CRITICAL.md`](CRITICAL.md): Non-negotiable serving-physics and FinOps invariants
+- [`DECISIONS.md`](DECISIONS.md): Architecture Decision Records (`ADR-001` through `ADR-007`), trade-offs, and model boundaries
+- [`.stitch/DESIGN.md`](.stitch/DESIGN.md): Web Workbench UI design specification (`GM3` Light tokens)
+- [`docs/roadmap.md`](docs/roadmap.md): Product roadmap and planned empirical trace benchmarks

@@ -26,7 +26,7 @@ from pydantic import Field
 from capacity.burst import compute_weighted_burndown_tokens, evaluate_prefix_cache_dilution
 from capacity.core import percentile
 from capacity.finops import MINUTES_PER_MONTH
-from capacity.models import DictAccessModel, PrefixCacheAudit
+from capacity.models import DictAccessModel, DisaggregatedPoolSizing, PrefixCacheAudit
 
 HOURS_PER_MONTH = 720.0
 
@@ -465,9 +465,13 @@ def _parse_jsonl_or_json_logs(
         usage = rec.get("usage")
         usage_map = usage if isinstance(usage, Mapping) else rec
 
-        p_tok = _int_metric(usage_map, "prompt_tokens", "input_tokens")
+        p_tok = _int_metric(usage_map, "prompt_tokens", "input_tokens") or _int_metric(
+            usage_map, "gen_ai.usage.input_tokens", "gen_ai.usage.prompt_tokens"
+        )
         c_tok = _int_metric(usage_map, "cached_tokens", "cached_content_token_count")
-        o_tok = _int_metric(usage_map, "completion_tokens", "output_tokens")
+        o_tok = _int_metric(usage_map, "completion_tokens", "output_tokens") or _int_metric(
+            usage_map, "gen_ai.usage.output_tokens", "gen_ai.usage.completion_tokens"
+        )
         t_tok = _int_metric(usage_map, "reasoning_tokens", "thoughts_tokens")
 
         w_tok = compute_weighted_burndown_tokens(
@@ -522,6 +526,94 @@ def _parse_jsonl_or_json_logs(
     )
 
 
+def size_disaggregated_prefill_decode(
+    profile: SelfHostedProfile | str = "llama-3.3-70b-fp8",
+    peak_qps: float = 18.0,
+    avg_input_tokens: int = 6_400,
+    avg_output_tokens: int = 450,
+    target_ttft_ms: float = 350.0,
+    target_tpot_ms: float = 25.0,
+) -> DisaggregatedPoolSizing:
+    """Size separate Prefill (compute-bound) and Decode (KV/bandwidth-bound) worker pools."""
+    prof = (
+        profile
+        if isinstance(profile, SelfHostedProfile)
+        else resolve_self_hosted_profile(profile)
+    )
+    qps = max(0.1, float(peak_qps))
+    in_tok = max(1, int(avg_input_tokens))
+    out_tok = max(1, int(avg_output_tokens))
+    ttft_ms = max(20.0, float(target_ttft_ms))
+    tpot_ms = max(5.0, float(target_tpot_ms))
+
+    # Prefill is compute-bound: a single replica processes ~4.5x its weighted burndown TPS in raw
+    # prefill tokens/sec when dedicated to prefill without decode interleave stalls.
+    prefill_tps_capacity = prof.tps_per_replica * 4.5 * min(1.0, ttft_ms / 350.0)
+    required_prefill_tps = qps * in_tok
+    prefill_replicas = max(1, math.ceil(required_prefill_tps / max(1.0, prefill_tps_capacity)))
+
+    # Decode is HBM memory-bandwidth and KV-cache capacity bound:
+    # active sequence duration = out_tok * (tpot_ms / 1000.0); Little's Law active sequences:
+    decode_duration_sec = out_tok * (tpot_ms / 1_000.0)
+    active_sequences = qps * decode_duration_sec
+    active_kv_tokens = active_sequences * (in_tok + out_tok)
+    kv_safe_per_replica = prof.max_kv_cache_tokens * 0.80
+
+    decode_by_kv = math.ceil(active_kv_tokens / max(1.0, kv_safe_per_replica))
+    decode_tps_capacity = (prof.tps_per_replica / 4.0) * min(1.2, 25.0 / tpot_ms)
+    decode_by_bw = math.ceil((qps * out_tok) / max(1.0, decode_tps_capacity))
+    decode_replicas = max(1, decode_by_kv, decode_by_bw)
+
+    total_disagg = prefill_replicas + decode_replicas
+
+    # Monolithic pool suffers ~30% throughput penalty from long-prompt prefill chunking stalling
+    # concurrent decode iterations to meet the same TTFT + TPOT SLA simultaneously.
+    mono_weighted_tps = qps * (in_tok + 4.0 * out_tok) * 1.30
+    monolithic_replicas = max(
+        total_disagg,
+        math.ceil(mono_weighted_tps / max(1.0, prof.tps_per_replica * 0.75)),
+    )
+    delta = monolithic_replicas - total_disagg
+
+    disagg_cost = total_disagg * prof.reserved_replica_monthly_usd
+    mono_cost = monolithic_replicas * prof.reserved_replica_monthly_usd
+
+    ttft_headroom = round(
+        max(0.0, ((prefill_replicas * prefill_tps_capacity) - required_prefill_tps)
+            / max(1.0, prefill_replicas * prefill_tps_capacity) * 100.0),
+        2,
+    )
+    tpot_headroom = round(
+        max(0.0, ((decode_replicas * kv_safe_per_replica) - active_kv_tokens)
+            / max(1.0, decode_replicas * kv_safe_per_replica) * 100.0),
+        2,
+    )
+    rec = (
+        f"Deploy {prefill_replicas} prefill + {decode_replicas} decode replicas "
+        f"({total_disagg} total vs {monolithic_replicas} monolithic) behind GKE Inference "
+        "Gateway (epp / llm-d) to isolate TTFT prefill bursts from TPOT decode streams."
+    )
+
+    return DisaggregatedPoolSizing(
+        profile=prof.profile_id,
+        accelerator_type=prof.accelerator_type,
+        accelerators_per_replica=prof.accelerators_per_replica,
+        peak_qps=round(qps, 2),
+        avg_input_tokens=in_tok,
+        avg_output_tokens=out_tok,
+        prefill_replicas=prefill_replicas,
+        decode_replicas=decode_replicas,
+        total_disaggregated_replicas=total_disagg,
+        monolithic_replicas=monolithic_replicas,
+        replica_delta=delta,
+        disaggregated_monthly_cost_usd=round(disagg_cost, 2),
+        monolithic_monthly_cost_usd=round(mono_cost, 2),
+        ttft_headroom_pct=ttft_headroom,
+        tpot_headroom_pct=tpot_headroom,
+        recommendation=rec,
+    )
+
+
 __all__ = [
     "DEFAULT_SELF_HOSTED_PROFILES",
     "MINUTES_PER_MONTH",
@@ -532,4 +624,5 @@ __all__ = [
     "load_inference_server_file",
     "parse_inference_server_telemetry",
     "resolve_self_hosted_profile",
+    "size_disaggregated_prefill_decode",
 ]

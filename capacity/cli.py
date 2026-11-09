@@ -1,4 +1,4 @@
-"""Typer CLI for `capacity`: empirical sizing, micro-burst/KV physics, and FOCUS 1.2 chargeback."""
+"""Typer CLI for `capacity`: sizing, micro-burst/KV physics, multi-gateway, and FOCUS 1.2."""
 
 from __future__ import annotations
 
@@ -33,14 +33,25 @@ from capacity.core import (
 )
 from capacity.finops import (
     DEFAULT_TENANT_RAW_TOKEN_WEIGHTS,
+    compute_finops_kpis,
     compute_focus_chargeback,
+    evaluate_batch_scavenger_economics,
+    evaluate_folder_pooling,
     optimize_hybrid_commitment,
+    schedule_residual_capacity,
 )
-from capacity.models import OptimizeResponse, RecommendationResponse
+from capacity.gateway import generate_gateway_bundle
+from capacity.models import (
+    DeadlineJobSpec,
+    OptimizeResponse,
+    RecommendationResponse,
+)
+from capacity.portal import build_showcase_summary_payload, render_showcase_portal_html
 from capacity.self_hosted import (
     evaluate_self_hosted_endpoint,
     load_inference_server_file,
     resolve_self_hosted_profile,
+    size_disaggregated_prefill_decode,
 )
 
 load_dotenv()
@@ -48,7 +59,7 @@ load_dotenv()
 app = typer.Typer(
     help=(
         "Gemini Platform GSU & Self-Hosted Model Capacity Planner, "
-        "Micro-Burst Simulator, and FOCUS 1.2 FinOps Engine."
+        "Micro-Burst Simulator, Multi-Gateway Config Generator, and FOCUS 1.2 FinOps Showcase."
     ),
     add_completion=False,
 )
@@ -62,6 +73,13 @@ class OutputFormat(StrEnum):
 class CapacityMode(StrEnum):
     gsu = "gsu"
     self_hosted = "self-hosted"
+
+
+class GatewayTarget(StrEnum):
+    litellm = "litellm"
+    envoy = "envoy"
+    epp = "epp"
+    all = "all"
 
 
 # Default synthetic 30-day TPM distribution (12 representative buckets in TPM)
@@ -185,6 +203,71 @@ def _print_table(
 
 
 @app.command()
+def demo(
+    html_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--html-out",
+            help="Optional path to write the self-contained GM3 Light interactive HTML scorecard",
+        ),
+    ] = None,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.table,
+) -> None:
+    """Run the end-to-end Showcase demo across all 4 planes (zero cloud credentials needed)."""
+    if html_out is not None:
+        html_out.parent.mkdir(parents=True, exist_ok=True)
+        html_out.write_text(render_showcase_portal_html(), encoding="utf-8")
+
+    payload = build_showcase_summary_payload()
+    if output_format == OutputFormat.json:
+        typer.echo(json.dumps(payload, indent=2))
+        return
+
+    kpis = compute_finops_kpis()
+    scav = evaluate_batch_scavenger_economics()
+    fpool = evaluate_folder_pooling(
+        hourly_tpm_by_project={
+            "emea-wealth-spoke": [480_000.0, 520_000.0, 410_000.0, 90_000.0, 40_000.0, 30_000.0],
+            "amer-retail-spoke": [60_000.0, 80_000.0, 490_000.0, 560_000.0, 510_000.0, 90_000.0],
+            "apac-markets-spoke": [510_000.0, 110_000.0, 50_000.0, 40_000.0, 460_000.0, 530_000.0],
+        }
+    )
+    disagg = size_disaggregated_prefill_decode()
+    gw = generate_gateway_bundle()
+
+    typer.echo("=== Capacity v0.3.0 — End-to-End Executive Showcase Scorecard ===")
+    typer.echo(
+        f"1. FinOps for AI KPIs:    CPVO=${kpis.cpvo_usd:.4f}/outcome | "
+        f"CPWT_1M=${kpis.cpwt_1m_usd:.4f} | TER={kpis.ter_pct:.1f}% | "
+        f"CSR={kpis.csr_pct:.1f}% | ECUR_168h={kpis.ecur_168h_pct:.1f}%"
+    )
+    typer.echo(
+        f"2. Folder RHPT Pooling:   Siloed={fpool.siloed_total_gsus} GSUs -> "
+        f"Pooled={fpool.pooled_folder_gsus} GSUs "
+        f"(Saved={fpool.stranded_gsus_saved} GSUs / ${fpool.monthly_savings_usd:,.0f}/mo)"
+    )
+    typer.echo(
+        f"3. Batch 0.5x Trap Saved: ${scav.double_payment_waste_avoided_usd:,.2f}/mo "
+        f"(Lifts PT utilization {scav.daytime_active_utilization_pct:.0f}% -> "
+        f"{scav.effective_utilization_after_scavenging_pct:.1f}%)"
+    )
+    typer.echo(
+        f"4. Disaggregated P/D:     {disagg.prefill_replicas} Prefill + "
+        f"{disagg.decode_replicas} Decode Replicas "
+        f"(vs {disagg.monolithic_replicas} Monolithic, saves {disagg.replica_delta} replica[s])"
+    )
+    typer.echo(
+        f"5. Multi-Gateway Audit:   LiteLLM ({gw.litellm_audit.total_prisma_rust_engines} "
+        f"Prisma engines, cooldown={gw.litellm_audit.anti_blackhole_cooldown_seconds}s, "
+        f"status={gw.litellm_audit.scale_status}) + Envoy CEL + GKE epp"
+    )
+    if html_out is not None:
+        typer.echo(f"6. HTML Scorecard Saved:  {html_out}")
+
+
+@app.command()
 def recommend(
     project: Annotated[
         list[str] | None,
@@ -250,6 +333,13 @@ def recommend(
         int,
         typer.Option("--forecast-hours", help="Holt double-exponential smoothing horizon"),
     ] = 24,
+    html_out: Annotated[
+        Path | None,
+        typer.Option(
+            "--html-out",
+            help="Optional path to write the self-contained GM3 Light interactive HTML scorecard",
+        ),
+    ] = None,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
@@ -322,6 +412,10 @@ def recommend(
         forecast_steps=forecast_hours,
         mode=mode.value,
     )
+
+    if html_out is not None:
+        html_out.parent.mkdir(parents=True, exist_ok=True)
+        html_out.write_text(render_showcase_portal_html(), encoding="utf-8")
 
     if output_format == OutputFormat.json:
         typer.echo(resp.model_dump_json(indent=2))
@@ -494,8 +588,6 @@ def optimize(
 
     prov_gsus = max(1, commitment.optimal_gsus)
     committed_tpm = prov_gsus * tpm_per_gsu
-    # Default 60-second TPM sits at 62% of committed capacity (<70% apparent utilization)
-    # while a 1.90x sub-minute burst exceeds the 1s/10s token bucket (`illusion_detected=True`).
     default_60s = committed_tpm * 0.62
     sixty_s = sixty_sec_tpm if sixty_sec_tpm is not None else default_60s
     default_burst_tps = (sixty_s / 60.0) * 1.90
@@ -567,6 +659,138 @@ def optimize(
         f"(Effective Hit={prefix_cache.effective_cache_hit_rate * 100:.1f}%, "
         f"Wasted={prefix_cache.wasted_gsus} GSUs, Savings={prefix_cache.gsu_savings_pct:.1f}%)"
     )
+
+
+@app.command()
+def gateway(
+    target: Annotated[
+        GatewayTarget,
+        typer.Option("--target", "-t", help="Gateway target: litellm, envoy, epp, or all"),
+    ] = GatewayTarget.all,
+    model: Annotated[str, typer.Option(help="Managed model ID")] = "gemini-3.8-flash",
+    project_id: Annotated[str, typer.Option(help="GCP host project ID")] = "prod-genai-pt-host",
+    location: Annotated[str, typer.Option(help="Vertex AI location")] = "global",
+    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = 20,
+    rps: Annotated[int, typer.Option(help="Target gateway RPS")] = 650,
+    sse_streams: Annotated[int, typer.Option(help="Concurrent SSE streams")] = 400,
+    pods: Annotated[int, typer.Option(help="LiteLLM pod replicas")] = 12,
+    workers: Annotated[int, typer.Option(help="Uvicorn workers per pod")] = 4,
+    self_hosted_model: Annotated[
+        str, typer.Option(help="Self-hosted model for GKE epp")
+    ] = "llama-3.3-70b-fp8",
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.table,
+) -> None:
+    """Generate LiteLLM, Envoy AI Gateway (CEL), and GKE Inference Gateway (epp) configs."""
+    bundle = generate_gateway_bundle(
+        model=model,
+        project_id=project_id,
+        location=location,
+        provisioned_gsus=gsus,
+        target_rps=rps,
+        concurrent_sse_streams=sse_streams,
+        pods=pods,
+        uvicorn_workers_per_pod=workers,
+        self_hosted_model=self_hosted_model,
+    )
+    if output_format == OutputFormat.json:
+        typer.echo(bundle.model_dump_json(indent=2))
+        return
+
+    audit = bundle.litellm_audit
+    typer.echo(
+        f"=== Multi-Gateway Configuration & Scale Audit "
+        f"({bundle.normalized_model}, {bundle.provisioned_gsus} GSUs) ==="
+    )
+    typer.echo(
+        f"LiteLLM Scale Audit: {audit.total_prisma_rust_engines} Prisma engines "
+        f"({audit.pods} pods * {audit.uvicorn_workers_per_pod} workers) | "
+        f"PgBouncer pool={audit.recommended_pgbouncer_pool_size} | "
+        f"Cooldown={audit.anti_blackhole_cooldown_seconds}s | Status={audit.scale_status}"
+    )
+    if target in (GatewayTarget.litellm, GatewayTarget.all):
+        typer.echo("\n--- [1] LiteLLM Proxy (litellm_config.yaml) ---")
+        typer.echo(bundle.litellm_config_yaml.rstrip())
+        typer.echo(
+            "\n--- [2] LiteLLM Weighted Burndown Callback (litellm_burndown_callback.py) ---"
+        )
+        typer.echo(bundle.litellm_burndown_callback_py.rstrip())
+    if target in (GatewayTarget.envoy, GatewayTarget.all):
+        typer.echo("\n--- [3] Envoy AI Gateway CEL (AIGatewayRoute + BackendTrafficPolicy) ---")
+        typer.echo(bundle.envoy_ai_gateway_yaml.rstrip())
+    if target in (GatewayTarget.epp, GatewayTarget.all):
+        typer.echo("\n--- [4] GKE Inference Gateway (InferencePool + EndpointPickerConfig) ---")
+        typer.echo(bundle.gke_epp_inference_pool_yaml.rstrip())
+
+
+@app.command()
+def schedule(
+    model: Annotated[str, typer.Option(help="Model ID")] = "gemini-3.8-flash",
+    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = 20,
+    evergreen_tokens: Annotated[
+        float, typer.Option(help="Evergreen water-fill token backlog")
+    ] = 250_000_000.0,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.table,
+) -> None:
+    """Run the 3-Tier Residual Capacity Scheduler (Revenue > Hard-Deadline EDF > Evergreen)."""
+    norm_model = normalize_model_id(model)
+    cfg = load_gsu_config()
+    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+
+    report = schedule_residual_capacity(
+        provisioned_gsus=gsus,
+        tpm_per_gsu=tpm_per_gsu,
+        deadline_jobs=[
+            DeadlineJobSpec(
+                job_id="premarket-portfolio-briefings",
+                value_usd=18_000.0,
+                burndown_tokens=240_000_000.0,
+                deadline_hour=6,
+            ),
+            DeadlineJobSpec(
+                job_id="regulatory-risk-digest",
+                value_usd=12_000.0,
+                burndown_tokens=180_000_000.0,
+                deadline_hour=5,
+            ),
+            DeadlineJobSpec(
+                job_id="low-density-archive-sweep",
+                value_usd=900.0,
+                burndown_tokens=320_000_000.0,
+                deadline_hour=6,
+            ),
+        ],
+        evergreen_backfill_tokens=evergreen_tokens,
+    )
+    if output_format == OutputFormat.json:
+        typer.echo(report.model_dump_json(indent=2))
+        return
+
+    typer.echo(
+        f"=== 3-Tier Residual Capacity Schedule ({norm_model}, {report.provisioned_gsus} GSUs) ==="
+    )
+    typer.echo(
+        f"Residual PT Budget ({report.horizon_hours}h): "
+        f"{report.total_residual_pt_tokens:,.0f} burndown tokens"
+    )
+    typer.echo(
+        f"Tier-1 Admitted (EDF PT):    {report.admitted_deadline_tokens:,.0f} tokens ($0 marginal)"
+    )
+    typer.echo(
+        f"Tier-1 Spilled (0.5x Flex):  {report.spilled_deadline_tokens:,.0f} tokens "
+        f"(${report.flex_spillover_cost_usd:,.2f})"
+    )
+    typer.echo(
+        f"Tier-2 Evergreen Water-Fill: {report.evergreen_waterfilled_tokens:,.0f} tokens ($0)"
+    )
+    for j in report.jobs:
+        typer.echo(
+            f"  - {j.job_id}: status={j.status} | deadline=T+{j.deadline_hour}h | "
+            f"density=${j.value_density_per_1m_tokens:.2f}/1M | cost=${j.marginal_cost_usd:.2f}"
+        )
 
 
 @app.command()

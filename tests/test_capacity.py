@@ -5,6 +5,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +16,7 @@ from capacity.api import app as fastapi_app
 from capacity.burst import (
     compute_weighted_burndown_tokens,
     evaluate_micro_burst_window,
+    evaluate_model_tier_prefix_cache,
     evaluate_prefix_cache_dilution,
 )
 from capacity.capacity import (
@@ -34,12 +36,22 @@ from capacity.core import (
     holts_linear_trend,
     percentile,
 )
-from capacity.finops import compute_focus_chargeback, optimize_hybrid_commitment
+from capacity.finops import (
+    compute_finops_kpis,
+    compute_focus_chargeback,
+    evaluate_batch_scavenger_economics,
+    evaluate_folder_pooling,
+    optimize_hybrid_commitment,
+    schedule_residual_capacity,
+)
+from capacity.gateway import audit_litellm_scaling, generate_gateway_bundle
+from capacity.models import DeadlineJobSpec
 from capacity.self_hosted import (
     DEFAULT_SELF_HOSTED_PROFILES,
     evaluate_self_hosted_endpoint,
     load_inference_server_file,
     parse_inference_server_telemetry,
+    size_disaggregated_prefill_decode,
 )
 
 runner = CliRunner()
@@ -173,10 +185,10 @@ async def test_fetch_throughput_regional_bucketing_and_folder_map() -> None:
         _make_fake_ts("gemini-3.8-flash", "us-central1", "shared", [(t0, 20_900)]),
     ]
 
-    captured_requests: list[dict] = []
+    captured_requests: list[dict[str, Any]] = []
 
     class _FakeClient:
-        async def list_time_series(self, request: dict) -> _AsyncSeriesIterator:
+        async def list_time_series(self, request: dict[str, Any]) -> _AsyncSeriesIterator:
             captured_requests.append(request)
             if '"dedicated"' in request["filter"]:
                 return _AsyncSeriesIterator(fake_dedicated)
@@ -220,7 +232,7 @@ async def test_fetch_throughput_self_hosted_mode() -> None:
     ]
 
     class _FakeClient:
-        async def list_time_series(self, request: dict) -> _AsyncSeriesIterator:
+        async def list_time_series(self, request: dict[str, Any]) -> _AsyncSeriesIterator:
             return _AsyncSeriesIterator(fake_preds)
 
     with patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_FakeClient()):
@@ -498,6 +510,193 @@ def test_fastapi_endpoints() -> None:
     cb_data = r_cb.json()
     assert cb_data["total_commitment_cost_usd"] == pytest.approx(20_000.0)
     assert len(cb_data["tenants"]) == 2
+
+    r_mt = client.post(
+        "/api/v1/prefix-cache/model-tier",
+        json={"model": "gemini-3.8-flash", "dynamic_header_offset_tokens": 120},
+    )
+    assert r_mt.status_code == 200
+    assert r_mt.json()["block_zero_contaminated"] is True
+
+    r_disagg = client.post(
+        "/api/v1/self-hosted/disaggregated",
+        json={"profile": "llama-3.3-70b-fp8", "peak_qps": 18.0},
+    )
+    assert r_disagg.status_code == 200
+    assert r_disagg.json()["prefill_replicas"] >= 1
+
+    r_gw = client.post(
+        "/api/v1/gateway/config",
+        json={"model": "gemini-3.8-flash", "provisioned_gsus": 20, "target_rps": 650},
+    )
+    assert r_gw.status_code == 200
+    assert "litellm_config_yaml" in r_gw.json()
+
+    r_scav = client.post("/api/v1/finops/scavenger", json={"provisioned_gsus": 20})
+    assert r_scav.status_code == 200
+    assert r_scav.json()["double_payment_waste_avoided_usd"] > 0.0
+
+    r_sched = client.post("/api/v1/finops/schedule", json={"provisioned_gsus": 20})
+    assert r_sched.status_code == 200
+    assert r_sched.json()["admitted_deadline_tokens"] > 0.0
+
+    r_fpool = client.post("/api/v1/finops/folder-pooling", json={"percentile_target": 90})
+    assert r_fpool.status_code == 200
+    assert r_fpool.json()["stranded_gsus_saved"] > 0
+
+    r_kpis = client.post("/api/v1/finops/kpis", json={"verified_outcomes": 100_000})
+    assert r_kpis.status_code == 200
+    assert r_kpis.json()["cpvo_usd"] > 0.0
+
+
+def test_model_tier_prefix_cache_block0_and_argon_checkpointing() -> None:
+    flash_bad = evaluate_model_tier_prefix_cache(
+        model="gemini-3.8-flash-rc1",
+        total_input_tokens=18_000,
+        static_prefix_tokens=14_000,
+        dynamic_header_offset_tokens=120,
+        single_turn_request=True,
+        dummy_turn_anchor_applied=False,
+    )
+    assert flash_bad.normalized_model == "gemini-3.8-flash"
+    assert flash_bad.checkpoint_granularity == "block_4096"
+    assert flash_bad.min_prefix_floor_tokens == 6_144
+    assert flash_bad.block_zero_contaminated is True
+    assert flash_bad.aligned_cacheable_tokens == 0
+    assert flash_bad.effective_cache_hit_rate == 0.0
+    assert flash_bad.burndown_waste_pct > 40.0
+
+    argon_good = evaluate_model_tier_prefix_cache(
+        model="gemini-4-argon",
+        total_input_tokens=18_000,
+        static_prefix_tokens=14_000,
+        dynamic_header_offset_tokens=None,
+        single_turn_request=False,
+        strip_thought_signatures=False,
+    )
+    assert argon_good.checkpoint_granularity == "token_boundary"
+    assert argon_good.min_prefix_floor_tokens == 2_048
+    assert argon_good.block_zero_contaminated is False
+    assert argon_good.aligned_cacheable_tokens == 14_000
+    assert argon_good.effective_cache_hit_rate == pytest.approx(0.70, abs=0.01)
+
+    stripped_sig = evaluate_model_tier_prefix_cache(
+        model="gemini-4-argon",
+        total_input_tokens=18_000,
+        static_prefix_tokens=14_000,
+        dynamic_header_offset_tokens=None,
+        strip_thought_signatures=True,
+    )
+    assert stripped_sig.routing_affinity_hit_rate == pytest.approx(0.0077)
+    assert stripped_sig.burndown_waste_pct > 45.0
+
+    fast_tier = evaluate_model_tier_prefix_cache(
+        model="gemini-3.8-flash-fast",
+        total_input_tokens=18_000,
+        static_prefix_tokens=12_288,
+        dynamic_header_offset_tokens=None,
+    )
+    assert fast_tier.fast_decode_speedup_multiplier == pytest.approx(2.5)
+    assert fast_tier.fast_decode_cost_multiplier == pytest.approx(2.0)
+
+
+def test_disaggregated_prefill_decode_and_multi_gateway_bundle() -> None:
+    disagg = size_disaggregated_prefill_decode(
+        profile="llama-3.3-70b-fp8",
+        peak_qps=18.0,
+        avg_input_tokens=6_400,
+        avg_output_tokens=450,
+    )
+    assert disagg.prefill_replicas >= 1
+    assert disagg.decode_replicas >= 1
+    assert disagg.monolithic_replicas >= disagg.total_disaggregated_replicas
+
+    audit_high = audit_litellm_scaling(
+        provisioned_gsus=60,
+        target_rps=2_200,
+        concurrent_sse_streams=1_200,
+        pods=16,
+        uvicorn_workers_per_pod=4,
+    )
+    assert audit_high.total_prisma_rust_engines == 64
+    assert audit_high.anti_blackhole_cooldown_seconds == 2
+    assert audit_high.scale_status == "migrate_dataplane_to_envoy"
+
+    bundle = generate_gateway_bundle(
+        model="gemini-3.8-flash-001",
+        provisioned_gsus=20,
+        target_rps=650,
+    )
+    assert bundle.normalized_model == "gemini-3.8-flash"
+    assert len(bundle.header_policies) == 8
+    assert "use_redis_transaction_buffer: true" in bundle.litellm_config_yaml
+    assert "BurndownAndTrafficTypeLogger" in bundle.litellm_burndown_callback_py
+    assert "vertex_burndown_tokens" in bundle.envoy_ai_gateway_yaml
+    assert "prefix-cache-scorer" in bundle.gke_epp_inference_pool_yaml
+
+
+def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) -> None:
+    scav = evaluate_batch_scavenger_economics(
+        model="gemini-3.8-flash",
+        provisioned_gsus=20,
+        tpm_per_gsu=120_900,
+        daytime_active_utilization_pct=24.0,
+        batch_monthly_burndown_tokens=45_000_000_000.0,
+    )
+    assert scav.tokens_harvested_on_free_pt == pytest.approx(45_000_000_000.0)
+    assert scav.double_payment_waste_avoided_usd == pytest.approx(11_250.0)
+    assert scav.effective_utilization_after_scavenging_pct > 60.0
+
+    sched = schedule_residual_capacity(
+        provisioned_gsus=20,
+        tpm_per_gsu=120_900,
+        deadline_jobs=[
+            DeadlineJobSpec(
+                job_id="high-value-briefing",
+                value_usd=18_000.0,
+                burndown_tokens=240_000_000.0,
+                deadline_hour=6,
+            ),
+            DeadlineJobSpec(
+                job_id="huge-low-value-sweep",
+                value_usd=900.0,
+                burndown_tokens=600_000_000.0,
+                deadline_hour=6,
+            ),
+        ],
+    )
+    by_id = {j.job_id: j for j in sched.jobs}
+    assert by_id["high-value-briefing"].status == "admitted_edf_pt"
+    assert by_id["huge-low-value-sweep"].status == "spilled_or_aborted"
+
+    fpool = evaluate_folder_pooling(
+        hourly_tpm_by_project={
+            "emea": [480_000.0, 40_000.0],
+            "amer": [40_000.0, 480_000.0],
+        },
+        tpm_per_gsu=120_900,
+    )
+    assert fpool.siloed_total_gsus == 8
+    assert fpool.pooled_folder_gsus == 5
+    assert fpool.stranded_gsus_saved == 3
+
+    kpis = compute_finops_kpis()
+    assert kpis.cpvo_usd == pytest.approx(0.175)
+    assert kpis.csr_pct > 60.0
+
+    html_out = tmp_path / "scorecard.html"
+    res_demo = runner.invoke(cli_app, ["demo", "--html-out", str(html_out)])
+    assert res_demo.exit_code == 0
+    assert html_out.is_file()
+    assert "Capacity Showcase Workbench (v0.3.0)" in html_out.read_text(encoding="utf-8")
+
+    res_gw = runner.invoke(cli_app, ["gateway", "--target", "litellm", "--gsus", "20"])
+    assert res_gw.exit_code == 0
+    assert "litellm_config.yaml" in res_gw.stdout
+
+    res_sched = runner.invoke(cli_app, ["schedule", "--gsus", "20"])
+    assert res_sched.exit_code == 0
+    assert "admitted_edf_pt" in res_sched.stdout
 
 
 def test_percentile_demo_and_filter_helpers() -> None:

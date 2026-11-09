@@ -1,0 +1,127 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" font-family="DejaVu Sans, Arial, Helvetica, sans-serif">
+  <!-- Canvas Background -->
+  <rect x="0" y="0" width="1280" height="720" fill="#f8f9fa"/>
+
+  <!-- Solid Raster-Safe Header Banner -->
+  <rect x="20" y="16" width="1240" height="82" rx="12" fill="#174ea6"/>
+  <rect x="20" y="16" width="1240" height="8" rx="4" fill="#1a73e8"/>
+  <text x="44" y="54" fill="#ffffff" font-size="22" font-weight="700">Capacity: AI Serving Physics, Gateway Policy Compiler &amp; FOCUS 1.2 FinOps</text>
+  <text x="44" y="80" fill="#e8f0fe" font-size="13.5" font-weight="500">Compiles Cloud Monitoring, vLLM Prometheus &amp; OTel Traces into Sizing Plans, Gateway YAML &amp; Two-Pool Chargeback</text>
+
+  <!-- Column 1: Trace Ingest & Sizing (x=20..304) -->
+  <rect x="20" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
+  <rect x="20" y="114" width="284" height="44" rx="12" fill="#e8f0fe"/>
+  <rect x="20" y="146" width="284" height="12" fill="#e8f0fe"/>
+  <text x="38" y="142" fill="#174ea6" font-size="15" font-weight="700">1. Trace Ingest &amp; Sizing</text>
+
+  <rect x="34" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
+  <rect x="48" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
+  <text x="56" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
+  <text x="48" y="238" fill="#202124" font-size="14" font-weight="700">24x7 Zero-Pad &amp; Quota Lock</text>
+  <text x="48" y="266" fill="#3c4043" font-size="12.5">• 8x5 traffic gives P50 = 0 GSUs</text>
+  <text x="48" y="292" fill="#3c4043" font-size="12.5">• Siloed projects strand capacity</text>
+  <text x="48" y="318" fill="#3c4043" font-size="12.5">• GPU max_replicas locks quota</text>
+  <text x="48" y="352" fill="#c5221f" font-size="12" font-weight="700">60%+ overnight idle reservation</text>
+
+  <rect x="34" y="396" width="256" height="216" rx="10" fill="#e8f0fe" stroke="#1a73e8" stroke-width="1.5"/>
+  <rect x="48" y="412" width="136" height="22" rx="4" fill="#1a73e8"/>
+  <text x="56" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
+  <text x="48" y="458" fill="#202124" font-size="14" font-weight="700">Active-Hours &amp; Pool Sizer</text>
+  <text x="48" y="486" fill="#3c4043" font-size="12.5">• Active-window Newsvendor target</text>
+  <text x="48" y="512" fill="#3c4043" font-size="12.5">• Shared Folder RHPT (-33% GSUs)</text>
+  <text x="48" y="538" fill="#3c4043" font-size="12.5">• Disaggregated Prefill / Decode</text>
+  <text x="48" y="564" fill="#3c4043" font-size="12.5">• Cloud Mon, vLLM &amp; OTel inputs</text>
+  <text x="48" y="594" fill="#174ea6" font-size="12" font-weight="700">CLI: capacity recommend</text>
+
+  <!-- Explicit Connector 1 -> 2 (x=304..338) -->
+  <rect x="306" y="370" width="18" height="4" fill="#1a73e8"/>
+  <polygon points="322,364 336,372 322,380" fill="#1a73e8"/>
+
+  <!-- Column 2: Burst & Cache Physics (x=338..622) -->
+  <rect x="338" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
+  <rect x="338" y="114" width="284" height="44" rx="12" fill="#fef7e0"/>
+  <rect x="338" y="146" width="284" height="12" fill="#fef7e0"/>
+  <text x="356" y="142" fill="#b06000" font-size="15" font-weight="700">2. Burst &amp; Cache Physics</text>
+
+  <rect x="352" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
+  <rect x="366" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
+  <text x="374" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
+  <text x="366" y="238" fill="#202124" font-size="14" font-weight="700">60s Illusion &amp; Cache Loss</text>
+  <text x="366" y="266" fill="#3c4043" font-size="12.5">• &lt;70% 60s chart hides 1s 429s</text>
+  <text x="366" y="292" fill="#3c4043" font-size="12.5">• &gt;200K cliff bills 7.5x output</text>
+  <text x="366" y="318" fill="#3c4043" font-size="12.5">• Block-0 UUIDs &amp; 1/N dilution</text>
+  <text x="366" y="352" fill="#c5221f" font-size="12" font-weight="700">Stripped sigs drop cache to 0.8%</text>
+
+  <rect x="352" y="396" width="256" height="216" rx="10" fill="#fef7e0" stroke="#b06000" stroke-width="1.5"/>
+  <rect x="366" y="412" width="136" height="22" rx="4" fill="#b06000"/>
+  <text x="374" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
+  <text x="366" y="458" fill="#202124" font-size="14" font-weight="700">Burndown &amp; Prefix Auditor</text>
+  <text x="366" y="486" fill="#3c4043" font-size="12.5">• 1s (&gt;=50 GSU) &amp; 10s buckets</text>
+  <text x="366" y="512" fill="#3c4043" font-size="12.5">• Exact &lt;=200K vs &gt;200K weights</text>
+  <text x="366" y="538" fill="#3c4043" font-size="12.5">• 4,096 Block-0 &amp; Turn-0 anchor</text>
+  <text x="366" y="564" fill="#3c4043" font-size="12.5">• thought_signature preservation</text>
+  <text x="366" y="594" fill="#b06000" font-size="12" font-weight="700">CLI: capacity optimize</text>
+
+  <!-- Explicit Connector 2 -> 3 (x=622..656) -->
+  <rect x="624" y="370" width="18" height="4" fill="#1a73e8"/>
+  <polygon points="640,364 654,372 640,380" fill="#1a73e8"/>
+
+  <!-- Column 3: Gateway Policy Compiler (x=656..940) -->
+  <rect x="656" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
+  <rect x="656" y="114" width="284" height="44" rx="12" fill="#e8f0fe"/>
+  <rect x="656" y="146" width="284" height="12" fill="#e8f0fe"/>
+  <text x="674" y="142" fill="#174ea6" font-size="15" font-weight="700">3. Gateway Policy (Pick 1)</text>
+
+  <rect x="670" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
+  <rect x="684" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
+  <text x="692" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
+  <text x="684" y="238" fill="#202124" font-size="14" font-weight="700">Raw TPM &amp; PT Blackholing</text>
+  <text x="684" y="266" fill="#3c4043" font-size="12.5">• Raw 60s TPM misses 4x-7.5x out</text>
+  <text x="684" y="292" fill="#3c4043" font-size="12.5">• 1s 429s trigger router cooldown</text>
+  <text x="684" y="318" fill="#3c4043" font-size="12.5">• Prisma locks DB above 500 RPS</text>
+  <text x="684" y="352" fill="#c5221f" font-size="12" font-weight="700">Bursting team starves peer PT</text>
+
+  <rect x="670" y="396" width="256" height="216" rx="10" fill="#e8f0fe" stroke="#1a73e8" stroke-width="1.5"/>
+  <rect x="684" y="412" width="136" height="22" rx="4" fill="#1a73e8"/>
+  <text x="692" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
+  <text x="684" y="458" fill="#202124" font-size="14" font-weight="700">Drop-In Gateway Manifests</text>
+  <text x="684" y="486" fill="#3c4043" font-size="12.5">• LiteLLM YAML + CustomLogger</text>
+  <text x="684" y="512" fill="#3c4043" font-size="12.5">• Envoy AIGatewayRoute post-SSE</text>
+  <text x="684" y="538" fill="#3c4043" font-size="12.5">• GKE epp prefix/KV cache scorer</text>
+  <text x="684" y="564" fill="#3c4043" font-size="12.5">• 8 header-pair spillover tiers</text>
+  <text x="684" y="594" fill="#174ea6" font-size="12" font-weight="700">CLI: capacity gateway</text>
+
+  <!-- Explicit Connector 3 -> 4 (x=940..974) -->
+  <rect x="942" y="370" width="18" height="4" fill="#137333"/>
+  <polygon points="958,364 972,372 958,380" fill="#137333"/>
+
+  <!-- Column 4: Backfill & FOCUS 1.2 FinOps (x=974..1258) -->
+  <rect x="974" y="114" width="286" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
+  <rect x="974" y="114" width="286" height="44" rx="12" fill="#e6f4ea"/>
+  <rect x="974" y="146" width="286" height="12" fill="#e6f4ea"/>
+  <text x="992" y="142" fill="#137333" font-size="15" font-weight="700">4. Backfill &amp; FOCUS 1.2</text>
+
+  <rect x="988" y="176" width="258" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
+  <rect x="1002" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
+  <text x="1010" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
+  <text x="1002" y="238" fill="#202124" font-size="14" font-weight="700">Batch Double-Pay &amp; Raw Split</text>
+  <text x="1002" y="266" fill="#3c4043" font-size="12.5">• 0.5x Batch ignores sunk 24x7 PT</text>
+  <text x="1002" y="292" fill="#3c4043" font-size="12.5">• Raw tokens underbill 4x decode</text>
+  <text x="1002" y="318" fill="#3c4043" font-size="12.5">• Idle PT taxes early adopters 3x</text>
+  <text x="1002" y="352" fill="#c5221f" font-size="12" font-weight="700">Pays twice while PT sits empty</text>
+
+  <rect x="988" y="396" width="258" height="216" rx="10" fill="#e6f4ea" stroke="#137333" stroke-width="1.5"/>
+  <rect x="1002" y="412" width="136" height="22" rx="4" fill="#137333"/>
+  <text x="1010" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
+  <text x="1002" y="458" fill="#202124" font-size="14" font-weight="700">$0 Scavenger &amp; Two-Pool</text>
+  <text x="1002" y="486" fill="#3c4043" font-size="12.5">• 3-Tier EDF reclaims idle PT ($0)</text>
+  <text x="1002" y="512" fill="#3c4043" font-size="12.5">• Active vs Idle FOCUS 1.2 pools</text>
+  <text x="1002" y="538" fill="#3c4043" font-size="12.5">• 5 KPIs: CPWT_1M, CPVO, TER,</text>
+  <text x="1002" y="564" fill="#3c4043" font-size="12.5">  CSR &amp; 168h ECUR_168h</text>
+  <text x="1002" y="594" fill="#137333" font-size="12" font-weight="700">CLI: schedule &amp; chargeback</text>
+
+  <!-- Bottom Stateless Compiler Summary Strip -->
+  <rect x="20" y="646" width="1240" height="56" rx="10" fill="#ffffff" stroke="#1a73e8" stroke-width="1.5"/>
+  <text x="44" y="679" fill="#174ea6" font-size="13.5" font-weight="700">Stateless Offline Compiler:</text>
+  <text x="242" y="679" fill="#3c4043" font-size="13">Zero cloud credentials needed locally (uv run capacity demo) • Pick 1 gateway target • Export JSON plans to Kueue, Airflow &amp; BigQuery</text>
+</svg>

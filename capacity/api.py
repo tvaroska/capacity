@@ -1,4 +1,4 @@
-"""FastAPI REST service & interactive GM3 Light Web Portal for `capacity`."""
+"""FastAPI REST service & interactive GM3 Light Web Calculator for `capacity` (`v0.3.0`)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from capacity.burst import (
     compute_weighted_burndown_tokens,
     evaluate_micro_burst_window,
+    evaluate_model_tier_prefix_cache,
     evaluate_prefix_cache_dilution,
 )
 from capacity.capacity import (
@@ -29,34 +30,55 @@ from capacity.core import (
 )
 from capacity.finops import (
     DEFAULT_TENANT_RAW_TOKEN_WEIGHTS,
+    compute_finops_kpis,
     compute_focus_chargeback,
+    evaluate_batch_scavenger_economics,
+    evaluate_folder_pooling,
     optimize_hybrid_commitment,
+    schedule_residual_capacity,
 )
+from capacity.gateway import generate_gateway_bundle
 from capacity.models import (
+    BatchScavengerAudit,
+    BatchScavengerRequest,
     ChargebackRequest,
+    DisaggregatedPoolRequest,
+    DisaggregatedPoolSizing,
+    FinOpsKpiRequest,
+    FinOpsKpiScorecard,
     FocusChargebackReport,
+    FolderPoolingReport,
+    FolderPoolingRequest,
+    GatewayConfigBundle,
+    GatewayConfigRequest,
+    ModelTierPrefixCacheAudit,
+    ModelTierPrefixCacheRequest,
     OptimizeRequest,
     OptimizeResponse,
     RecommendationResponse,
+    ResidualScheduleReport,
+    ResidualScheduleRequest,
 )
+from capacity.portal import render_showcase_portal_html
 from capacity.self_hosted import (
     SelfHostedEndpointAudit,
     VllmTelemetrySnapshot,
     evaluate_self_hosted_endpoint,
     parse_inference_server_telemetry,
     resolve_self_hosted_profile,
+    size_disaggregated_prefill_decode,
 )
 
 load_dotenv()
 
 app = FastAPI(
-    title="Capacity - AI Capacity & FinOps Engine",
+    title="Capacity - AI Capacity, Multi-Gateway & FOCUS 1.2 FinOps Showcase",
     description=(
-        "Empirical active-hours sizing, sub-second micro-burst & KV-cache physics, "
-        "Newsvendor hybrid commitment optimizer, and FOCUS 1.2 Two-Pool Chargeback "
-        "across Managed Gemini Platform GSUs and Self-Hosted GPU/TPU Replicas."
+        "Empirical active-hours sizing, sub-second micro-burst & model-tier prefix-cache physics, "
+        "LiteLLM / Envoy AI Gateway / K8s epp config generation, Newsvendor hybrid commitment "
+        "optimizer, 3-Tier Residual Capacity Scheduler, and FOCUS 1.2 Two-Pool Chargeback."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
 
 
@@ -87,130 +109,9 @@ class VllmParseRequest(BaseModel):
     default_model: str = "llama-3.3-70b-fp8"
 
 
-_FAVICON_URI = (
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E"
-    "%3Crect width='64' height='64' rx='14' fill='%231a73e8'/%3E"
-    "%3Cpath d='M16 44V28h8v16zm12 0V18h8v26zm12 0V32h8v12z' fill='%23ffffff'/%3E"
-    "%3Ccircle cx='44' cy='20' r='6' fill='%23fbbc04'/%3E%3C/svg%3E"
-)
-
-_PORTAL_HTML = f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Capacity - AI Capacity & FOCUS 1.2 FinOps Portal</title>
-  <link rel="icon" type="image/svg+xml" href="{_FAVICON_URI}" />
-  <style>
-    :root {{
-      --bg: #f8f9fa;
-      --surface: #ffffff;
-      --border: #dadce0;
-      --text: #202124;
-      --muted: #5f6368;
-      --primary: #1a73e8;
-      --success: #137333;
-      --warn: #b06000;
-    }}
-    body {{
-      margin: 0;
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-    }}
-    header {{
-      background: var(--surface);
-      border-bottom: 1px solid var(--border);
-      padding: 14px 24px;
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-    }}
-    .container {{
-      max-width: 1120px;
-      margin: 24px auto;
-      padding: 0 20px;
-      display: grid;
-      gap: 20px;
-    }}
-    .card {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 20px;
-    }}
-    h1 {{ font-size: 18px; margin: 0; color: var(--primary); }}
-    h2 {{ font-size: 15px; margin: 0 0 12px 0; }}
-    .grid-3 {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-      gap: 16px;
-    }}
-    .metric {{ font-size: 26px; font-weight: 700; color: var(--primary); margin-top: 4px; }}
-    .sub {{ font-size: 12px; color: var(--muted); }}
-    code {{
-      background: #e8f0fe;
-      color: #174ea6;
-      padding: 2px 6px;
-      border-radius: 4px;
-      font-size: 12px;
-    }}
-  </style>
-</head>
-<body>
-  <header>
-    <h1>Capacity - Managed GSU & Self-Hosted GPU FinOps Engine (v0.2.0)</h1>
-    <span class="sub">Interactive REST Portal · <a href="/docs">/docs (OpenAPI)</a></span>
-  </header>
-  <div class="container">
-    <div class="card">
-      <h2>4-Stage Capacity & FOCUS 1.2 FinOps Pipeline</h2>
-      <div class="grid-3">
-        <div>
-          <div class="sub">1. Empirical Sizing + Holt Forecast</div>
-          <div class="metric">Active-Hours P50-P99</div>
-          <p class="sub">
-            Prevents 8x5 diurnal zero-padding collapse across Managed GSUs
-            and Vertex Self-Hosted GPU replicas.
-          </p>
-        </div>
-        <div>
-          <div class="sub">2. Micro-Burst & 1/N KV Physics</div>
-          <div class="metric">1s / 10s Token Bucket</div>
-          <p class="sub">
-            Catches the &lt;70% 60s monitoring illusion, &gt;200K context cliffs,
-            and 1/N round-robin prefix dilution.
-          </p>
-        </div>
-        <div>
-          <div class="sub">3. Newsvendor + FOCUS 1.2 Ledger</div>
-          <div class="metric">Two-Pool Chargeback</div>
-          <p class="sub">
-            Separates Weighted Active Consumed Cost from Unallocated Idle Cost
-            plus off-peak batch water-filling.
-          </p>
-        </div>
-      </div>
-    </div>
-    <div class="card">
-      <h2>REST Endpoints</h2>
-      <p class="sub">
-        <code>GET /api/v1/recommendations?project=demo&amp;demo=true&amp;active_only=true</code> ·
-        <code>POST /api/v1/optimize</code> ·
-        <code>POST /api/v1/self-hosted/audit</code> ·
-        <code>POST /api/v1/vllm/parse</code> ·
-        <code>POST /api/v1/chargeback</code>
-      </p>
-    </div>
-  </div>
-</body>
-</html>
-"""
-
-
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    return HTMLResponse(content=_PORTAL_HTML)
+    return HTMLResponse(content=render_showcase_portal_html())
 
 
 @app.get("/healthz")
@@ -324,6 +225,24 @@ async def post_optimize(req: OptimizeRequest) -> OptimizeResponse:
     )
 
 
+@app.post("/api/v1/prefix-cache/model-tier", response_model=ModelTierPrefixCacheAudit)
+async def post_model_tier_prefix_cache(
+    req: ModelTierPrefixCacheRequest,
+) -> ModelTierPrefixCacheAudit:
+    return evaluate_model_tier_prefix_cache(
+        model=req.model,
+        total_input_tokens=req.total_input_tokens,
+        static_prefix_tokens=req.static_prefix_tokens,
+        output_tokens=req.output_tokens,
+        thoughts_tokens=req.thoughts_tokens,
+        dynamic_header_offset_tokens=req.dynamic_header_offset_tokens,
+        single_turn_request=req.single_turn_request,
+        dummy_turn_anchor_applied=req.dummy_turn_anchor_applied,
+        strip_thought_signatures=req.strip_thought_signatures,
+        num_replicas=req.num_replicas,
+    )
+
+
 @app.post("/api/v1/self-hosted/audit", response_model=SelfHostedEndpointAudit)
 async def post_self_hosted_audit(
     req: SelfHostedAuditRequest,
@@ -343,10 +262,39 @@ async def post_self_hosted_audit(
     )
 
 
+@app.post("/api/v1/self-hosted/disaggregated", response_model=DisaggregatedPoolSizing)
+async def post_disaggregated_sizing(
+    req: DisaggregatedPoolRequest,
+) -> DisaggregatedPoolSizing:
+    return size_disaggregated_prefill_decode(
+        profile=req.profile,
+        peak_qps=req.peak_qps,
+        avg_input_tokens=req.avg_input_tokens,
+        avg_output_tokens=req.avg_output_tokens,
+        target_ttft_ms=req.target_ttft_ms,
+        target_tpot_ms=req.target_tpot_ms,
+    )
+
+
 @app.post("/api/v1/vllm/parse", response_model=VllmTelemetrySnapshot)
 async def post_vllm_parse(req: VllmParseRequest) -> VllmTelemetrySnapshot:
     return parse_inference_server_telemetry(
         req.raw_content, default_model=req.default_model
+    )
+
+
+@app.post("/api/v1/gateway/config", response_model=GatewayConfigBundle)
+async def post_gateway_config(req: GatewayConfigRequest) -> GatewayConfigBundle:
+    return generate_gateway_bundle(
+        model=req.model,
+        project_id=req.project_id,
+        location=req.location,
+        provisioned_gsus=req.provisioned_gsus,
+        target_rps=req.target_rps,
+        concurrent_sse_streams=req.concurrent_sse_streams,
+        pods=req.pods,
+        uvicorn_workers_per_pod=req.uvicorn_workers_per_pod,
+        self_hosted_model=req.self_hosted_model,
     )
 
 
@@ -367,4 +315,65 @@ async def post_chargeback(req: ChargebackRequest) -> FocusChargebackReport:
             if req.tenant_raw_token_weights is not None
             else DEFAULT_TENANT_RAW_TOKEN_WEIGHTS
         ),
+    )
+
+
+@app.post("/api/v1/finops/scavenger", response_model=BatchScavengerAudit)
+async def post_batch_scavenger(req: BatchScavengerRequest) -> BatchScavengerAudit:
+    norm_model = normalize_model_id(req.model)
+    cfg = load_gsu_config()
+    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    return evaluate_batch_scavenger_economics(
+        model=norm_model,
+        provisioned_gsus=req.provisioned_gsus,
+        tpm_per_gsu=tpm_per_gsu,
+        gsu_monthly_price_usd=req.gsu_monthly_price_usd,
+        daytime_active_utilization_pct=req.daytime_active_utilization_pct,
+        batch_monthly_burndown_tokens=req.batch_monthly_burndown_tokens,
+        paygo_per_1m_burndown_tokens_usd=req.paygo_per_1m_burndown_tokens_usd,
+    )
+
+
+@app.post("/api/v1/finops/schedule", response_model=ResidualScheduleReport)
+async def post_residual_schedule(req: ResidualScheduleRequest) -> ResidualScheduleReport:
+    norm_model = normalize_model_id(req.model)
+    cfg = load_gsu_config()
+    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    return schedule_residual_capacity(
+        provisioned_gsus=req.provisioned_gsus,
+        tpm_per_gsu=tpm_per_gsu,
+        safety_headroom_ratio=req.safety_headroom_ratio,
+        revenue_tpm_by_hour=req.revenue_tpm_by_hour,
+        deadline_jobs=req.deadline_jobs,
+        evergreen_backfill_tokens=req.evergreen_backfill_tokens,
+        paygo_per_1m_burndown_tokens_usd=req.paygo_per_1m_burndown_tokens_usd,
+    )
+
+
+@app.post("/api/v1/finops/folder-pooling", response_model=FolderPoolingReport)
+async def post_folder_pooling(req: FolderPoolingRequest) -> FolderPoolingReport:
+    norm_model = normalize_model_id(req.model)
+    cfg = load_gsu_config()
+    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    return evaluate_folder_pooling(
+        hourly_tpm_by_project=req.hourly_tpm_by_project,
+        model=norm_model,
+        tpm_per_gsu=tpm_per_gsu,
+        percentile_target=req.percentile_target,
+        gsu_monthly_price_usd=req.gsu_monthly_price_usd,
+    )
+
+
+@app.post("/api/v1/finops/kpis", response_model=FinOpsKpiScorecard)
+async def post_finops_kpis(req: FinOpsKpiRequest) -> FinOpsKpiScorecard:
+    return compute_finops_kpis(
+        total_amortized_cost_usd=req.total_amortized_cost_usd,
+        uncached_input_tokens=req.uncached_input_tokens,
+        cached_input_tokens=req.cached_input_tokens,
+        delivered_output_tokens=req.delivered_output_tokens,
+        thinking_tokens=req.thinking_tokens,
+        retry_and_judge_tokens=req.retry_and_judge_tokens,
+        verified_outcomes=req.verified_outcomes,
+        hourly_reserved_burndown_capacity=req.hourly_reserved_burndown_capacity,
+        weekly_consumed_burndown_tokens=req.weekly_consumed_burndown_tokens,
     )

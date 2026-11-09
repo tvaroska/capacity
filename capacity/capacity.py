@@ -30,9 +30,12 @@ DEFAULT_GSU_CONFIG: dict[str, int] = {
     "gemini-3.5-flash-lite": 241_800,  # 4,030 TPS/GSU
     "gemini-3.6-flash": 120_900,       # 2,015 TPS/GSU
     "gemini-3.7-flash": 120_900,       # 2,015 TPS/GSU
+    "gemini-3.7-flash-fast": 60_450,   # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
     "gemini-3.8-flash": 120_900,       # 2,015 TPS/GSU
+    "gemini-3.8-flash-fast": 60_450,   # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
     "gemini-4-argon": 30_000,          # 500 TPS/GSU
     "gemini-4.0-pro": 30_000,          # 500 TPS/GSU
+    "gemini-embedding-2": 302_400,     # 5,040 TPS/GSU (256-token minimum request floor)
     "gemini-2.0-flash": 161_400,       # 2,690 TPS/GSU
     "gemini-2.0-flash-lite": 484_200,  # 8,070 TPS/GSU
 }
