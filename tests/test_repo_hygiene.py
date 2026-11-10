@@ -10,8 +10,13 @@ Verifies that `capacity` remains 100% portable and free of:
 
 from __future__ import annotations
 
+import ast
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -98,3 +103,64 @@ def test_all_relative_markdown_links_resolve_within_repo() -> None:
             elif not target.exists():
                 broken.append(f"{md_file.relative_to(REPO_ROOT)}: {raw_target}")
     assert not broken, "Broken or escaping markdown links found:\n" + "\n".join(broken)
+
+
+def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
+    rules_path = REPO_ROOT / "specs" / "ast.rules.yaml"
+    assert rules_path.is_file(), "Missing specs/ast.rules.yaml declarative AST contract"
+    raw = rules_path.read_text(encoding="utf-8")
+    blocks = [
+        c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)
+    ]
+    assert len(blocks) >= 4, "Expected >= 4 rules in specs/ast.rules.yaml"
+
+    ast_grep = shutil.which("ast-grep") or str(
+        Path.home() / ".local" / "bin" / "ast-grep"
+    )
+    if not Path(ast_grep).is_file():
+        pytest.skip("ast-grep binary not installed on this runner")
+
+    live = subprocess.run(  # noqa: S603
+        [ast_grep, "scan", "--rule", str(rules_path)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert live.returncode == 0, f"AST scan failed:\n{live.stdout}\n{live.stderr}"
+
+    for idx, chunk in enumerate(blocks):
+        id_m = re.search(r"(?m)^id:\s*(\S+)", chunk)
+        sev_m = re.search(r"(?m)^severity:\s*(\S+)", chunk)
+        path_m = re.search(
+            r'(?m)^\s+test_path:\s*["\']?([^"\'\r\n]+)["\']?\s*$', chunk
+        )
+        assert id_m is not None and sev_m is not None and path_m is not None
+        rule_id = id_m.group(1)
+        assert sev_m.group(1) == "error", f"{rule_id} must set severity: error"
+
+        case_dir = tmp_path / f"case_{idx}_{rule_id}"
+        target_file = case_dir / path_m.group(1)
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        single_rule = case_dir / "_rule.yaml"
+        single_rule.write_text(chunk.strip() + "\n", encoding="utf-8")
+
+        for key, expected_rc in (("invalid_examples", 1), ("valid_examples", 0)):
+            m = re.search(rf"(?m)^\s+{key}:\s*\n((?:\s+-\s+[^\r\n]+\n?)+)", chunk)
+            assert m is not None, f"{rule_id} missing metadata.{key}"
+            for line in m.group(1).splitlines():
+                stripped = line.strip()
+                if stripped.startswith("- "):
+                    snippet = str(ast.literal_eval(stripped[2:].strip()))
+                    target_file.write_text(f"{snippet}\n", encoding="utf-8")
+                    res = subprocess.run(  # noqa: S603
+                        [ast_grep, "scan", "--rule", str(single_rule), "."],
+                        cwd=case_dir,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    assert res.returncode == expected_rc, (
+                        f"{rule_id} ({key}) failed on {snippet!r}:\n{res.stdout}"
+                    )
+

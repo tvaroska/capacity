@@ -1,0 +1,83 @@
+# Declarative Structural & Security AST Contract (ast-grep)
+# Enforces Hexagonal Driving-Port isolation on pure sizing/FinOps math modules
+# and static security invariants across capacity Python modules.
+
+id: library-never-imports-examples
+language: Python
+severity: error
+message: "Hexagonal violation: capacity/ engine must never import examples/."
+files:
+  - "capacity/**/*.py"
+metadata:
+  test_path: "capacity/probe.py"
+  invalid_examples:
+    - "import examples"
+    - "from examples.demo_profile import load"
+  valid_examples:
+    - "from capacity.models import CapacityRecommendation"
+rule:
+  any:
+    - kind: import_statement
+      regex: "^import\\s+examples(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "^from\\s+examples(\\b|\\.)"
+---
+id: core-math-never-imports-driving-ports
+language: Python
+severity: error
+message: "Hexagonal violation: pure sizing/FinOps math modules must never import FastAPI or Typer driving ports."
+files:
+  - "capacity/burst.py"
+  - "capacity/finops.py"
+  - "capacity/self_hosted.py"
+  - "capacity/capacity.py"
+metadata:
+  test_path: "capacity/finops.py"
+  invalid_examples:
+    - "import fastapi"
+    - "from typer import Typer"
+  valid_examples:
+    - "from capacity.models import FinOpsChargebackResult"
+rule:
+  any:
+    - kind: import_statement
+      regex: "^import\\s+(fastapi|typer)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "^from\\s+(fastapi|typer)(\\b|\\.)"
+---
+id: no-subprocess-shell-true
+language: Python
+severity: error
+message: "Security violation: subprocess with shell=True or os.system() is forbidden."
+ignores:
+  - "tests/**"
+metadata:
+  test_path: "capacity/proc_probe.py"
+  invalid_examples:
+    - "subprocess.run(cmd, shell=True)"
+    - "subprocess.Popen(cmd, shell=True, text=True)"
+    - "os.system(cmd)"
+  valid_examples:
+    - 'subprocess.run(["gcloud", "version"], check=True)'
+rule:
+  any:
+    - pattern: subprocess.$FN($$$, shell=True)
+    - pattern: subprocess.$FN($$$, shell=True, $$$)
+    - pattern: subprocess.$FN(shell=True)
+    - pattern: subprocess.$FN(shell=True, $$$)
+    - pattern: os.system($$$)
+---
+id: no-eval-builtin
+language: Python
+severity: error
+message: "Security violation: eval() is forbidden in capacity modules."
+files:
+  - "capacity/**/*.py"
+metadata:
+  test_path: "capacity/eval_probe.py"
+  invalid_examples:
+    - "eval(expr)"
+  valid_examples:
+    - "float(raw_value)"
+rule:
+  pattern: eval($$$)

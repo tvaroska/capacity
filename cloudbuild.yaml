@@ -23,6 +23,8 @@ steps:
       - |
         set -euo pipefail
         uv sync
+        uv pip install --python /workspace/.venv/bin/python "ast-grep-cli>=0.35"
+        /workspace/.venv/bin/ast-grep scan --rule /workspace/specs/ast.rules.yaml
         /workspace/.venv/bin/ruff check capacity/ tests/
         /workspace/.venv/bin/pytest tests/ -v
 
