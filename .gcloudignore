@@ -1,0 +1,4 @@
+# Manual `gcloud builds submit` uploads: mirror the Git checkout Cloud Build triggers see.
+# gcloud's default ignore list drops .gitignore, which tests/test_repo_hygiene.py reads.
+.git
+#!include:.gitignore
