@@ -1,28 +1,11 @@
-"""Multi-gateway configuration generator & scale auditor (LiteLLM, Envoy AI Gateway, K8s epp).
-
-Generates production-hardened routing, weighted burndown rate-limiting, and KV-cache scoring
-configurations across three enterprise AI gateway layers:
-1. LiteLLM Proxy (`BerriAI/litellm`):
-   - Tag-based routing across Dedicated PT, Priority PayGo (1.8x) spillover, Non-Prod Flex (0.5x),
-     and Off-Peak PT Scavenging.
-   - Anti-blackholing `cooldown_time` and `allowed_fails` tuned to 1s (>=50 GSUs) vs 10s (<50 GSUs)
-     token-bucket refill windows.
-   - Drop-in `CustomLogger` (`litellm_burndown_callback.py`) enforcing weighted burndown token
-     quotas (`1.0x`/`0.1x`/`4.0x` at `<=200K`; `2.0x`/`0.2x`/`7.5x` at `>200K`), dynamic PT-bypass
-     header injection on team burst, and 0ms-lag `usage_metadata.traffic_type` attribution.
-   - High-QPS scale auditor (`>500-2,000 RPS`) for Prisma Rust subprocesses, Postgres row locks,
-     and Python GIL / SSE event-loop saturation.
-2. Envoy AI Gateway (`envoyproxy/ai-gateway`):
-   - Declarative `AIGatewayRoute` + `BackendTrafficPolicy` with two-phase pre-flight check
-     (`cost.request.number: 0`) and post-response `type: CEL` weighted burndown deduction.
-3. GKE Inference Gateway / K8s Gateway API Inference Extension (`epp` / `llm-d`):
-   - Declarative `InferencePool`, `InferenceObjective` (`Critical` / `Standard` / `Sheddable`), and
-     `EndpointPickerConfig` (`prefix-cache-scorer`, `kv-cache-utilization-scorer`, `queue-scorer`).
-"""
+"""Multi-gateway configuration generator & scale auditor (LiteLLM, Envoy AI Gateway, K8s epp)."""
 
 from __future__ import annotations
 
+import hashlib
 import re
+
+import yaml
 
 from capacity.capacity import load_gsu_config, normalize_model_id, require_capacity
 from capacity.models import (
@@ -33,6 +16,20 @@ from capacity.models import (
     GatewayConfigBundle,
     GatewayHeaderPolicy,
     LiteLLMScaleAudit,
+)
+
+ENVOY_BURNDOWN_CEL_EXPRESSION = (
+    "input_tokens > 200000\n"
+    "  ? int(\n"
+    "      double(input_tokens - cached_input_tokens) * 2.0\n"
+    "      + double(cached_input_tokens) * 0.2\n"
+    "      + double(output_tokens) * 7.5\n"
+    "    )\n"
+    "  : int(\n"
+    "      double(input_tokens - cached_input_tokens) * 1.0\n"
+    "      + double(cached_input_tokens) * 0.1\n"
+    "      + double(output_tokens) * 4.0\n"
+    "    )\n"
 )
 
 GATEWAY_HEADER_POLICIES: list[GatewayHeaderPolicy] = [
@@ -127,6 +124,38 @@ GATEWAY_HEADER_POLICIES: list[GatewayHeaderPolicy] = [
 ]
 
 
+class _LiteralBlockStr(str):
+    """YAML string marker serialized using `|` block style for readable CEL expressions."""
+
+
+def _literal_str_representer(dumper: yaml.SafeDumper, data: _LiteralBlockStr) -> yaml.ScalarNode:
+    return dumper.represent_scalar("tag:yaml.org,2002:str", str(data), style="|")
+
+
+class _GatewayYamlDumper(yaml.SafeDumper):
+    pass
+
+
+_GatewayYamlDumper.add_representer(_LiteralBlockStr, _literal_str_representer)
+
+
+def _k8s_dns_label(raw: str, *, prefix: str = "", suffix: str = "") -> str:
+    """Build a valid Kubernetes RFC-1035 DNS label (`<= 63` chars, `[a-z0-9-]`, no dots)."""
+    stem = re.sub(r"[^a-z0-9-]+", "-", raw.strip().lower())
+    stem = re.sub(r"-{2,}", "-", stem).strip("-") or "model"
+    if not prefix and not stem[0].isalpha():
+        stem = f"m-{stem}"
+    budget = 63 - len(prefix) - len(suffix)
+    if len(stem) > budget:
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:6]
+        keep = max(1, budget - 7)
+        stem = f"{stem[:keep].rstrip('-')}-{digest}"
+    label = f"{prefix}{stem}{suffix}".strip("-")
+    if not label[0].isalpha():
+        label = f"k-{label}"[:63].rstrip("-")
+    return label
+
+
 def audit_litellm_scaling(
     provisioned_gsus: int = 20,
     target_rps: int = 650,
@@ -145,7 +174,6 @@ def audit_litellm_scaling(
     pgbouncer_pool = max(20, min(100, total_prisma // 2 + 10))
     pg_max_conns = max(100, total_prisma + 40)
 
-    # Match cooldown to the 1s (>=50 GSUs) vs 10s (<50 GSUs) token-bucket refill window
     cooldown_sec = 2 if gsus >= 50 else 5
     allowed_fails = max(30, gsus * 3)
 
@@ -206,6 +234,7 @@ def generate_gateway_bundle(
     pods: int = 12,
     uvicorn_workers_per_pod: int = 4,
     self_hosted_model: str = "llama-3.3-70b-fp8",
+    business_unit_shares: int = 4,
 ) -> GatewayConfigBundle:
     """Generate production-hardened LiteLLM, Envoy AI Gateway, and GKE epp configurations."""
     for field_name, value, pattern in (
@@ -218,9 +247,11 @@ def generate_gateway_bundle(
             raise ValueError(f"Invalid {field_name} {value!r}: must match {pattern}")
     norm = normalize_model_id(model)
     gsus = max(1, int(provisioned_gsus))
+    bu_count = max(1, int(business_unit_shares))
     refill_window = 1 if gsus >= 50 else 10
     tpm_per_gsu = require_capacity(norm, load_gsu_config())
     committed_tpm = gsus * tpm_per_gsu
+    per_bu_funded_tpm = max(1_024, committed_tpm // bu_count)
 
     litellm_audit = audit_litellm_scaling(
         provisioned_gsus=gsus,
@@ -230,85 +261,110 @@ def generate_gateway_bundle(
         uvicorn_workers_per_pod=uvicorn_workers_per_pod,
     )
 
-    litellm_yaml = f"""# Production-Hardened LiteLLM Proxy Config (capacity v0.3.0)
-# Model: {norm} | Provisioned GSUs: {gsus} ({committed_tpm:,} TPM, {refill_window}s bucket)
-model_list:
-  # Tier 1 Primary: Provisioned Throughput (Dedicated Pool -> 429 triggers instant spillover)
-  - model_name: {norm}-pt
-    litellm_params:
-      model: vertex_ai/{norm}
-      vertex_project: "{project_id}"
-      vertex_location: "{location}"
-      extra_headers:
-        X-Vertex-AI-LLM-Request-Type: "dedicated"
-      tags: ["prod", "tier-1"]
-    model_info:
-      id: "vertex-{norm}-pt-pool"
-      input_cost_per_token: 0.00000050
-      output_cost_per_token: 0.00000200
+    litellm_doc = {
+        "model_list": [
+            {
+                "model_name": f"{norm}-pt",
+                "litellm_params": {
+                    "model": f"vertex_ai/{norm}",
+                    "vertex_project": project_id,
+                    "vertex_location": location,
+                    "extra_headers": {"X-Vertex-AI-LLM-Request-Type": "dedicated"},
+                    "tags": ["prod", "tier-1"],
+                },
+                "model_info": {
+                    "id": f"vertex-{norm}-pt-pool",
+                    "input_cost_per_token": 0.00000050,
+                    "output_cost_per_token": 0.00000200,
+                },
+            },
+            {
+                "model_name": f"{norm}-priority-spillover",
+                "litellm_params": {
+                    "model": f"vertex_ai/{norm}",
+                    "vertex_project": project_id,
+                    "vertex_location": location,
+                    "extra_headers": {
+                        "X-Vertex-AI-LLM-Request-Type": "shared",
+                        "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
+                    },
+                    "tags": ["prod", "tier-1", "burst"],
+                },
+                "model_info": {
+                    "id": f"vertex-{norm}-priority-paygo",
+                    "input_cost_per_token": 0.00000090,
+                    "output_cost_per_token": 0.00000360,
+                },
+            },
+            {
+                "model_name": f"{norm}-nonprod-flex",
+                "litellm_params": {
+                    "model": f"vertex_ai/{norm}",
+                    "vertex_project": project_id,
+                    "vertex_location": location,
+                    "extra_headers": {
+                        "X-Vertex-AI-LLM-Request-Type": "shared",
+                        "X-Vertex-AI-LLM-Shared-Request-Type": "flex",
+                    },
+                    "tags": ["nonprod", "eval"],
+                },
+            },
+            {
+                "model_name": f"{norm}-offpeak-scavenger",
+                "litellm_params": {
+                    "model": f"vertex_ai/{norm}",
+                    "vertex_project": project_id,
+                    "vertex_location": location,
+                    "extra_headers": {
+                        "X-Vertex-AI-LLM-Shared-Request-Type": "flex",
+                    },
+                    "tags": ["scavenger", "batch"],
+                },
+            },
+        ],
+        "router_settings": {
+            "routing_strategy": "simple-shuffle",
+            "enable_tag_filtering": True,
+            "num_retries": 1,
+            "allowed_fails": litellm_audit.anti_blackhole_allowed_fails,
+            "cooldown_time": litellm_audit.anti_blackhole_cooldown_seconds,
+            "fallbacks": [{f"{norm}-pt": [f"{norm}-priority-spillover"]}],
+        },
+        "litellm_settings": {
+            "use_redis_transaction_buffer": True,
+            "buffer_time": litellm_audit.redis_buffer_time_seconds,
+            "callbacks": ["litellm_burndown_callback.burndown_handler"],
+        },
+    }
+    litellm_header = (
+        "# Production-Hardened LiteLLM Proxy Config (capacity v0.3.0)\n"
+        f"# Model: {norm} | Provisioned GSUs: {gsus} ({committed_tpm:,} TPM, "
+        f"{refill_window}s bucket)\n"
+    )
+    litellm_yaml = litellm_header + yaml.safe_dump(
+        litellm_doc, sort_keys=False, default_flow_style=False
+    )
 
-  # Tier 1 Burst Spillover: Priority PayGo (Rank 2 CRITICAL, 1.8x Rate)
-  - model_name: {norm}-priority-spillover
-    litellm_params:
-      model: vertex_ai/{norm}
-      vertex_project: "{project_id}"
-      vertex_location: "{location}"
-      extra_headers:
-        X-Vertex-AI-LLM-Request-Type: "shared"
-        X-Vertex-AI-LLM-Shared-Request-Type: "priority"
-      tags: ["prod", "tier-1", "burst"]
-    model_info:
-      id: "vertex-{norm}-priority-paygo"
-      input_cost_per_token: 0.00000090
-      output_cost_per_token: 0.00000360
-
-  # Tier 2 Non-Prod & Daytime Eval: Flex PayGo (Rank 6, 0.5x Rate — Never Drains Prod PT)
-  - model_name: {norm}-nonprod-flex
-    litellm_params:
-      model: vertex_ai/{norm}
-      vertex_project: "{project_id}"
-      vertex_location: "{location}"
-      extra_headers:
-        X-Vertex-AI-LLM-Request-Type: "shared"
-        X-Vertex-AI-LLM-Shared-Request-Type: "flex"
-      tags: ["nonprod", "eval"]
-
-  # Tier 3 Off-Peak PT Scavenger: $0 PT-First with 0.5x Flex Overflow
-  - model_name: {norm}-offpeak-scavenger
-    litellm_params:
-      model: vertex_ai/{norm}
-      vertex_project: "{project_id}"
-      vertex_location: "{location}"
-      extra_headers:
-        X-Vertex-AI-LLM-Shared-Request-Type: "flex"
-      tags: ["scavenger", "batch"]
-
-router_settings:
-  routing_strategy: simple-shuffle
-  enable_tag_filtering: true
-  num_retries: 1
-  # Anti-blackholing: tuned to {refill_window}s token-bucket refill window
-  allowed_fails: {litellm_audit.anti_blackhole_allowed_fails}
-  cooldown_time: {litellm_audit.anti_blackhole_cooldown_seconds}
-  fallbacks:
-    - {{"{norm}-pt": ["{norm}-priority-spillover"]}}
-
-litellm_settings:
-  use_redis_transaction_buffer: true
-  buffer_time: {litellm_audit.redis_buffer_time_seconds}
-  callbacks: ["litellm_burndown_callback.burndown_handler"]
-"""
-
-    callback_py = f'''"""LiteLLM CustomLogger for Weighted Burndown & traffic_type."""
+    callback_py = f'''"""LiteLLM CustomLogger enforcing stateful Redis weighted burndown shares."""
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from litellm.integrations.custom_logger import CustomLogger
+try:
+    from litellm.integrations.custom_logger import CustomLogger
+except ImportError:  # pragma: no cover
+
+    class CustomLogger:  # type: ignore[no-redef]
+        pass
+
 
 LONG_CONTEXT_THRESHOLD = 200_000
 COMMITTED_POOL_BURNDOWN_TPM = {committed_tpm}
+DEFAULT_TEAM_FUNDED_BURNDOWN_TPM = {per_bu_funded_tpm}
+PREFLIGHT_FLOOR_TOKENS = 1_024
+WINDOW_TTL_SECONDS = 120
 
 
 def compute_burndown_tokens(
@@ -318,15 +374,82 @@ def compute_burndown_tokens(
     cached_tokens: int = 0,
 ) -> float:
     """Compute hardware-weighted burndown tokens (<=200K vs >200K cliff)."""
-    uncached = max(0, prompt_tokens - cached_tokens)
-    decode = max(0, completion_tokens) + max(0, reasoning_tokens)
-    if prompt_tokens > LONG_CONTEXT_THRESHOLD:
-        return (uncached * 2.0) + (cached_tokens * 0.2) + (decode * 7.5)
-    return (uncached * 1.0) + (cached_tokens * 0.1) + (decode * 4.0)
+    total_in = max(0, int(prompt_tokens))
+    cached = min(max(0, int(cached_tokens)), total_in)
+    uncached = total_in - cached
+    decode = max(0, int(completion_tokens)) + max(0, int(reasoning_tokens))
+    if total_in > LONG_CONTEXT_THRESHOLD:
+        return (uncached * 2.0) + (cached * 0.2) + (decode * 7.5)
+    return (uncached * 1.0) + (cached * 0.1) + (decode * 4.0)
+
+
+def _extract_usage_counts(usage: Any) -> tuple[int, int, int, int]:
+    """Extract prompt, completion, reasoning, and cached token counts across SDK/dict shapes."""
+    if isinstance(usage, dict):
+        p_tok = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
+        c_tok = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
+        p_det = usage.get("prompt_tokens_details") or {{}}
+        c_det = usage.get("completion_tokens_details") or {{}}
+        cached = int(
+            usage.get("cached_tokens", usage.get("cached_content_token_count", 0))
+            or (p_det.get("cached_tokens", 0) if isinstance(p_det, dict) else 0)
+            or 0
+        )
+        reason = int(
+            usage.get("reasoning_tokens", usage.get("thoughts_tokens", 0))
+            or (c_det.get("reasoning_tokens", 0) if isinstance(c_det, dict) else 0)
+            or 0
+        )
+        return p_tok, c_tok, reason, cached
+
+    p_tok = int(getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", 0)) or 0)
+    c_tok = int(getattr(usage, "completion_tokens", getattr(usage, "output_tokens", 0)) or 0)
+    p_det = getattr(usage, "prompt_tokens_details", None)
+    c_det = getattr(usage, "completion_tokens_details", None)
+    cached = int(
+        getattr(usage, "cached_tokens", getattr(usage, "cached_content_token_count", 0))
+        or (getattr(p_det, "cached_tokens", 0) if p_det is not None else 0)
+        or 0
+    )
+    reason = int(
+        getattr(usage, "reasoning_tokens", getattr(usage, "thoughts_tokens", 0))
+        or (getattr(c_det, "reasoning_tokens", 0) if c_det is not None else 0)
+        or 0
+    )
+    return p_tok, c_tok, reason, cached
 
 
 class BurndownAndTrafficTypeLogger(CustomLogger):
-    """Enforces team burndown shares and records 0ms traffic_type into SpendLogs."""
+    """Tracks server-side rolling Redis team burndown and flips bursting teams onto Priority."""
+
+    def __init__(self, time_fn: Any = time.time) -> None:
+        super().__init__()
+        self._time_fn = time_fn
+        self._cache_ref: Any = None
+        self._local_window: dict[str, float] = {{}}
+
+    def _window_key(self, team_id: str) -> str:
+        minute_bucket = int(self._time_fn() // 60)
+        return f"capacity:burndown:{{team_id}}:{{minute_bucket}}"
+
+    async def _read_counter(self, cache: Any, key: str) -> float:
+        if cache is not None and hasattr(cache, "async_get_cache"):
+            val = await cache.async_get_cache(key)
+            if val is not None:
+                return float(val)
+        return float(self._local_window.get(key, 0.0))
+
+    async def _increment_counter(self, cache: Any, key: str, delta: float) -> float:
+        if delta == 0.0:
+            return await self._read_counter(cache, key)
+        if cache is not None and hasattr(cache, "async_increment"):
+            updated = await cache.async_increment(key, delta, ttl=WINDOW_TTL_SECONDS)
+            if updated is not None:
+                self._local_window[key] = float(updated)
+                return float(updated)
+        new_val = self._local_window.get(key, 0.0) + delta
+        self._local_window[key] = new_val
+        return new_val
 
     async def async_pre_call_hook(
         self,
@@ -335,13 +458,25 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
         data: dict[str, Any],
         call_type: str,
     ) -> dict[str, Any]:
-        metadata = data.get("metadata") or {{}}
-        team_burndown_tpm = float(metadata.get("team_current_burndown_tpm", 0.0))
-        team_funded_ceiling_tpm = float(
-            metadata.get("team_funded_burndown_tpm", COMMITTED_POOL_BURNDOWN_TPM)
+        if cache is not None:
+            self._cache_ref = cache
+        team_id = str(getattr(user_api_key_dict, "team_id", None) or "default")
+        funded_ceiling_raw = getattr(user_api_key_dict, "max_budget_tpm", None)
+        team_funded_ceiling = (
+            float(funded_ceiling_raw)
+            if funded_ceiling_raw is not None
+            else float(DEFAULT_TEAM_FUNDED_BURNDOWN_TPM)
         )
-        # If team exceeds its funded PT share, bypass PT so peers are never starved
-        if team_burndown_tpm > team_funded_ceiling_tpm:
+        key = self._window_key(team_id)
+        rolling_burndown = await self._read_counter(cache, key)
+        # Reserve a pre-SSE floor immediately so concurrent slow >200K streams cannot bypass quota.
+        await self._increment_counter(cache, key, float(PREFLIGHT_FLOOR_TOKENS))
+
+        proxy_meta = data.setdefault("litellm_params", {{}}).setdefault("metadata", {{}})
+        proxy_meta["_burndown_window_key"] = key
+        proxy_meta["_burndown_preflight_reserved"] = float(PREFLIGHT_FLOOR_TOKENS)
+
+        if rolling_burndown + PREFLIGHT_FLOOR_TOKENS > team_funded_ceiling:
             headers = dict(data.get("extra_headers") or {{}})
             headers["X-Vertex-AI-LLM-Request-Type"] = "shared"
             headers["X-Vertex-AI-LLM-Shared-Request-Type"] = "priority"
@@ -356,14 +491,24 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
         end_time: Any,
     ) -> None:
         usage = getattr(response_obj, "usage", None) or {{}}
-        prompt_tok = int(getattr(usage, "prompt_tokens", 0) or 0)
-        comp_tok = int(getattr(usage, "completion_tokens", 0) or 0)
-        burndown = compute_burndown_tokens(prompt_tok, comp_tok)
-        raw_traffic_type = str(
-            kwargs.get("additional_args", {{}}).get("traffic_type", "PROVISIONED_THROUGHPUT")
+        prompt_tok, comp_tok, reason_tok, cached_tok = _extract_usage_counts(usage)
+        burndown = compute_burndown_tokens(
+            prompt_tok,
+            comp_tok,
+            reasoning_tokens=reason_tok,
+            cached_tokens=cached_tok,
         )
         litellm_params = kwargs.setdefault("litellm_params", {{}})
         meta = litellm_params.setdefault("metadata", {{}})
+        team_id = str(meta.get("user_api_key_team_id") or "default")
+        key = str(meta.get("_burndown_window_key") or self._window_key(team_id))
+        reserved = float(meta.get("_burndown_preflight_reserved", 0.0))
+        cache = litellm_params.get("cache") or self._cache_ref
+        await self._increment_counter(cache, key, burndown - reserved)
+
+        raw_traffic_type = str(
+            kwargs.get("additional_args", {{}}).get("traffic_type", "PROVISIONED_THROUGHPUT")
+        )
         meta["weighted_burndown_tokens"] = round(burndown, 2)
         meta["vertex_traffic_type"] = raw_traffic_type
 
@@ -371,122 +516,184 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
 burndown_handler = BurndownAndTrafficTypeLogger()
 '''
 
-    envoy_yaml = f"""# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.3.0)
-apiVersion: aigateway.envoyproxy.io/v1alpha1
-kind: AIGatewayRoute
-metadata:
-  name: {norm}-weighted-burndown-route
-  namespace: ai-gateway
-spec:
-  targetRefs:
-    - group: gateway.networking.k8s.io
-      kind: Gateway
-      name: central-ai-gateway
-  rules:
-    - matches:
-        - headers:
-            - type: Exact
-              name: x-ai-eg-model
-              value: {norm}
-      backendRefs:
-        - name: vertex-{norm}-backend
-          weight: 100
-      llmRequestCosts:
-        - metadataKey: llm_input_token
-          type: InputToken
-        - metadataKey: llm_cached_input_token
-          type: CachedInputToken
-        - metadataKey: llm_output_token
-          type: OutputToken
-        - metadataKey: vertex_burndown_tokens
-          type: CEL
-          cel: >
-            input_tokens > 200000
-              ? int(
-                  double(input_tokens - cached_input_tokens) * 2.0
-                  + double(cached_input_tokens) * 0.2
-                  + double(output_tokens) * 7.5
-                )
-              : int(
-                  double(input_tokens - cached_input_tokens) * 1.0
-                  + double(cached_input_tokens) * 0.1
-                  + double(output_tokens) * 4.0
-                )
----
-apiVersion: gateway.envoyproxy.io/v1alpha1
-kind: BackendTrafficPolicy
-metadata:
-  name: {norm}-burndown-ratelimit
-  namespace: ai-gateway
-spec:
-  targetRefs:
-    - group: gateway.networking.k8s.io
-      kind: Gateway
-      name: central-ai-gateway
-  rateLimit:
-    type: Global
-    global:
-      rules:
-        - clientSelectors:
-            - headers:
-                - name: x-business-unit
-                  type: Distinct
-          cost:
-            request:
-              from: Number
-              number: 0
-            response:
-              from: Metadata
-              metadata:
-                namespace: io.envoy.ai_gateway
-                key: vertex_burndown_tokens
-          limit:
-            requests: {committed_tpm}
-            unit: Minute
-"""
+    envoy_route_name = _k8s_dns_label(norm, suffix="-weighted-burndown-route")
+    envoy_backend_svc = _k8s_dns_label(norm, prefix="vertex-", suffix="-backend")
+    envoy_rl_name = _k8s_dns_label(norm, suffix="-burndown-ratelimit")
+    envoy_docs = [
+        {
+            "apiVersion": "aigateway.envoyproxy.io/v1alpha1",
+            "kind": "AIGatewayRoute",
+            "metadata": {
+                "name": envoy_route_name,
+                "namespace": "ai-gateway",
+            },
+            "spec": {
+                "targetRefs": [
+                    {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "Gateway",
+                        "name": "central-ai-gateway",
+                    }
+                ],
+                "rules": [
+                    {
+                        "matches": [
+                            {
+                                "headers": [
+                                    {
+                                        "type": "Exact",
+                                        "name": "x-ai-eg-model",
+                                        "value": norm,
+                                    }
+                                ]
+                            }
+                        ],
+                        "backendRefs": [
+                            {
+                                "name": envoy_backend_svc,
+                                "weight": 100,
+                            }
+                        ],
+                        "llmRequestCosts": [
+                            {"metadataKey": "llm_input_token", "type": "InputToken"},
+                            {"metadataKey": "llm_cached_input_token", "type": "CachedInputToken"},
+                            {"metadataKey": "llm_output_token", "type": "OutputToken"},
+                            {
+                                "metadataKey": "vertex_burndown_tokens",
+                                "type": "CEL",
+                                "cel": _LiteralBlockStr(ENVOY_BURNDOWN_CEL_EXPRESSION),
+                            },
+                        ],
+                    }
+                ],
+            },
+        },
+        {
+            "apiVersion": "gateway.envoyproxy.io/v1alpha1",
+            "kind": "BackendTrafficPolicy",
+            "metadata": {
+                "name": envoy_rl_name,
+                "namespace": "ai-gateway",
+            },
+            "spec": {
+                "targetRefs": [
+                    {
+                        "group": "gateway.networking.k8s.io",
+                        "kind": "Gateway",
+                        "name": "central-ai-gateway",
+                    }
+                ],
+                "rateLimit": {
+                    "type": "Global",
+                    "global": {
+                        "rules": [
+                            {
+                                "clientSelectors": [
+                                    {
+                                        "headers": [
+                                            {
+                                                "name": "x-business-unit",
+                                                "type": "Distinct",
+                                            }
+                                        ]
+                                    }
+                                ],
+                                "cost": {
+                                    "request": {
+                                        "from": "Number",
+                                        "number": 256,
+                                    },
+                                    "response": {
+                                        "from": "Metadata",
+                                        "metadata": {
+                                            "namespace": "io.envoy.ai_gateway",
+                                            "key": "vertex_burndown_tokens",
+                                        },
+                                    },
+                                },
+                                "limit": {
+                                    "requests": per_bu_funded_tpm,
+                                    "unit": "Minute",
+                                },
+                            }
+                        ]
+                    },
+                },
+            },
+        },
+    ]
+    envoy_header = "# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.3.0)\n"
+    envoy_yaml = envoy_header + yaml.dump_all(
+        envoy_docs, Dumper=_GatewayYamlDumper, sort_keys=False, default_flow_style=False
+    )
 
-    epp_yaml = f"""# GKE Inference Gateway / K8s Gateway API Inference Extension (epp / llm-d)
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferencePool
-metadata:
-  name: {self_hosted_model}-pool
-  namespace: ai-serving
-spec:
-  targetPortNumber: 8000
-  selector:
-    app: vllm-{self_hosted_model}
-  extensionRef:
-    name: {self_hosted_model}-epp
----
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceObjective
-metadata:
-  name: {self_hosted_model}-interactive-critical
-  namespace: ai-serving
-spec:
-  priority: Critical
-  poolRef:
-    name: {self_hosted_model}-pool
----
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: EndpointPickerConfig
-metadata:
-  name: {self_hosted_model}-epp-config
-  namespace: ai-serving
-spec:
-  scorers:
-    - type: prefix-cache-scorer
-      weight: 4
-      blockSizeTokens: 64
-    - type: kv-cache-utilization-scorer
-      weight: 2
-      targetUtilizationPct: 80
-    - type: queue-scorer
-      weight: 2
-      maxWaitingRequests: 10
-    - type: lora-affinity-scorer
-      weight: 1
-"""
+    pool_name = _k8s_dns_label(self_hosted_model, suffix="-pool")
+    app_label = _k8s_dns_label(self_hosted_model, prefix="vllm-")
+    epp_cfg_name = _k8s_dns_label(self_hosted_model, suffix="-epp-config")
+    obj_name = _k8s_dns_label(self_hosted_model, suffix="-interactive-critical")
+
+    epp_docs = [
+        {
+            "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+            "kind": "InferencePool",
+            "metadata": {
+                "name": pool_name,
+                "namespace": "ai-serving",
+            },
+            "spec": {
+                "targetPortNumber": 8000,
+                "selector": {"app": app_label},
+                "extensionRef": {"name": epp_cfg_name},
+            },
+        },
+        {
+            "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+            "kind": "InferenceObjective",
+            "metadata": {
+                "name": obj_name,
+                "namespace": "ai-serving",
+            },
+            "spec": {
+                "priority": "Critical",
+                "poolRef": {"name": pool_name},
+            },
+        },
+        {
+            "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
+            "kind": "EndpointPickerConfig",
+            "metadata": {
+                "name": epp_cfg_name,
+                "namespace": "ai-serving",
+            },
+            "spec": {
+                "scorers": [
+                    {
+                        "type": "prefix-cache-scorer",
+                        "weight": 4,
+                        "blockSizeTokens": 64,
+                    },
+                    {
+                        "type": "kv-cache-utilization-scorer",
+                        "weight": 2,
+                        "targetUtilizationPct": 80,
+                    },
+                    {
+                        "type": "queue-scorer",
+                        "weight": 2,
+                        "maxWaitingRequests": 10,
+                    },
+                    {
+                        "type": "lora-affinity-scorer",
+                        "weight": 1,
+                    },
+                ]
+            },
+        },
+    ]
+    epp_header = "# GKE Inference Gateway / K8s Gateway API Inference Extension (epp / llm-d)\n"
+    epp_yaml = epp_header + yaml.dump_all(
+        epp_docs, Dumper=_GatewayYamlDumper, sort_keys=False, default_flow_style=False
+    )
 
     return GatewayConfigBundle(
         model=model,

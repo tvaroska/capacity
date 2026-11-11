@@ -1,11 +1,11 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces Hexagonal Driving-Port isolation on pure sizing/FinOps math modules
+# Enforces Hexagonal Driving-Port & Cloud-SDK isolation on pure sizing/FinOps math modules
 # and static security invariants across capacity Python modules.
 
 id: library-never-imports-examples
 language: Python
 severity: error
-message: "Hexagonal violation: capacity/ engine must never import examples/."
+message: "Hexagonal violation: capacity/ engine must never import examples/ or benchmarks/."
 files:
   - "capacity/**/*.py"
 metadata:
@@ -13,37 +13,69 @@ metadata:
   invalid_examples:
     - "import examples"
     - "from examples.demo_profile import load"
+    - "import benchmarks"
   valid_examples:
-    - "from capacity.models import CapacityRecommendation"
+    - "from capacity.models import ModelRecommendation"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+examples(\\b|\\.)"
+      regex: "^import\\s+(examples|benchmarks)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+examples(\\b|\\.)"
+      regex: "^from\\s+(examples|benchmarks)(\\b|\\.)"
 ---
 id: core-math-never-imports-driving-ports
 language: Python
 severity: error
-message: "Hexagonal violation: pure sizing/FinOps math modules must never import FastAPI or Typer driving ports."
+message: "Hexagonal violation: pure sizing/FinOps/gateway/model modules must never import FastAPI or Typer driving ports."
 files:
   - "capacity/burst.py"
   - "capacity/finops.py"
   - "capacity/self_hosted.py"
+  - "capacity/telemetry_parsers.py"
   - "capacity/capacity.py"
+  - "capacity/gateway.py"
+  - "capacity/forecasting.py"
+  - "capacity/models.py"
 metadata:
   test_path: "capacity/finops.py"
   invalid_examples:
     - "import fastapi"
     - "from typer import Typer"
   valid_examples:
-    - "from capacity.models import FinOpsChargebackResult"
+    - "from capacity.models import FocusChargebackReport"
 rule:
   any:
     - kind: import_statement
       regex: "^import\\s+(fastapi|typer)(\\b|\\.)"
     - kind: import_from_statement
       regex: "^from\\s+(fastapi|typer)(\\b|\\.)"
+---
+id: domain-math-never-imports-gcp-adapter
+language: Python
+severity: error
+message: "Hexagonal violation: pure domain modules must import capacity.forecasting, never google.cloud or capacity.core."
+files:
+  - "capacity/burst.py"
+  - "capacity/finops.py"
+  - "capacity/self_hosted.py"
+  - "capacity/telemetry_parsers.py"
+  - "capacity/capacity.py"
+  - "capacity/gateway.py"
+  - "capacity/forecasting.py"
+  - "capacity/models.py"
+metadata:
+  test_path: "capacity/capacity.py"
+  invalid_examples:
+    - "from google.cloud import monitoring_v3"
+    - "from capacity.core import fetch_throughput"
+  valid_examples:
+    - "from capacity.forecasting import holts_linear_trend"
+rule:
+  any:
+    - kind: import_statement
+      regex: "^import\\s+(google\\.cloud|capacity\\.core)(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "^from\\s+(google\\.cloud|capacity\\.core)(\\b|\\.)"
 ---
 id: no-subprocess-shell-true
 language: Python

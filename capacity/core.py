@@ -1,22 +1,26 @@
-"""Core Cloud Monitoring telemetry queries, multi-project/folder aggregation, and Holt forecasting.
-
-Supports:
-1. Managed Gemini Platform GSUs (`.../publisher/online_serving/consumed_token_throughput`).
-2. Self-Hosted Vertex AI Online Prediction endpoints (`.../prediction/online/prediction_count`,
-   `accelerator/duty_cycle`, and `prometheus.googleapis.com/vertex_vllm_gpu_cache_usage_perc` /
-   `vertex_vllm_num_requests_waiting`).
-3. Multi-project & folder roll-up plus pure-Python Holt's Double Exponential Smoothing.
-"""
+"""Cloud Monitoring driven adapter for Managed GSUs and Self-Hosted Vertex AI Endpoints."""
 
 from __future__ import annotations
 
 import asyncio
-import math
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
+
+from capacity.forecasting import (
+    DEFAULT_DAYS,
+    DEFAULT_PERCENTILES,
+    LocalTraceAdapter,
+    TelemetryPort,
+    UnknownModelError,
+    build_demo_throughput,
+    holts_linear_trend,
+    percentile,
+)
+from capacity.models import GCP_LOCATION_PATTERN, GCP_PROJECT_ID_PATTERN, MODEL_ID_PATTERN
 
 try:
     from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
@@ -70,14 +74,8 @@ except ImportError:  # pragma: no cover
     duration_pb2 = _DurationNamespace()
     monitoring_v3 = _MonitoringV3Fallback()  # type: ignore[assignment]
 
-DEFAULT_DAYS = 30
-DEFAULT_PERCENTILES = [50, 75, 90, 95]
-
 PT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/consumed_token_throughput"
 SELF_HOSTED_PREDICTION_METRIC = "aiplatform.googleapis.com/prediction/online/prediction_count"
-SELF_HOSTED_DUTY_CYCLE_METRIC = "aiplatform.googleapis.com/prediction/online/accelerator/duty_cycle"
-SELF_HOSTED_KV_CACHE_METRIC = "prometheus.googleapis.com/vertex_vllm_gpu_cache_usage_perc"
-SELF_HOSTED_QUEUE_METRIC = "prometheus.googleapis.com/vertex_vllm_num_requests_waiting"
 
 GROUP_BY_FIELDS = [
     "resource.label.model_id",
@@ -95,8 +93,11 @@ class GCPQueryError(Exception):
     """Raised when a GCP Cloud Monitoring query fails due to auth, permissions, or API errors."""
 
 
-class UnknownModelError(ValueError):
-    """Raised when a model or self-hosted profile has no known capacity, instead of guessing."""
+def _validate_identifier(field_name: str, value: str, pattern: str) -> str:
+    cleaned = value.strip()
+    if not re.fullmatch(pattern, cleaned):
+        raise ValueError(f"Invalid {field_name} {value!r}: must match {pattern}")
+    return cleaned
 
 
 def _build_filter(
@@ -104,9 +105,14 @@ def _build_filter(
     regions: Sequence[str] | None = None,
     extra: str | None = None,
 ) -> str:
+    if '"' in metric or "\n" in metric:
+        raise ValueError(f"Invalid metric identifier: {metric!r}")
     parts = [f'metric.type = "{metric}"']
     if regions:
-        quoted = ", ".join(f'"{r}"' for r in regions)
+        validated_regions = [
+            _validate_identifier("region", r, GCP_LOCATION_PATTERN) for r in regions
+        ]
+        quoted = ", ".join(f'"{r}"' for r in validated_regions)
         parts.append(f"resource.labels.location = one_of({quoted})")
     if extra:
         parts.append(extra)
@@ -161,105 +167,6 @@ async def _query_series(
         ) from exc
 
 
-def percentile(sorted_vals: Sequence[int | float], p: float) -> int:
-    """Compute linear-interpolated percentile on a pre-sorted numeric sequence."""
-    if not sorted_vals:
-        return 0
-    k = (len(sorted_vals) - 1) * (p / 100.0)
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return round(sorted_vals[f])
-    return round(sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f]))
-
-
-def holts_linear_trend(
-    series: Sequence[int | float],
-    alpha: float = 0.3,
-    beta: float = 0.1,
-    steps: int = 24,
-) -> list[float]:
-    """Project capacity series forward using pure-Python Holt's Double Exponential Smoothing."""
-    if steps <= 0:
-        return []
-    if not series:
-        return [0.0] * steps
-    if len(series) < 2:
-        val = max(0.0, float(series[0]))
-        return [round(val, 2)] * steps
-
-    level = float(series[0])
-    trend = float(series[1]) - float(series[0])
-
-    for i in range(1, len(series)):
-        y_t = float(series[i])
-        last_level = level
-        level = alpha * y_t + (1.0 - alpha) * (level + trend)
-        trend = beta * (level - last_level) + (1.0 - beta) * trend
-
-    forecasts: list[float] = []
-    for m in range(1, steps + 1):
-        pred = max(0.0, level + m * trend)
-        forecasts.append(round(pred, 2))
-    return forecasts
-
-
-def build_demo_throughput(
-    days: int = 7,
-    by_region: bool = True,
-    mode: str = "gsu",
-) -> tuple[dict[str, dict[datetime, int]], int]:
-    """Generate deterministic 8x5 enterprise diurnal sparse throughput series for `--demo` mode."""
-    total_minutes = days * 24 * 60
-    base_dt = datetime(2026, 11, 2, 0, 0, tzinfo=UTC)
-    sparse: dict[str, dict[datetime, int]] = defaultdict(dict)
-
-    for day_idx in range(days):
-        # Monday (0) through Friday (4) active 08:00..16:00 UTC (480 mins/day)
-        is_weekday = (day_idx % 7) < 5
-        if not is_weekday:
-            continue
-        for minute_of_day in range(8 * 60, 16 * 60):
-            dt = base_dt + timedelta(days=day_idx, minutes=minute_of_day)
-            # Peak around 10:00-14:00
-            is_peak_window = 10 * 60 <= minute_of_day < 14 * 60
-            if mode == "self-hosted":
-                k1 = (
-                    "llama-3.3-70b-fp8@us-central1"
-                    if by_region
-                    else "llama-3.3-70b-fp8"
-                )
-                k2 = (
-                    "gemma-3-27b-bf16@europe-west4"
-                    if by_region
-                    else "gemma-3-27b-bf16"
-                )
-                sparse[k1][dt] = 520_000 if is_peak_window else 340_000
-                sparse[k2][dt] = 195_000 if is_peak_window else 130_000
-            else:
-                k1 = (
-                    "gemini-3.8-flash@us-central1"
-                    if by_region
-                    else "gemini-3.8-flash"
-                )
-                k2 = (
-                    "gemini-4-argon@us-central1"
-                    if by_region
-                    else "gemini-4-argon"
-                )
-                k3 = (
-                    "gemini-3.8-flash@europe-west4"
-                    if by_region
-                    else "gemini-3.8-flash"
-                )
-                sparse[k1][dt] = 483_600 if is_peak_window else 241_800
-                sparse[k2][dt] = 90_000 if is_peak_window else 60_000
-                if by_region:
-                    sparse[k3][dt] = 241_800 if is_peak_window else 120_900
-
-    return dict(sparse), total_minutes
-
-
 async def fetch_throughput(
     project: str | Sequence[str],
     days: int = DEFAULT_DAYS,
@@ -270,11 +177,20 @@ async def fetch_throughput(
     mode: str = "gsu",
     tokens_per_prediction: int = 1_800,
 ) -> tuple[dict[str, dict[datetime, int]], int]:
-    """Fetch per-minute token throughput across one or more GCP projects.
+    """Fetch per-minute token throughput across one or more GCP projects."""
+    raw_projects = [project] if isinstance(project, str) else list(project)
+    if not raw_projects:
+        raw_projects = ["default-project"]
+    project_list = [
+        _validate_identifier("project", p, GCP_PROJECT_ID_PATTERN) for p in raw_projects
+    ]
+    if regions:
+        for reg in regions:
+            _validate_identifier("region", reg, GCP_LOCATION_PATTERN)
+    if models:
+        for mod in models:
+            _validate_identifier("model", mod, MODEL_ID_PATTERN)
 
-    Supports both `--mode gsu` (Managed Gemini Platform GSUs) and `--mode self-hosted`
-    (Vertex AI Online Prediction `DedicatedResources` endpoints).
-    """
     try:
         client = monitoring_v3.MetricServiceAsyncClient()
     except DefaultCredentialsError as exc:
@@ -282,10 +198,6 @@ async def fetch_throughput(
             "GCP credentials not found. Run `gcloud auth application-default login` "
             "or pass `--demo` / `--trace-file` for offline simulation."
         ) from exc
-
-    project_list = [project] if isinstance(project, str) else list(project)
-    if not project_list:
-        project_list = ["default-project"]
 
     now = datetime.now(UTC).replace(second=0, microsecond=0)
     start = now - timedelta(days=days)
@@ -313,7 +225,7 @@ async def fetch_throughput(
                 endpoint_id = ts.resource.labels.get("endpoint_id", "self-hosted-endpoint")
                 location = ts.resource.labels.get("location", "global")
                 if models_filter and not any(
-                     endpoint_id.lower().startswith(m) for m in models_filter
+                    endpoint_id.lower().startswith(m) for m in models_filter
                 ):
                     continue
                 base_key = f"{folder_prefix}{endpoint_id}"
@@ -379,3 +291,47 @@ async def fetch_throughput(
                 sparse[key][dt_key] += val
 
     return {k: dict(v) for k, v in sparse.items()}, total_minutes
+
+
+class CloudMonitoringAdapter:
+    """Production Cloud Monitoring adapter implementing `TelemetryPort`."""
+
+    async def fetch_series(
+        self,
+        project: str | Sequence[str],
+        days: int = DEFAULT_DAYS,
+        models: Sequence[str] | None = None,
+        regions: Sequence[str] | None = None,
+        by_region: bool = False,
+        folder_map: Mapping[str, str] | None = None,
+        mode: str = "gsu",
+    ) -> tuple[dict[str, dict[datetime, int]], int]:
+        return await fetch_throughput(
+            project=project,
+            days=days,
+            models=models,
+            regions=regions,
+            by_region=by_region,
+            folder_map=folder_map,
+            mode=mode,
+        )
+
+
+__all__ = [
+    "DEFAULT_DAYS",
+    "DEFAULT_PERCENTILES",
+    "GROUP_BY_FIELDS",
+    "PT_METRIC",
+    "SELF_HOSTED_GROUP_BY_FIELDS",
+    "SELF_HOSTED_PREDICTION_METRIC",
+    "CloudMonitoringAdapter",
+    "GCPQueryError",
+    "LocalTraceAdapter",
+    "TelemetryPort",
+    "UnknownModelError",
+    "_build_filter",
+    "build_demo_throughput",
+    "fetch_throughput",
+    "holts_linear_trend",
+    "percentile",
+]

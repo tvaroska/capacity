@@ -1,6 +1,6 @@
 FROM python:3.13-slim AS base
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+COPY --from=ghcr.io/astral-sh/uv:0.9.1 /uv /uvx /bin/
 
 WORKDIR /app
 
@@ -16,4 +16,4 @@ USER app
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["/app/.venv/bin/uvicorn", "capacity.api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["sh", "-c", "exec /app/.venv/bin/uvicorn capacity.api:app --host 0.0.0.0 --port ${PORT:-8080}"]

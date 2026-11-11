@@ -1,30 +1,13 @@
-"""Newsvendor hybrid commitment sizing, scavenger scheduling, and FOCUS 1.2 FinOps (`ADR-003`).
-
-1. Newsvendor Hybrid Commitment Optimizer (`optimize_hybrid_commitment`):
-   - Balances Dedicated Provisioned Throughput (PT) + Flexible Savings Plans (FSP) against
-     elastic PayGo spillover (`Priority 1.8x`, `Standard 1.0x`, `Flex/Batch 0.5x`).
-2. FOCUS 1.2 Two-Pool Chargeback & Asynchronous Batch Water-Filling (`compute_focus_chargeback`):
-   - Proves and fixes both enterprise reserved-capacity chargeback anti-patterns:
-     (a) Unweighted raw-token counting vs. hardware-weighted burndown (`4x` decode/reasoning).
-     (b) Naive full-pool idle amortization vs. splitting Active Consumed and Unallocated Idle
-         Capacity (reclaimed off-peak via `$0`-marginal-cost asynchronous batch water-filling).
-3. Batch API Double-Payment Trap vs. Online PT Scavenging (`evaluate_batch_scavenger_economics`):
-   - Quantifies dollar waste when teams send async batch jobs to the `0.5x` Batch API while 24x7
-     PT sits idle overnight, versus `$0` online PT scavenging (`dedicated` or `unset + flex`).
-4. 3-Tier Residual Capacity Scheduler (`schedule_residual_capacity`):
-   - Schedules `Tier 0 Revenue > Tier 1 Hard-Deadline EDF > Tier 2 Evergreen Water-Fill` over
-     residual PT budget $A(t) = 0.85 \\times C - R(t)$.
-5. Shared Folder RHPT Pooling & 5 FinOps for AI KPIs (`evaluate_folder_pooling`,
-   `compute_finops_kpis`).
-"""
+"""Newsvendor hybrid commitment sizing, scavenger scheduling, and FOCUS 1.2 FinOps (`ADR-003`)."""
 
 from __future__ import annotations
 
 import math
 from collections.abc import Mapping, Sequence
 
-from capacity.core import percentile
+from capacity.forecasting import percentile
 from capacity.models import (
+    DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR,
     BatchScavengerAudit,
     DeadlineJobSpec,
     FinOpsKpiScorecard,
@@ -34,6 +17,7 @@ from capacity.models import (
     ResidualScheduleReport,
     ScheduledDeadlineJob,
     TenantChargebackRow,
+    make_default_deadline_jobs,
 )
 
 MINUTES_PER_MONTH = 30 * 24 * 60  # 43,200 minutes in a standard 30-day billing month
@@ -44,14 +28,23 @@ SPILLOVER_MULTIPLIERS: dict[str, float] = {
     "flex": 0.5,
 }
 
-# Realistic default weighted-to-raw token ratios per workload archetype:
-# e.g., reasoning-heavy claims triage (high output/thinking share -> 1.85x burndown per raw token)
-# vs. high-cached policy audit (0.45x burndown per raw token) vs. balanced copilot (1.10x).
 DEFAULT_TENANT_RAW_TOKEN_WEIGHTS: dict[str, float] = {
     "claims-triage": 1.85,
     "underwriting-copilot": 1.10,
     "policy-audit": 0.45,
 }
+
+
+def _clean_finite_series(series: Sequence[int | float]) -> list[float]:
+    if not series:
+        return [0.0]
+    cleaned: list[float] = []
+    for raw in series:
+        val = float(raw)
+        if not math.isfinite(val):
+            raise ValueError(f"tpm_series values must be finite numbers, got {raw!r}")
+        cleaned.append(max(0.0, val))
+    return sorted(cleaned)
 
 
 def optimize_hybrid_commitment(
@@ -62,10 +55,18 @@ def optimize_hybrid_commitment(
     paygo_per_1m_burndown_tokens_usd: float = 0.50,
     spillover_tier: str = "priority",
     fsp_discount_pct: float = 0.0,
+    active_duty_cycle_pct: float = 100.0,
 ) -> HybridCommitmentRecommendation:
-    """Solve the Newsvendor critical fractile and integer GSU grid for lowest monthly cost."""
-    cleaned_series = sorted(max(0.0, float(v)) for v in tpm_series) if tpm_series else [0.0]
+    """Solve the Newsvendor critical fractile and integer GSU grid for lowest monthly cost.
+
+    When `tpm_series` contains active-hours-only samples (e.g. an 8x5 daytime slice), pass
+    `active_duty_cycle_pct` (such as `23.81` for 40h/168h) so variable spillover is integrated
+    over active monthly minutes rather than 24x7 `43,200` minutes while PT still bills 24x7.
+    """
+    cleaned_series = _clean_finite_series(tpm_series)
     gsu_cap = max(1, int(tpm_per_gsu))
+    duty_fraction = min(1.0, max(1e-6, float(active_duty_cycle_pct) / 100.0))
+    active_month_minutes = MINUTES_PER_MONTH * duty_fraction
 
     tier_key = spillover_tier.strip().lower()
     if tier_key not in SPILLOVER_MULTIPLIERS:
@@ -79,20 +80,22 @@ def optimize_hybrid_commitment(
     effective_gsu_price = gsu_monthly_price_usd * (1.0 - fsp_clamped / 100.0)
     effective_spill_per_1m = paygo_per_1m_burndown_tokens_usd * spill_mult
 
-    # Monthly cost of running 1 GSU's full capacity (100% 24x7 utilization) on the spillover tier
-    tokens_per_gsu_month_millions = (gsu_cap * MINUTES_PER_MONTH) / 1_000_000.0
-    spillover_equiv_monthly_per_gsu = (
-        tokens_per_gsu_month_millions * effective_spill_per_1m
+    tokens_per_gsu_active_millions = (gsu_cap * active_month_minutes) / 1_000_000.0
+    spillover_equiv_active_per_gsu = tokens_per_gsu_active_millions * effective_spill_per_1m
+
+    full_24x7_millions = (gsu_cap * MINUTES_PER_MONTH) / 1_000_000.0
+    full_24x7_spill_equiv = full_24x7_millions * effective_spill_per_1m
+    breakeven_utilization = (
+        min(1.0, effective_gsu_price / full_24x7_spill_equiv)
+        if full_24x7_spill_equiv > 0
+        else 1.0
     )
-
-    if spillover_equiv_monthly_per_gsu > 0:
-        breakeven_utilization = min(
-            1.0, effective_gsu_price / spillover_equiv_monthly_per_gsu
-        )
-    else:
-        breakeven_utilization = 1.0
-
-    critical_quantile = max(0.0, min(1.0, 1.0 - breakeven_utilization))
+    active_window_breakeven = (
+        min(1.0, effective_gsu_price / spillover_equiv_active_per_gsu)
+        if spillover_equiv_active_per_gsu > 0
+        else 1.0
+    )
+    critical_quantile = max(0.0, min(1.0, 1.0 - active_window_breakeven))
 
     p50_tpm = percentile(cleaned_series, 50)
     p90_tpm = percentile(cleaned_series, 90)
@@ -110,7 +113,7 @@ def optimize_hybrid_commitment(
         mean_spill_tpm = (
             sum(max(0.0, x - committed_tpm) for x in cleaned_series) / n_points
         )
-        monthly_spill_millions = (mean_spill_tpm * MINUTES_PER_MONTH) / 1_000_000.0
+        monthly_spill_millions = (mean_spill_tpm * active_month_minutes) / 1_000_000.0
         spill_cost = monthly_spill_millions * effective_spill_per_1m
         return pt_cost + spill_cost, pt_cost, spill_cost
 
@@ -149,7 +152,7 @@ def optimize_hybrid_commitment(
 
     mean_total_tpm = sum(cleaned_series) / n_points
     paygo_100pct_cost = (
-        (mean_total_tpm * MINUTES_PER_MONTH) / 1_000_000.0
+        (mean_total_tpm * active_month_minutes) / 1_000_000.0
     ) * effective_spill_per_1m
     p99_pt_cost = p99_gsus * effective_gsu_price
 
@@ -207,9 +210,19 @@ def compute_focus_chargeback(
     max_hours = 1
     for tenant, series_or_scalar in hourly_consumed_tpm_by_tenant.items():
         if isinstance(series_or_scalar, (int, float)):
-            arr = [max(0.0, float(series_or_scalar))]
+            val = float(series_or_scalar)
+            if not math.isfinite(val):
+                raise ValueError(f"Non-finite chargeback value for tenant {tenant!r}")
+            arr = [max(0.0, val)]
         else:
-            arr = [max(0.0, float(v)) for v in series_or_scalar] or [0.0]
+            arr = []
+            for raw in series_or_scalar:
+                val = float(raw)
+                if not math.isfinite(val):
+                    raise ValueError(f"Non-finite chargeback value for tenant {tenant!r}")
+                arr.append(max(0.0, val))
+            if not arr:
+                arr = [0.0]
         normalized_tenants[tenant] = arr
         max_hours = max(max_hours, len(arr))
 
@@ -236,9 +249,7 @@ def compute_focus_chargeback(
 
     for h in range(max_hours):
         hour_total_tpm = sum(normalized_tenants[t][h] for t in normalized_tenants)
-        active_util_h = (
-            min(1.0, hour_total_tpm / capacity_tpm) if capacity_tpm > 0 else 0.0
-        )
+        active_util_h = min(1.0, hour_total_tpm / capacity_tpm) if capacity_tpm > 0 else 0.0
         sum_active_util += active_util_h
 
         active_cost_h = hourly_commit_cost * active_util_h
@@ -246,9 +257,7 @@ def compute_focus_chargeback(
 
         spare_tpm_h = max(0.0, capacity_tpm - min(capacity_tpm, hour_total_tpm))
         waterfilled_tpm_h = min(spare_tpm_h, waterfill_demand_tpm)
-        waterfill_util_h = (
-            waterfilled_tpm_h / capacity_tpm if capacity_tpm > 0 else 0.0
-        )
+        waterfill_util_h = waterfilled_tpm_h / capacity_tpm if capacity_tpm > 0 else 0.0
         sum_effective_util += active_util_h + waterfill_util_h
 
         waterfill_cost_h = hourly_commit_cost * waterfill_util_h
@@ -342,7 +351,6 @@ def evaluate_batch_scavenger_economics(
 
     total_monthly_pt_tokens = float(gsus * gsu_cap * MINUTES_PER_MONTH)
     active_tokens = total_monthly_pt_tokens * (active_util / 100.0)
-    # Use 85% ceiling on idle capacity for safe online scavenging without starving spikes
     idle_scavengable_tokens = max(0.0, (total_monthly_pt_tokens * 0.85) - active_tokens)
 
     batch_tokens = max(0.0, float(batch_monthly_burndown_tokens))
@@ -363,7 +371,7 @@ def evaluate_batch_scavenger_economics(
         policy = "X-Vertex-AI-LLM-Request-Type: dedicated ($0.00 overage guaranteed)"
     else:
         policy = (
-            "X-Vertex-AI-LLM-Request-Type: <unset> + "
+            "Omit X-Vertex-AI-LLM-Request-Type + "
             "X-Vertex-AI-LLM-Shared-Request-Type: flex ($0 PT first, 0.5x overflow)"
         )
 
@@ -385,6 +393,77 @@ def evaluate_batch_scavenger_economics(
     )
 
 
+def _is_edf_feasible(
+    jobs: Sequence[DeadlineJobSpec],
+    cum_residual: Sequence[float],
+    horizon_hours: int,
+) -> bool:
+    cum_work = 0.0
+    for job in sorted(jobs, key=lambda j: (j.deadline_hour, j.job_id)):
+        if job.deadline_hour > horizon_hours:
+            return False
+        cum_work += job.burndown_tokens
+        if cum_work > cum_residual[job.deadline_hour - 1] + 1e-6:
+            return False
+    return True
+
+
+def _select_optimal_deadline_subset(
+    jobs_in: Sequence[DeadlineJobSpec],
+    cum_residual: Sequence[float],
+    horizon_hours: int,
+) -> set[str]:
+    """Select the deadline-feasible subset maximizing SLA-protected business value (`<= 24` B&B)."""
+    eligible = [j for j in jobs_in if 1 <= j.deadline_hour <= horizon_hours]
+    if not eligible:
+        return set()
+
+    if len(eligible) > 24:
+        ranked = sorted(
+            eligible,
+            key=lambda j: (-(j.value_usd / max(1.0, j.burndown_tokens)), j.deadline_hour),
+        )
+        chosen: list[DeadlineJobSpec] = []
+        for cand in ranked:
+            if _is_edf_feasible([*chosen, cand], cum_residual, horizon_hours):
+                chosen.append(cand)
+        return {j.job_id for j in chosen}
+
+    edf_jobs = sorted(eligible, key=lambda j: (j.deadline_hour, -j.value_usd, j.job_id))
+    gains = [j.value_usd for j in edf_jobs]
+    suffix_gain = [0.0] * (len(edf_jobs) + 1)
+    for idx in range(len(edf_jobs) - 1, -1, -1):
+        suffix_gain[idx] = suffix_gain[idx + 1] + gains[idx]
+
+    best_gain = -1.0
+    best_tokens = float("inf")
+    best_ids: set[str] = set()
+    current_ids: list[str] = []
+
+    def _dfs(idx: int, cum_tokens: float, acc_gain: float) -> None:
+        nonlocal best_gain, best_tokens, best_ids
+        if acc_gain + suffix_gain[idx] < best_gain - 1e-9:
+            return
+        if idx == len(edf_jobs):
+            if acc_gain > best_gain + 1e-9 or (
+                abs(acc_gain - best_gain) <= 1e-9 and cum_tokens < best_tokens
+            ):
+                best_gain = acc_gain
+                best_tokens = cum_tokens
+                best_ids = set(current_ids)
+            return
+
+        job = edf_jobs[idx]
+        if cum_tokens + job.burndown_tokens <= cum_residual[job.deadline_hour - 1] + 1e-6:
+            current_ids.append(job.job_id)
+            _dfs(idx + 1, cum_tokens + job.burndown_tokens, acc_gain + gains[idx])
+            current_ids.pop()
+        _dfs(idx + 1, cum_tokens, acc_gain)
+
+    _dfs(0, 0.0, 0.0)
+    return best_ids
+
+
 def schedule_residual_capacity(
     provisioned_gsus: int = 20,
     tpm_per_gsu: int = 120_900,
@@ -394,59 +473,39 @@ def schedule_residual_capacity(
     evergreen_backfill_tokens: float = 250_000_000.0,
     paygo_per_1m_burndown_tokens_usd: float = 0.50,
 ) -> ResidualScheduleReport:
-    """Schedule Tier-0 Revenue, Tier-1 Hard-Deadline (EDF + Value Density), and Tier-2 Evergreen."""
+    """Schedule Tier-0 Revenue, Tier-1 Hard-Deadline (EDF + Exact Admission), & Tier-2 Evergreen."""
     gsus = max(1, int(provisioned_gsus))
     gsu_cap = max(1, int(tpm_per_gsu))
     safety = min(1.0, max(0.1, float(safety_headroom_ratio)))
     rev_series = (
         [max(0.0, float(v)) for v in revenue_tpm_by_hour]
-        if revenue_tpm_by_hour
-        else [600_000.0, 400_000.0, 300_000.0, 250_000.0, 200_000.0, 350_000.0]
+        if revenue_tpm_by_hour is not None
+        else list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR)
     )
+    if not rev_series:
+        rev_series = list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR)
     horizon_hours = len(rev_series)
 
-    # Hourly residual token budget A(h) = max(0, safety * C_hour - R(h) * 60)
     hourly_ceiling_tokens = gsus * gsu_cap * 60.0 * safety
     residual_by_hour = [
         max(0.0, hourly_ceiling_tokens - (rev_tpm * 60.0)) for rev_tpm in rev_series
     ]
     total_residual_tokens = sum(residual_by_hour)
+    cum_residual: list[float] = []
+    running = 0.0
+    for r_h in residual_by_hour:
+        running += r_h
+        cum_residual.append(running)
 
-    jobs_in = list(deadline_jobs or [])
-    # Rank candidate deadline jobs by value density (v_i / w_i) descending, breaking ties by EDF
-    ranked_candidates = sorted(
-        jobs_in,
-        key=lambda j: (-(j.value_usd / max(1.0, j.burndown_tokens)), j.deadline_hour),
-    )
+    jobs_in = list(deadline_jobs) if deadline_jobs is not None else make_default_deadline_jobs()
+    flex_rate_per_1m = float(paygo_per_1m_burndown_tokens_usd) * SPILLOVER_MULTIPLIERS["flex"]
+    admitted_ids = _select_optimal_deadline_subset(jobs_in, cum_residual, horizon_hours)
 
-    admitted_ids: set[str] = set()
-    admitted_jobs: list[DeadlineJobSpec] = []
-    for candidate in ranked_candidates:
-        trial_set = sorted(
-            [*admitted_jobs, candidate], key=lambda j: (j.deadline_hour, j.job_id)
-        )
-        # Check cumulative feasibility at every deadline cutoff:
-        # sum_{d_i <= d_m} w_i <= sum_{h<=d_m} A(h)
-        feasible = True
-        cum_work = 0.0
-        for job in trial_set:
-            eff_deadline = min(horizon_hours, max(1, job.deadline_hour))
-            cum_work += job.burndown_tokens
-            avail_until_d = sum(residual_by_hour[:eff_deadline])
-            if cum_work > avail_until_d:
-                feasible = False
-                break
-        if feasible:
-            admitted_jobs.append(candidate)
-            admitted_ids.add(candidate.job_id)
-
-    # Sort final schedule in Earliest Deadline First (EDF) order for admitted jobs
     ordered_specs = sorted(
         jobs_in,
         key=lambda j: (0 if j.job_id in admitted_ids else 1, j.deadline_hour, j.job_id),
     )
 
-    flex_rate_per_1m = float(paygo_per_1m_burndown_tokens_usd) * SPILLOVER_MULTIPLIERS["flex"]
     scheduled_rows: list[ScheduledDeadlineJob] = []
     admitted_tokens = 0.0
     spilled_tokens = 0.0
@@ -473,14 +532,11 @@ def schedule_residual_capacity(
         else:
             spilled_tokens += spec.burndown_tokens
             job_flex_cost = (spec.burndown_tokens / 1_000_000.0) * flex_rate_per_1m
-            # Spill to 0.5x Flex only if job value exceeds Flex cost; otherwise early-kill
             if spec.value_usd > job_flex_cost:
                 total_value += spec.value_usd - job_flex_cost
                 flex_spill_cost += job_flex_cost
-                headers = {
-                    "X-Vertex-AI-LLM-Request-Type": "unset",
-                    "X-Vertex-AI-LLM-Shared-Request-Type": "flex",
-                }
+                # Omit X-Vertex-AI-LLM-Request-Type so spare PT drains first before 0.5x Flex spill
+                headers = {"X-Vertex-AI-LLM-Shared-Request-Type": "flex"}
                 cost_val = job_flex_cost
             else:
                 headers = {"X-Gateway-Admission": "aborted-early-low-density"}

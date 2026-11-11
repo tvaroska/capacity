@@ -1,0 +1,22 @@
+{
+  "corpus_file": "azure_llm_trace_10k.jsonl.gz",
+  "record_count": 10000,
+  "long_context_gt_200k_count": 209,
+  "gzip_sha256": "471ea3916fd27b98c3b38de5b4044d54ff4ace95b0e030354b6e3644bea325a7",
+  "uncompressed_jsonl_sha256": "1f272507cef102d42359e7eca380475d6c3334da20177fef8870e03f9f00b275",
+  "license": "CC-BY-4.0 (Microsoft Azure Public Dataset - Splitwise ISCA 2024)",
+  "upstream_sources": [
+    {
+      "name": "AzureLLMInferenceTrace_conv.csv",
+      "url": "https://raw.githubusercontent.com/Azure/AzurePublicDataset/master/data/AzureLLMInferenceTrace_conv.csv",
+      "sample_sha256": "2f1e5b666d4e3055fdbba98598ce2ec307767b9064e03e2fa46676dbcc7d0bf8",
+      "rows_used": 7000
+    },
+    {
+      "name": "AzureLLMInferenceTrace_code.csv",
+      "url": "https://raw.githubusercontent.com/Azure/AzurePublicDataset/master/data/AzureLLMInferenceTrace_code.csv",
+      "sample_sha256": "54e9a6d2a4bd06ba1e060304b900abbc74cbea53de96506e60fe5bb4f2277fb6",
+      "rows_used": 3000
+    }
+  ]
+}

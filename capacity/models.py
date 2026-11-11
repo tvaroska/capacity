@@ -2,14 +2,31 @@
 
 from __future__ import annotations
 
+from typing import Annotated
+
 from pydantic import BaseModel, Field
 
-# These values are interpolated into generated YAML/Kubernetes manifests, so they must not be able
-# to carry quotes, newlines, or YAML syntax.
+# Interpolated into generated YAML/Kubernetes manifests and Cloud Monitoring filters;
+# reject quotes, newlines, spaces, or injection tokens at validation boundaries.
 GCP_PROJECT_ID_PATTERN = r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
 GCP_LOCATION_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
-MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.@/-]{0,127}$"
+MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.@/_-]{0,127}$"
 K8S_NAME_PATTERN = r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$"
+
+BoundedTpmFloat = Annotated[float, Field(ge=0.0, le=1e11, allow_inf_nan=False)]
+FiniteNonNegFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
+FinitePosFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
+
+DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR: tuple[float, ...] = (
+    600_000.0,
+    400_000.0,
+    300_000.0,
+    250_000.0,
+    200_000.0,
+    350_000.0,
+    900_000.0,
+    1_800_000.0,
+)
 
 
 class DictAccessModel(BaseModel):
@@ -169,15 +186,15 @@ class ModelTierPrefixCacheAudit(DictAccessModel):
 
 class ModelTierPrefixCacheRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
-    total_input_tokens: int = Field(default=18_000, ge=1)
-    static_prefix_tokens: int = Field(default=14_000, ge=0)
-    output_tokens: int = Field(default=800, ge=0)
-    thoughts_tokens: int = Field(default=400, ge=0)
-    dynamic_header_offset_tokens: int | None = Field(default=120, ge=0)
+    total_input_tokens: int = Field(default=18_000, ge=1, le=2_000_000)
+    static_prefix_tokens: int = Field(default=14_000, ge=0, le=2_000_000)
+    output_tokens: int = Field(default=800, ge=0, le=200_000)
+    thoughts_tokens: int = Field(default=400, ge=0, le=200_000)
+    dynamic_header_offset_tokens: int | None = Field(default=120, ge=0, le=2_000_000)
     single_turn_request: bool = False
     dummy_turn_anchor_applied: bool = False
     strip_thought_signatures: bool = False
-    num_replicas: int = Field(default=8, ge=1)
+    num_replicas: int = Field(default=8, ge=1, le=1_024)
 
 
 class HybridCommitmentRecommendation(DictAccessModel):
@@ -210,7 +227,7 @@ class HybridCommitmentRecommendation(DictAccessModel):
 
 class OptimizeRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
-    tpm_series: list[float] = Field(
+    tpm_series: list[BoundedTpmFloat] = Field(
         default_factory=lambda: [
             420_000.0,
             390_000.0,
@@ -224,22 +241,31 @@ class OptimizeRequest(DictAccessModel):
             160_000.0,
             90_000.0,
             40_000.0,
-        ]
+        ],
+        max_length=50_000,
     )
-    gsu_monthly_price_usd: float = Field(default=2_000.0, gt=0)
-    paygo_per_1m_burndown_tokens_usd: float = Field(default=0.50, gt=0)
+    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
+    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
     spillover_tier: str = Field(default="priority")
-    fsp_discount_pct: float = Field(default=0.0, ge=0.0, le=50.0)
-    sixty_sec_tpm: float | None = None
-    peak_1s_tps: float | None = None
-    peak_10s_tps: float | None = None
-    total_input_tokens: int = Field(default=20_000, ge=0)
-    output_tokens: int = Field(default=1_000, ge=0)
-    thoughts_tokens: int = Field(default=500, ge=0)
-    cached_tokens: int = Field(default=16_000, ge=0)
-    shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0)
-    baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0)
-    num_round_robin_endpoints: int = Field(default=8, ge=1)
+    fsp_discount_pct: float = Field(default=0.0, ge=0.0, le=50.0, allow_inf_nan=False)
+    active_duty_cycle_pct: float = Field(
+        default=100.0,
+        gt=0.0,
+        le=100.0,
+        allow_inf_nan=False,
+        description="Percentage of the 168h week represented by tpm_series (100 for 24x7 series)",
+    )
+    sixty_sec_tpm: BoundedTpmFloat | None = None
+    peak_1s_tps: BoundedTpmFloat | None = None
+    peak_10s_tps: BoundedTpmFloat | None = None
+    total_input_tokens: int = Field(default=20_000, ge=0, le=2_000_000)
+    output_tokens: int = Field(default=1_000, ge=0, le=200_000)
+    thoughts_tokens: int = Field(default=500, ge=0, le=200_000)
+    cached_tokens: int = Field(default=16_000, ge=0, le=2_000_000)
+    shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+    baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+    num_round_robin_endpoints: int = Field(default=8, ge=1, le=1_024)
+    requests_per_second: float = Field(default=1.0, gt=0.0, le=100_000.0, allow_inf_nan=False)
 
 
 class OptimizeResponse(DictAccessModel):
@@ -249,6 +275,38 @@ class OptimizeResponse(DictAccessModel):
     commitment: HybridCommitmentRecommendation
     micro_burst: MicroBurstAudit
     prefix_cache: PrefixCacheAudit
+
+
+class SelfHostedAuditRequest(DictAccessModel):
+    profile: str = "llama-3.3-70b-fp8"
+    tpm_series: list[BoundedTpmFloat] = Field(
+        default_factory=lambda: [
+            520_000.0,
+            480_000.0,
+            410_000.0,
+            340_000.0,
+            290_000.0,
+            180_000.0,
+        ],
+        max_length=50_000,
+    )
+    min_replica_count: int = Field(default=2, ge=0, le=10_000)
+    max_replica_count: int = Field(default=6, ge=1, le=10_000)
+    observed_accelerator_duty_cycle_pct: float = Field(
+        default=52.0, ge=0.0, le=100.0, allow_inf_nan=False
+    )
+    observed_vllm_kv_cache_usage_pct: float = Field(
+        default=91.5, ge=0.0, le=100.0, allow_inf_nan=False
+    )
+    observed_vllm_requests_waiting: FiniteNonNegFloat = 14.0
+    total_input_tokens: int = Field(default=20_000, ge=0, le=2_000_000)
+    shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+    baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+
+
+class VllmParseRequest(DictAccessModel):
+    raw_content: str = Field(max_length=5_000_000)
+    default_model: str = "llama-3.3-70b-fp8"
 
 
 class TenantChargebackRow(DictAccessModel):
@@ -280,11 +338,11 @@ class FocusChargebackReport(DictAccessModel):
 
 class ChargebackRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
-    provisioned_gsus: int = Field(default=10, ge=1)
-    gsu_monthly_price_usd: float = Field(default=2_000.0, gt=0)
-    hourly_consumed_tpm_by_tenant: dict[str, list[float] | float]
-    tenant_raw_token_weights: dict[str, float] | None = None
-    async_batch_waterfill_tpm: float = Field(default=0.0, ge=0.0)
+    provisioned_gsus: int = Field(default=10, ge=1, le=100_000)
+    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
+    hourly_consumed_tpm_by_tenant: dict[str, list[BoundedTpmFloat] | BoundedTpmFloat]
+    tenant_raw_token_weights: dict[str, FinitePosFloat] | None = None
+    async_batch_waterfill_tpm: BoundedTpmFloat = 0.0
 
 
 class BatchScavengerAudit(DictAccessModel):
@@ -308,18 +366,44 @@ class BatchScavengerAudit(DictAccessModel):
 
 class BatchScavengerRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
-    provisioned_gsus: int = Field(default=20, ge=1)
-    gsu_monthly_price_usd: float = Field(default=2_000.0, gt=0)
-    daytime_active_utilization_pct: float = Field(default=24.0, ge=0.0, le=100.0)
-    batch_monthly_burndown_tokens: float = Field(default=45_000_000_000.0, ge=0.0)
-    paygo_per_1m_burndown_tokens_usd: float = Field(default=0.50, gt=0.0)
+    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
+    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
+    daytime_active_utilization_pct: float = Field(
+        default=24.0, ge=0.0, le=100.0, allow_inf_nan=False
+    )
+    batch_monthly_burndown_tokens: FiniteNonNegFloat = 45_000_000_000.0
+    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
 
 
 class DeadlineJobSpec(DictAccessModel):
     job_id: str
-    value_usd: float = Field(gt=0.0)
-    burndown_tokens: float = Field(gt=0.0)
-    deadline_hour: int = Field(ge=1)
+    value_usd: FinitePosFloat
+    burndown_tokens: FinitePosFloat
+    deadline_hour: int = Field(ge=1, le=168)
+
+
+def make_default_deadline_jobs() -> list[DeadlineJobSpec]:
+    """Return the canonical 3-job overnight residual scheduling portfolio."""
+    return [
+        DeadlineJobSpec(
+            job_id="premarket-portfolio-briefings",
+            value_usd=18_000.0,
+            burndown_tokens=240_000_000.0,
+            deadline_hour=6,
+        ),
+        DeadlineJobSpec(
+            job_id="regulatory-risk-digest",
+            value_usd=12_000.0,
+            burndown_tokens=180_000_000.0,
+            deadline_hour=5,
+        ),
+        DeadlineJobSpec(
+            job_id="low-density-archive-sweep",
+            value_usd=900.0,
+            burndown_tokens=320_000_000.0,
+            deadline_hour=6,
+        ),
+    ]
 
 
 class ScheduledDeadlineJob(DictAccessModel):
@@ -352,44 +436,19 @@ class ResidualScheduleReport(DictAccessModel):
 
 class ResidualScheduleRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
-    provisioned_gsus: int = Field(default=20, ge=1)
-    safety_headroom_ratio: float = Field(default=0.85, gt=0.1, le=1.0)
-    revenue_tpm_by_hour: list[float] = Field(
-        default_factory=lambda: [
-            600_000.0,
-            400_000.0,
-            300_000.0,
-            250_000.0,
-            200_000.0,
-            350_000.0,
-            900_000.0,
-            1_800_000.0,
-        ]
+    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
+    safety_headroom_ratio: float = Field(default=0.85, gt=0.1, le=1.0, allow_inf_nan=False)
+    revenue_tpm_by_hour: list[BoundedTpmFloat] = Field(
+        default_factory=lambda: list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR),
+        min_length=1,
+        max_length=168,
     )
     deadline_jobs: list[DeadlineJobSpec] = Field(
-        default_factory=lambda: [
-            DeadlineJobSpec(
-                job_id="premarket-portfolio-briefings",
-                value_usd=18_000.0,
-                burndown_tokens=240_000_000.0,
-                deadline_hour=6,
-            ),
-            DeadlineJobSpec(
-                job_id="regulatory-risk-digest",
-                value_usd=12_000.0,
-                burndown_tokens=180_000_000.0,
-                deadline_hour=5,
-            ),
-            DeadlineJobSpec(
-                job_id="low-density-archive-sweep",
-                value_usd=900.0,
-                burndown_tokens=320_000_000.0,
-                deadline_hour=6,
-            ),
-        ]
+        default_factory=make_default_deadline_jobs,
+        max_length=200,
     )
-    evergreen_backfill_tokens: float = Field(default=250_000_000.0, ge=0.0)
-    paygo_per_1m_burndown_tokens_usd: float = Field(default=0.50, gt=0.0)
+    evergreen_backfill_tokens: FiniteNonNegFloat = 250_000_000.0
+    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
 
 
 class FolderPoolingReport(DictAccessModel):
@@ -411,8 +470,8 @@ class FolderPoolingReport(DictAccessModel):
 class FolderPoolingRequest(DictAccessModel):
     model: str = "gemini-3.8-flash"
     percentile_target: int = Field(default=90, ge=1, le=100)
-    gsu_monthly_price_usd: float = Field(default=2_000.0, gt=0.0)
-    hourly_tpm_by_project: dict[str, list[float]] = Field(
+    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
+    hourly_tpm_by_project: dict[str, list[BoundedTpmFloat]] = Field(
         default_factory=lambda: {
             "emea-wealth-spoke": [480_000.0, 520_000.0, 410_000.0, 90_000.0, 40_000.0, 30_000.0],
             "amer-retail-spoke": [60_000.0, 80_000.0, 490_000.0, 560_000.0, 510_000.0, 90_000.0],
@@ -436,15 +495,15 @@ class FinOpsKpiScorecard(DictAccessModel):
 
 
 class FinOpsKpiRequest(DictAccessModel):
-    total_amortized_cost_usd: float = Field(default=24_500.0, gt=0.0)
+    total_amortized_cost_usd: FinitePosFloat = 24_500.0
     uncached_input_tokens: int = Field(default=1_200_000_000, ge=0)
     cached_input_tokens: int = Field(default=3_800_000_000, ge=0)
     delivered_output_tokens: int = Field(default=420_000_000, ge=0)
     thinking_tokens: int = Field(default=180_000_000, ge=0)
     retry_and_judge_tokens: int = Field(default=95_000_000, ge=0)
     verified_outcomes: int = Field(default=140_000, ge=1)
-    hourly_reserved_burndown_capacity: float = Field(default=72_540_000.0, gt=0.0)
-    weekly_consumed_burndown_tokens: float = Field(default=6_950_000_000.0, ge=0.0)
+    hourly_reserved_burndown_capacity: FinitePosFloat = 72_540_000.0
+    weekly_consumed_burndown_tokens: FiniteNonNegFloat = 6_950_000_000.0
 
 
 class DisaggregatedPoolSizing(DictAccessModel):
@@ -470,11 +529,11 @@ class DisaggregatedPoolSizing(DictAccessModel):
 
 class DisaggregatedPoolRequest(DictAccessModel):
     profile: str = "llama-3.3-70b-fp8"
-    peak_qps: float = Field(default=18.0, gt=0.0)
-    avg_input_tokens: int = Field(default=6_400, ge=1)
-    avg_output_tokens: int = Field(default=450, ge=1)
-    target_ttft_ms: float = Field(default=350.0, gt=0.0)
-    target_tpot_ms: float = Field(default=25.0, gt=0.0)
+    peak_qps: float = Field(default=18.0, gt=0.0, le=100_000.0, allow_inf_nan=False)
+    avg_input_tokens: int = Field(default=6_400, ge=1, le=2_000_000)
+    avg_output_tokens: int = Field(default=450, ge=1, le=200_000)
+    target_ttft_ms: float = Field(default=350.0, gt=0.0, le=60_000.0, allow_inf_nan=False)
+    target_tpot_ms: float = Field(default=25.0, gt=0.0, le=10_000.0, allow_inf_nan=False)
 
 
 class GatewayHeaderPolicy(DictAccessModel):
@@ -527,9 +586,10 @@ class GatewayConfigRequest(DictAccessModel):
     model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
     project_id: str = Field(default="prod-genai-pt-host", pattern=GCP_PROJECT_ID_PATTERN)
     location: str = Field(default="global", pattern=GCP_LOCATION_PATTERN)
-    provisioned_gsus: int = Field(default=20, ge=1)
-    target_rps: int = Field(default=650, ge=1)
-    concurrent_sse_streams: int = Field(default=400, ge=0)
-    pods: int = Field(default=12, ge=1)
-    uvicorn_workers_per_pod: int = Field(default=4, ge=1)
+    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
+    target_rps: int = Field(default=650, ge=1, le=1_000_000)
+    concurrent_sse_streams: int = Field(default=400, ge=0, le=1_000_000)
+    pods: int = Field(default=12, ge=1, le=10_000)
+    uvicorn_workers_per_pod: int = Field(default=4, ge=1, le=128)
     self_hosted_model: str = Field(default="llama-3.3-70b-fp8", pattern=K8S_NAME_PATTERN)
+    business_unit_shares: int = Field(default=4, ge=1, le=1_000)

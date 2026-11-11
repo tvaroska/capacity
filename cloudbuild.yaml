@@ -24,10 +24,9 @@ steps:
         set -euo pipefail
         uv lock --check
         uv sync --frozen --extra dev
-        uv pip install --python /workspace/.venv/bin/python "ast-grep-cli>=0.35"
         /workspace/.venv/bin/ast-grep scan --rule /workspace/specs/ast.rules.yaml
-        /workspace/.venv/bin/ruff check capacity/ tests/
-        /workspace/.venv/bin/mypy capacity tests
+        /workspace/.venv/bin/ruff check capacity/ tests/ benchmarks/
+        /workspace/.venv/bin/mypy capacity tests benchmarks
         /workspace/.venv/bin/pytest tests/ -v
 
   - id: docker-build

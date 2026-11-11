@@ -1,0 +1,22 @@
+# scrape_timestamp_seconds 1762600800
+vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"} 50000000
+vllm:generation_tokens_total{model_name="llama-3.3-70b-fp8"} 8000000
+vllm:prefix_cache_queries_total{model_name="llama-3.3-70b-fp8"} 10000
+vllm:prefix_cache_hits_total{model_name="llama-3.3-70b-fp8"} 7500
+vllm:gpu_cache_usage_perc{model_name="llama-3.3-70b-fp8"} 0.64
+vllm:num_requests_waiting{model_name="llama-3.3-70b-fp8"} 2
+# scrape_timestamp_seconds 1762600860
+vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"} 50240000
+vllm:generation_tokens_total{model_name="llama-3.3-70b-fp8"} 8032000
+vllm:prefix_cache_queries_total{model_name="llama-3.3-70b-fp8"} 10200
+vllm:prefix_cache_hits_total{model_name="llama-3.3-70b-fp8"} 7660
+vllm:gpu_cache_usage_perc{model_name="llama-3.3-70b-fp8"} 0.68
+vllm:num_requests_waiting{model_name="llama-3.3-70b-fp8"} 3
+# scrape_timestamp_seconds 1762600920
+# Pod restart / counter reset between scrape 2 and scrape 3
+vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"} 180000
+vllm:generation_tokens_total{model_name="llama-3.3-70b-fp8"} 24000
+vllm:prefix_cache_queries_total{model_name="llama-3.3-70b-fp8"} 150
+vllm:prefix_cache_hits_total{model_name="llama-3.3-70b-fp8"} 120
+vllm:gpu_cache_usage_perc{model_name="llama-3.3-70b-fp8"} 0.59
+vllm:num_requests_waiting{model_name="llama-3.3-70b-fp8"} 1

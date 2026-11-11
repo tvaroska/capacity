@@ -14,16 +14,20 @@ from typing import Annotated
 import typer
 from dotenv import load_dotenv
 
-from capacity.burst import (
-    compute_weighted_burndown_tokens,
-    evaluate_micro_burst_window,
-    evaluate_prefix_cache_dilution,
-)
 from capacity.capacity import (
     build_response,
+    evaluate_gsu_optimization,
     load_gsu_config,
     normalize_model_id,
     require_capacity,
+)
+from capacity.cli_formatters import (
+    load_sparse_from_trace_file,
+    parse_folder_map,
+    print_chargeback_report,
+    print_gsu_optimize_report,
+    print_recommendations_table,
+    print_self_hosted_audit,
 )
 from capacity.core import (
     DEFAULT_DAYS,
@@ -38,17 +42,17 @@ from capacity.finops import (
     compute_focus_chargeback,
     evaluate_batch_scavenger_economics,
     evaluate_folder_pooling,
-    optimize_hybrid_commitment,
     schedule_residual_capacity,
 )
 from capacity.gateway import generate_gateway_bundle
 from capacity.models import (
     DeadlineJobSpec,
-    OptimizeResponse,
-    RecommendationResponse,
+    OptimizeRequest,
+    make_default_deadline_jobs,
 )
 from capacity.portal import build_showcase_summary_payload, render_showcase_portal_html
 from capacity.self_hosted import (
+    VllmTelemetrySnapshot,
     evaluate_self_hosted_endpoint,
     load_inference_server_file,
     resolve_self_hosted_profile,
@@ -83,7 +87,6 @@ class GatewayTarget(StrEnum):
     all = "all"
 
 
-# Default synthetic 30-day TPM distribution (12 representative buckets in TPM)
 DEFAULT_SYNTHETIC_TPM_SERIES: list[float] = [
     420_000.0,
     390_000.0,
@@ -99,7 +102,6 @@ DEFAULT_SYNTHETIC_TPM_SERIES: list[float] = [
     40_000.0,
 ]
 
-# Default synthetic 24-hour multi-tenant TPM profile (8 active business hours + 16 off-peak hours)
 DEFAULT_SYNTHETIC_TENANT_TPM: dict[str, list[float]] = {
     "claims-triage": [350_000.0] * 8 + [40_000.0] * 16,
     "underwriting-copilot": [250_000.0] * 8 + [30_000.0] * 16,
@@ -111,105 +113,9 @@ def _or_exit[T](fn: Callable[[], T]) -> T:
     """Turn bad model/profile/config inputs into a one-line CLI error instead of a traceback."""
     try:
         return fn()
-    except ValueError as exc:  # includes UnknownModelError
+    except ValueError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-
-
-def _parse_folder_map(raw: str | None) -> dict[str, str]:
-    if not raw:
-        return {}
-    stripped = raw.strip()
-    if stripped.startswith("{"):
-        loaded = json.loads(stripped)
-        return {str(k): str(v) for k, v in loaded.items()}
-    mapping: dict[str, str] = {}
-    for item in stripped.split(","):
-        if "=" in item:
-            k, v = item.split("=", 1)
-            mapping[k.strip()] = v.strip()
-    return mapping
-
-
-def _load_sparse_from_trace_file(
-    trace_file: Path,
-    days: int,
-    by_region: bool,
-) -> tuple[dict[str, dict[datetime, int]], int]:
-    raw_data = json.loads(trace_file.read_text(encoding="utf-8"))
-    base_dt = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
-    total_minutes = days * 24 * 60
-    if isinstance(raw_data, list):
-        key = "gemini-3.8-flash@us-central1" if by_region else "gemini-3.8-flash"
-        series_map = {
-            base_dt + timedelta(minutes=i): int(float(v))
-            for i, v in enumerate(raw_data)
-        }
-        return {key: series_map}, max(total_minutes, len(raw_data))
-    if isinstance(raw_data, dict):
-        sparse: dict[str, dict[datetime, int]] = {}
-        for k, vals in raw_data.items():
-            if isinstance(vals, list):
-                sparse[str(k)] = {
-                    base_dt + timedelta(minutes=i): int(float(v))
-                    for i, v in enumerate(vals)
-                }
-        return sparse, total_minutes
-    raise ValueError(f"Unsupported trace file structure in {trace_file}")
-
-
-def _print_table(
-    response: RecommendationResponse,
-    percentiles: list[int],
-) -> None:
-    if not response.models:
-        typer.echo("No token throughput data found for the specified parameters.")
-        return
-
-    pct_keys = [f"P{p}" for p in percentiles]
-    unit_label = "Reps" if response.mode == "self-hosted" else "GSU"
-    cap_header = f"TPM/{unit_label}"
-    headers = ["Model"]
-    if any(m.folder for m in response.models):
-        headers.append("Folder")
-    if response.by_region:
-        headers.append("Region")
-    headers.extend([cap_header, "Duty%"])
-    for k in pct_keys:
-        headers.extend([f"{k} TPM", f"{k} {unit_label}"])
-    headers.extend(["Forecast+24h TPM", f"Forecast {unit_label}"])
-
-    rows: list[list[str]] = []
-    for m in response.models:
-        cap_str = f"{m.gsu_capacity_tpm:,}" if m.gsu_capacity_tpm else "?"
-        row = [m.model]
-        if any(mod.folder for mod in response.models):
-            row.append(m.folder or "-")
-        if response.by_region:
-            row.append(m.region or "global")
-        row.extend([cap_str, f"{m.duty_cycle_pct:.1f}%"])
-        for k in pct_keys:
-            d = m.percentiles[k]
-            gsu_str = str(d.recommended_gsus) if m.gsu_capacity_tpm else "?"
-            row.extend([f"{d.tpm:,}", gsu_str])
-        row.extend(
-            [
-                f"{m.forecast_24h_peak_tpm:,}",
-                str(m.forecast_24h_recommended_gsus) if m.gsu_capacity_tpm else "?",
-            ]
-        )
-        rows.append(row)
-
-    col_widths = [
-        max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)
-    ]
-    fmt = "  ".join(
-        f"{{:<{w}}}" if i == 0 else f"{{:>{w}}}" for i, w in enumerate(col_widths)
-    )
-    typer.echo(fmt.format(*headers))
-    typer.echo("  ".join("—" * w for w in col_widths))
-    for row in rows:
-        typer.echo(fmt.format(*row))
 
 
 @app.command()
@@ -228,7 +134,9 @@ def demo(
     """Run the end-to-end Showcase demo across all 4 planes (zero cloud credentials needed)."""
     if html_out is not None:
         html_out.parent.mkdir(parents=True, exist_ok=True)
-        html_out.write_text(render_showcase_portal_html(), encoding="utf-8")
+        html_out.write_text(
+            render_showcase_portal_html(static_export=True), encoding="utf-8"
+        )
 
     payload = build_showcase_summary_payload()
     if output_format == OutputFormat.json:
@@ -358,9 +266,7 @@ def recommend(
     pcts = sorted(percentile) if percentile else DEFAULT_PERCENTILES
     for p in pcts:
         if not 0 <= p <= 100:
-            typer.echo(
-                f"Error: percentile must be between 0 and 100, got {p}", err=True
-            )
+            typer.echo(f"Error: percentile must be between 0 and 100, got {p}", err=True)
             raise typer.Exit(code=1)
 
     if days < 1:
@@ -370,9 +276,14 @@ def recommend(
     env_proj = os.environ.get("GOOGLE_CLOUD_PROJECT")
     proj_list = project or ([env_proj] if env_proj else [])
     proj_label = ",".join(proj_list) if proj_list else "demo-project"
+    default_trace_model = (
+        model[0]
+        if model
+        else ("llama-3.3-70b-fp8" if mode == CapacityMode.self_hosted else "gemini-3.8-flash")
+    )
 
     if vllm_file is not None:
-        snap = load_inference_server_file(vllm_file)
+        snap = load_inference_server_file(vllm_file, default_model=default_trace_model)
         base_dt = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
         sparse = {
             snap.model: {
@@ -382,7 +293,11 @@ def recommend(
         }
         total_minutes = max(days * 24 * 60, len(snap.tpm_series))
     elif trace_file is not None:
-        sparse, total_minutes = _load_sparse_from_trace_file(trace_file, days, by_region)
+        sparse, total_minutes = _or_exit(
+            lambda: load_sparse_from_trace_file(
+                trace_file, days, by_region, default_model=default_trace_model
+            )
+        )
     elif demo:
         sparse, total_minutes = build_demo_throughput(
             days=days, by_region=by_region, mode=mode.value
@@ -403,11 +318,11 @@ def recommend(
                     model,
                     region,
                     by_region=by_region,
-                    folder_map=_parse_folder_map(folder_map),
+                    folder_map=parse_folder_map(folder_map),
                     mode=mode.value,
                 )
             )
-        except GCPQueryError as exc:
+        except (GCPQueryError, ValueError) as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
 
@@ -425,12 +340,15 @@ def recommend(
 
     if html_out is not None:
         html_out.parent.mkdir(parents=True, exist_ok=True)
-        html_out.write_text(render_showcase_portal_html(), encoding="utf-8")
+        html_out.write_text(
+            render_showcase_portal_html(static_export=True, custom_recommendations=resp),
+            encoding="utf-8",
+        )
 
     if output_format == OutputFormat.json:
         typer.echo(resp.model_dump_json(indent=2))
     else:
-        _print_table(resp, pcts)
+        print_recommendations_table(resp, pcts)
 
 
 @app.command()
@@ -439,26 +357,17 @@ def optimize(
         str, typer.Option(help="Model or self-hosted profile ID")
     ] = "gemini-3.8-flash",
     mode: Annotated[
-        CapacityMode,
-        typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'"),
+        CapacityMode, typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'")
     ] = CapacityMode.gsu,
     trace_file: Annotated[
         Path | None,
-        typer.Option(
-            "--trace-file",
-            help="Optional JSON file containing a list of per-minute TPM floats",
-        ),
+        typer.Option("--trace-file", help="Optional JSON file containing a list of minute TPMs"),
     ] = None,
     vllm_file: Annotated[
         Path | None,
-        typer.Option(
-            "--vllm-file",
-            help="Phase 2 vLLM/SGLang Prometheus /metrics or JSONL log file",
-        ),
+        typer.Option("--vllm-file", help="Phase 2 vLLM/SGLang Prometheus or JSONL log file"),
     ] = None,
-    gsu_price: Annotated[
-        float, typer.Option(help="Monthly price per 1 GSU in USD")
-    ] = 2_000.0,
+    gsu_price: Annotated[float, typer.Option(help="Monthly price per 1 GSU in USD")] = 2_000.0,
     paygo_per_1m: Annotated[
         float, typer.Option(help="Base Standard PayGo price per 1M burndown tokens in USD")
     ] = 0.50,
@@ -468,17 +377,21 @@ def optimize(
     fsp_discount_pct: Annotated[
         float, typer.Option(help="Flexible Savings Plan (FSP) discount percentage (0-50)")
     ] = 0.0,
+    active_duty_pct: Annotated[
+        float,
+        typer.Option(
+            "--active-duty-pct",
+            help="Percentage of week represented by active-only trace (100 for 24x7 trace)",
+        ),
+    ] = 100.0,
     sixty_sec_tpm: Annotated[
-        float | None,
-        typer.Option(help="60-second average TPM for micro-burst window audit"),
+        float | None, typer.Option(help="60-second average TPM for micro-burst window audit")
     ] = None,
     peak_1s_tps: Annotated[
-        float | None,
-        typer.Option(help="Peak 1-second TPS burst for micro-burst window audit"),
+        float | None, typer.Option(help="Peak 1-second TPS burst for micro-burst window audit")
     ] = None,
     peak_10s_tps: Annotated[
-        float | None,
-        typer.Option(help="Peak 10-second TPS burst for <50 GSU micro-burst window audit"),
+        float | None, typer.Option(help="Peak 10-second TPS burst for <50 GSU window audit")
     ] = None,
     input_tokens: Annotated[
         int, typer.Option(help="Input tokens per concurrency wave / request")
@@ -489,9 +402,7 @@ def optimize(
     thoughts_tokens: Annotated[
         int, typer.Option(help="Reasoning / thought tokens per request")
     ] = 500,
-    cached_tokens: Annotated[
-        int, typer.Option(help="Cached prefix tokens per request")
-    ] = 16_000,
+    cached_tokens: Annotated[int, typer.Option(help="Cached prefix tokens per request")] = 16_000,
     shared_prefix_ratio: Annotated[
         float, typer.Option(help="Fraction of input prompt that is shared static prefix (0-1)")
     ] = 0.80,
@@ -501,17 +412,14 @@ def optimize(
     endpoints: Annotated[
         int, typer.Option(help="Number of round-robin load-balanced endpoints/replicas")
     ] = 8,
-    min_replicas: Annotated[
-        int, typer.Option(help="Self-hosted min_replica_count")
-    ] = 2,
-    max_replicas: Annotated[
-        int, typer.Option(help="Self-hosted max_replica_count")
-    ] = 8,
+    min_replicas: Annotated[int, typer.Option(help="Self-hosted min_replica_count")] = 2,
+    max_replicas: Annotated[int, typer.Option(help="Self-hosted max_replica_count")] = 8,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
 ) -> None:
     """Run Newsvendor hybrid commitment sizing, micro-burst/KV audit, and prefix-cache dilution."""
+    snap: VllmTelemetrySnapshot | None = None
     if vllm_file is not None:
         snap = load_inference_server_file(vllm_file, default_model=model)
         series = snap.tpm_series
@@ -525,150 +433,61 @@ def optimize(
         series = list(DEFAULT_SYNTHETIC_TPM_SERIES)
 
     if mode == CapacityMode.self_hosted:
-        prof = _or_exit(lambda: resolve_self_hosted_profile(model))
-        audit = evaluate_self_hosted_endpoint(
-            tpm_series=series,
-            profile=prof,
-            min_replica_count=min_replicas,
-            max_replica_count=max_replicas,
-            total_input_tokens=input_tokens,
-            shared_prefix_ratio=shared_prefix_ratio,
-            baseline_cache_hit_rate=baseline_cache_hit_rate,
+        prof = _or_exit(lambda: resolve_self_hosted_profile(snap.model if snap else model))
+        kv_pct = snap.observed_kv_cache_usage_pct if snap is not None else 91.5
+        wait_q = snap.observed_requests_waiting if snap is not None else 14.0
+        eff_hit = (
+            snap.observed_cache_hit_rate
+            if (snap is not None and snap.observed_cache_hit_rate > 0.0)
+            else baseline_cache_hit_rate
+        )
+        audit = _or_exit(
+            lambda: evaluate_self_hosted_endpoint(
+                tpm_series=series,
+                profile=prof,
+                min_replica_count=min_replicas,
+                max_replica_count=max_replicas,
+                observed_vllm_kv_cache_usage_pct=kv_pct,
+                observed_vllm_requests_waiting=wait_q,
+                total_input_tokens=input_tokens,
+                shared_prefix_ratio=shared_prefix_ratio,
+                baseline_cache_hit_rate=eff_hit,
+            )
         )
         if output_format == OutputFormat.json:
             typer.echo(audit.model_dump_json(indent=2))
             return
-        typer.echo(
-            f"=== Self-Hosted GPU Endpoint Audit ({audit.profile_id} @ {audit.machine_type}) ==="
-        )
-        typer.echo(
-            f"Upfront GPU Quota Lock: {audit.locked_regional_accelerators}x "
-            f"{audit.accelerator_type} "
-            f"(min={audit.min_replica_count} reps -> {audit.active_baseline_accelerators} GPUs, "
-            f"stranded lock={audit.stranded_quota_accelerators} GPUs)"
-        )
-        typer.echo(
-            f"Autoscaler Illusion:    Duty Cycle="
-            f"{audit.observed_accelerator_duty_cycle_pct:.1f}% (<60%) "
-            f"vs vLLM KV-Cache={audit.observed_vllm_kv_cache_usage_pct:.1f}% "
-            f"(Wait Queue={audit.observed_vllm_requests_waiting:.0f}, "
-            f"Illusion={audit.duty_cycle_illusion_detected})"
-        )
-        typer.echo(
-            f"Newsvendor Replicas:    {audit.optimal_reserved_replicas} Reserved CUD Reps "
-            f"(P99={audit.p99_peak_replicas} Reps, "
-            f"Break-Even Util={audit.breakeven_replica_utilization_pct:.1f}%)"
-        )
-        typer.echo(
-            f"Monthly Hybrid Cost:    ${audit.total_hybrid_monthly_cost_usd:,.2f} "
-            f"(Reserved=${audit.reserved_base_monthly_cost_usd:,.2f} + "
-            f"Elastic Burst=${audit.elastic_burst_monthly_cost_usd:,.2f}; "
-            f"Non-Prod ScaleToZero Saves=${audit.scale_to_zero_nonprod_savings_usd:,.2f}/mo)"
-        )
-        pc = audit.prefix_cache
-        typer.echo(
-            f"Replica KV Dilution:    Sticky={pc.sticky_gsus} Reps vs "
-            f"Round-Robin({pc.num_round_robin_endpoints})={pc.round_robin_gsus} Reps "
-            f"(Effective Hit={pc.effective_cache_hit_rate * 100:.1f}%, "
-            f"Savings={pc.gsu_savings_pct:.1f}%)"
-        )
+        print_self_hosted_audit(audit)
         return
 
-    norm_model = normalize_model_id(model)
-    cfg = load_gsu_config()
-    tpm_per_gsu = _or_exit(lambda: require_capacity(norm_model, cfg))
-    tps_per_gsu = tpm_per_gsu / 60.0
-
-    req_weighted_burndown = compute_weighted_burndown_tokens(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        thoughts_tokens=thoughts_tokens,
-        cached_tokens=cached_tokens,
+    req = _or_exit(
+        lambda: OptimizeRequest(
+            model=model,
+            tpm_series=series,
+            gsu_monthly_price_usd=gsu_price,
+            paygo_per_1m_burndown_tokens_usd=paygo_per_1m,
+            spillover_tier=spillover_tier,
+            fsp_discount_pct=fsp_discount_pct,
+            active_duty_cycle_pct=active_duty_pct,
+            sixty_sec_tpm=sixty_sec_tpm,
+            peak_1s_tps=peak_1s_tps,
+            peak_10s_tps=peak_10s_tps,
+            total_input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            thoughts_tokens=thoughts_tokens,
+            cached_tokens=cached_tokens,
+            shared_prefix_ratio=shared_prefix_ratio,
+            baseline_cache_hit_rate=baseline_cache_hit_rate,
+            num_round_robin_endpoints=endpoints,
+        )
     )
-
-    commitment = optimize_hybrid_commitment(
-        tpm_series=series,
-        model=norm_model,
-        tpm_per_gsu=tpm_per_gsu,
-        gsu_monthly_price_usd=gsu_price,
-        paygo_per_1m_burndown_tokens_usd=paygo_per_1m,
-        spillover_tier=spillover_tier,
-        fsp_discount_pct=fsp_discount_pct,
-    )
-
-    prov_gsus = max(1, commitment.optimal_gsus)
-    committed_tpm = prov_gsus * tpm_per_gsu
-    default_60s = committed_tpm * 0.62
-    sixty_s = sixty_sec_tpm if sixty_sec_tpm is not None else default_60s
-    default_burst_tps = (sixty_s / 60.0) * 1.90
-    peak_1s = peak_1s_tps if peak_1s_tps is not None else default_burst_tps
-
-    micro_burst = evaluate_micro_burst_window(
-        sixty_sec_tpm=sixty_s,
-        peak_1s_tps=peak_1s,
-        provisioned_gsus=prov_gsus,
-        tps_per_gsu=tps_per_gsu,
-        peak_10s_tps=peak_10s_tps,
-    )
-
-    prefix_cache = evaluate_prefix_cache_dilution(
-        total_input_tokens=input_tokens,
-        shared_prefix_ratio=shared_prefix_ratio,
-        baseline_cache_hit_rate=baseline_cache_hit_rate,
-        num_round_robin_endpoints=endpoints,
-        tps_per_gsu=tps_per_gsu,
-    )
-
-    resp = OptimizeResponse(
-        model=model,
-        normalized_model=norm_model,
-        weighted_burndown_tokens_per_request=round(req_weighted_burndown, 2),
-        commitment=commitment,
-        micro_burst=micro_burst,
-        prefix_cache=prefix_cache,
-    )
+    resp = _or_exit(lambda: evaluate_gsu_optimization(req))
 
     if output_format == OutputFormat.json:
         typer.echo(resp.model_dump_json(indent=2))
         return
 
-    typer.echo(f"=== Newsvendor Hybrid Commitment ({norm_model}) ===")
-    typer.echo(
-        f"Optimal PT Base: {commitment.optimal_gsus} GSUs "
-        f"(Quantile={commitment.critical_quantile:.2f}, "
-        f"Break-Even Util={commitment.breakeven_utilization_pct:.1f}%)"
-    )
-    typer.echo(
-        f"Monthly Cost:    ${commitment.total_hybrid_monthly_cost_usd:,.2f} "
-        f"(PT=${commitment.pt_base_monthly_cost_usd:,.2f} + "
-        f"Spillover=${commitment.spillover_monthly_cost_usd:,.2f})"
-    )
-    typer.echo(
-        f"Savings:         ${commitment.savings_vs_paygo_usd:,.2f}/mo vs 100% PayGo "
-        f"({commitment.savings_vs_paygo_pct:.1f}%), "
-        f"${commitment.savings_vs_p99_pt_usd:,.2f}/mo vs P99 PT "
-        f"({commitment.savings_vs_p99_pt_pct:.1f}%)"
-    )
-    typer.echo(
-        f"Request Weight:  {resp.weighted_burndown_tokens_per_request:,.0f} "
-        f"weighted burndown tokens "
-        f"(in={input_tokens:,}, cached={cached_tokens:,}, "
-        f"out={output_tokens:,}, thoughts={thoughts_tokens:,})"
-    )
-    typer.echo(
-        f"Micro-Burst:     {micro_burst.refill_window_seconds}s window | "
-        f"60s Util={micro_burst.apparent_60s_utilization_pct:.1f}% | "
-        f"Peak Window Util={micro_burst.peak_window_utilization_pct:.1f}% | "
-        f"Spillover={micro_burst.triggers_429_or_spillover} | "
-        f"Illusion={micro_burst.illusion_detected}"
-    )
-    typer.echo(
-        f"Prefix Cache:    Sticky={prefix_cache.sticky_gsus} GSUs vs "
-        f"Round-Robin({prefix_cache.num_round_robin_endpoints})="
-        f"{prefix_cache.round_robin_gsus} GSUs "
-        f"(Effective Hit={prefix_cache.effective_cache_hit_rate * 100:.1f}%, "
-        f"Wasted={prefix_cache.wasted_gsus} GSUs, Savings={prefix_cache.gsu_savings_pct:.1f}%)"
-    )
+    print_gsu_optimize_report(resp, input_tokens, cached_tokens, output_tokens, thoughts_tokens)
 
 
 @app.command()
@@ -743,6 +562,10 @@ def schedule(
     evergreen_tokens: Annotated[
         float, typer.Option(help="Evergreen water-fill token backlog")
     ] = 250_000_000.0,
+    jobs_file: Annotated[
+        Path | None,
+        typer.Option("--jobs-file", help="Optional JSON array of DeadlineJobSpec items"),
+    ] = None,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
@@ -752,29 +575,19 @@ def schedule(
     cfg = load_gsu_config()
     tpm_per_gsu = _or_exit(lambda: require_capacity(norm_model, cfg))
 
+    if jobs_file is not None:
+        raw_jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+        if not isinstance(raw_jobs, list):
+            typer.echo("Error: --jobs-file must contain a JSON array of job specs", err=True)
+            raise typer.Exit(code=1)
+        jobs = _or_exit(lambda: [DeadlineJobSpec.model_validate(item) for item in raw_jobs])
+    else:
+        jobs = make_default_deadline_jobs()
+
     report = schedule_residual_capacity(
         provisioned_gsus=gsus,
         tpm_per_gsu=tpm_per_gsu,
-        deadline_jobs=[
-            DeadlineJobSpec(
-                job_id="premarket-portfolio-briefings",
-                value_usd=18_000.0,
-                burndown_tokens=240_000_000.0,
-                deadline_hour=6,
-            ),
-            DeadlineJobSpec(
-                job_id="regulatory-risk-digest",
-                value_usd=12_000.0,
-                burndown_tokens=180_000_000.0,
-                deadline_hour=5,
-            ),
-            DeadlineJobSpec(
-                job_id="low-density-archive-sweep",
-                value_usd=900.0,
-                burndown_tokens=320_000_000.0,
-                deadline_hour=6,
-            ),
-        ],
+        deadline_jobs=jobs,
         evergreen_backfill_tokens=evergreen_tokens,
     )
     if output_format == OutputFormat.json:
@@ -811,8 +624,7 @@ def chargeback(
         str, typer.Option(help="Model or self-hosted profile ID")
     ] = "gemini-3.8-flash",
     mode: Annotated[
-        CapacityMode,
-        typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'"),
+        CapacityMode, typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'")
     ] = CapacityMode.gsu,
     gsus: Annotated[
         int, typer.Option(help="Provisioned GSUs (or reserved GPU replicas in self-hosted mode)")
@@ -821,24 +633,18 @@ def chargeback(
         float, typer.Option(help="Monthly price per 1 GSU (or 1 GPU replica) in USD")
     ] = 2_000.0,
     waterfill_tpm: Annotated[
-        float,
-        typer.Option(
-            help="Off-peak asynchronous batch water-filling demand in burndown TPM"
-        ),
+        float, typer.Option(help="Off-peak async batch water-filling demand in burndown TPM")
     ] = 300_000.0,
     tenant_file: Annotated[
         Path | None,
         typer.Option(
             "--tenant-file",
-            help="Optional JSON file mapping tenant name -> list of hourly burndown TPM floats",
+            help="Optional JSON mapping tenant -> hourly TPMs (or {tenants, raw_token_weights})",
         ),
     ] = None,
     vllm_file: Annotated[
         Path | None,
-        typer.Option(
-            "--vllm-file",
-            help="Optional Phase 2 vLLM/SGLang JSONL log file with tenant token usage",
-        ),
+        typer.Option("--vllm-file", help="Optional Phase 2 vLLM/OTel JSONL log file"),
     ] = None,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
@@ -857,6 +663,7 @@ def chargeback(
         unit_price = gsu_price
         unit_name = "GSUs"
 
+    raw_weights: dict[str, float] = dict(DEFAULT_TENANT_RAW_TOKEN_WEIGHTS)
     if vllm_file is not None:
         snap = load_inference_server_file(vllm_file, default_model=model)
         tenants: dict[str, list[float] | float] = dict(snap.hourly_consumed_tpm_by_tenant)
@@ -865,76 +672,35 @@ def chargeback(
         if not isinstance(raw, dict):
             typer.echo("Error: --tenant-file must contain a JSON object", err=True)
             raise typer.Exit(code=1)
+        if "tenants" in raw and isinstance(raw["tenants"], dict):
+            tenant_map = raw["tenants"]
+            if isinstance(raw.get("raw_token_weights"), dict):
+                raw_weights.update({str(k): float(v) for k, v in raw["raw_token_weights"].items()})
+        else:
+            tenant_map = raw
         tenants = {
             str(k): [float(x) for x in v] if isinstance(v, list) else float(v)
-            for k, v in raw.items()
+            for k, v in tenant_map.items()
         }
     else:
         tenants = dict(DEFAULT_SYNTHETIC_TENANT_TPM)
 
-    report = compute_focus_chargeback(
-        hourly_consumed_tpm_by_tenant=tenants,
-        provisioned_gsus=gsus,
-        tpm_per_gsu=tpm_per_unit,
-        gsu_monthly_price_usd=unit_price,
-        async_batch_waterfill_tpm=waterfill_tpm,
-        tenant_raw_token_weights=DEFAULT_TENANT_RAW_TOKEN_WEIGHTS,
+    report = _or_exit(
+        lambda: compute_focus_chargeback(
+            hourly_consumed_tpm_by_tenant=tenants,
+            provisioned_gsus=gsus,
+            tpm_per_gsu=tpm_per_unit,
+            gsu_monthly_price_usd=unit_price,
+            async_batch_waterfill_tpm=waterfill_tpm,
+            tenant_raw_token_weights=raw_weights,
+        )
     )
 
     if output_format == OutputFormat.json:
         typer.echo(report.model_dump_json(indent=2))
         return
 
-    typer.echo(
-        f"=== FOCUS 1.2 Two-Pool Chargeback "
-        f"({report.provisioned_gsus} {unit_name} @ ${unit_price:,.0f}/mo) ==="
-    )
-    typer.echo(
-        f"Total Monthly Commitment:      ${report.total_commitment_cost_usd:,.2f}"
-    )
-    typer.echo(
-        f"Active Consumed Capacity Pool: ${report.active_consumed_cost_usd:,.2f} "
-        f"({report.active_utilization_pct:.1f}% util)"
-    )
-    wf_gain = report.effective_utilization_with_waterfill_pct - report.active_utilization_pct
-    eff_util = report.effective_utilization_with_waterfill_pct
-    typer.echo(
-        f"Reclaimed Batch Water-Fill:    ${report.reclaimed_waterfill_cost_usd:,.2f} "
-        f"(+{wf_gain:.1f}% util -> {eff_util:.1f}% effective)"
-    )
-    typer.echo(
-        f"Net Unallocated Idle Pool:     ${report.net_unallocated_idle_cost_usd:,.2f}"
-    )
-    typer.echo("")
-    headers = [
-        "Tenant",
-        "Weighted %",
-        "Raw Tok %",
-        "FOCUS Active $",
-        "Unweighted Raw $",
-        "Naive Full-Pool $",
-        "Idle Tax Avoided $",
-    ]
-    rows = [
-        [
-            t.tenant,
-            f"{t.usage_share_pct:.1f}%",
-            f"{t.unweighted_raw_token_share_pct:.1f}%",
-            f"${t.active_allocated_cost_usd:,.2f}",
-            f"${t.unweighted_raw_token_cost_usd:,.2f}",
-            f"${t.naive_full_pool_cost_usd:,.2f}",
-            f"${t.idle_penalty_avoided_usd:,.2f}",
-        ]
-        for t in report.tenants
-    ]
-    widths = [max(len(h), *(len(r[i]) for r in rows)) for i, h in enumerate(headers)]
-    fmt = "  ".join(
-        f"{{:<{w}}}" if i == 0 else f"{{:>{w}}}" for i, w in enumerate(widths)
-    )
-    typer.echo(fmt.format(*headers))
-    typer.echo("  ".join("—" * w for w in widths))
-    for r in rows:
-        typer.echo(fmt.format(*r))
+    print_chargeback_report(report, unit_name, unit_price)
 
 
 @app.command()

@@ -1,23 +1,4 @@
-"""Sub-second token-bucket micro-burst and prefix-cache dilution physics (`ADR-002`).
-
-Models four production failure modes that cause HTTP 429s or 2x-4x GSU/replica over-sizing:
-1. Weighted Burndown Multipliers & the `>200K` Long-Context Cliff:
-   - Standard (`<=200K` tokens): `1.0x` uncached + `0.1x` cached + `4.0x` (output + thoughts).
-   - Long-Context (`>200K` tokens): `2.0x` uncached + `0.2x` cached + `7.5x` (output + thoughts).
-2. Sub-Minute Token-Bucket Enforcement (`1s` for `>=50 GSUs`, `10s` for `<50 GSUs`, `5%` credit):
-   - Explains why Cloud Monitoring's 60-second chart can show `<70%` utilization while sub-second
-     agent bursts exhaust the `1s`/`10s` token bucket and trigger HTTP 429s or PayGo spillover.
-3. Round-Robin Prefix-Cache Dilution ($h_{\\text{eff}} = h / N$):
-   - Stateless round-robin load balancing across $N$ endpoints/replicas dilutes replica-local KV
-     cache hit rates by $1/N$, inflating uncached prefill burndown and wasting GSUs or replicas.
-4. Model-Tier Prefix-Cache Block Alignment & Routing Hash Mechanics:
-   - Flash/Flash-Lite (`gemini-3.8-flash`, `gemini-3.5-flash-lite`): `6,144`-token minimum floor
-     and `4,096`-token block alignment (dynamic tokens at offset `<4,096` cause Block 0
-     contamination and `0%` cache hit).
-   - Argon/Pro (`gemini-4-argon`, `gemini-4.0-pro`, `gemini-3.1-pro`): `2,048`-token minimum floor
-     and token-level boundary checkpointing (`system_instruction >= 1,024` and `tools`).
-   - Single-turn routing hash degradation and `thought_signature` stripping penalties.
-"""
+"""Sub-second token-bucket micro-burst and prefix-cache dilution physics (`ADR-002`)."""
 
 from __future__ import annotations
 
@@ -79,8 +60,8 @@ def evaluate_micro_burst_window(
 ) -> MicroBurstAudit:
     """Evaluate sub-minute token-bucket enforcement (`1s` for `>=50 GSUs`, `10s` for `<50 GSUs`).
 
-    Demonstrates why a workload appearing `<70%` utilized on a 60-second Cloud Monitoring
-    chart still experiences HTTP 429s or PayGo spillover during sub-second agent bursts.
+    Enforces 60-second token conservation: total tokens arriving inside a `1s` or `10s` sub-window
+    cannot exceed `sixty_sec_tpm` (`active_peak_tps * refill_window_seconds <= sixty_sec_tpm`).
     """
     gsus = max(0, provisioned_gsus)
     refill_window_seconds = 1 if gsus >= 50 else 10
@@ -89,20 +70,30 @@ def evaluate_micro_burst_window(
     effective_window_tps_ceiling = committed_tps * (1.0 + max(0.0, burst_credit_pct))
     window_token_budget = effective_window_tps_ceiling * refill_window_seconds
 
-    sixty_sec_avg_tps = max(0.0, sixty_sec_tpm) / 60.0
+    bounded_tpm = max(0.0, float(sixty_sec_tpm))
+    sixty_sec_avg_tps = bounded_tpm / 60.0
     apparent_60s_util_pct = (
         (sixty_sec_avg_tps / committed_tps) * 100.0 if committed_tps > 0 else 0.0
     )
 
+    raw_1s = max(0.0, float(peak_1s_tps))
     if refill_window_seconds == 1:
-        active_peak_tps = max(sixty_sec_avg_tps, peak_1s_tps)
+        raw_peak_tps = max(sixty_sec_avg_tps, raw_1s)
     else:
         effective_10s = (
-            peak_10s_tps
+            max(0.0, float(peak_10s_tps))
             if peak_10s_tps is not None
-            else max(sixty_sec_avg_tps, peak_1s_tps)
+            else max(sixty_sec_avg_tps, raw_1s)
         )
-        active_peak_tps = max(sixty_sec_avg_tps, effective_10s)
+        raw_peak_tps = max(sixty_sec_avg_tps, effective_10s)
+
+    if bounded_tpm > 0.0:
+        max_conserved_window_tps = bounded_tpm / float(refill_window_seconds)
+        active_peak_tps = min(raw_peak_tps, max_conserved_window_tps)
+    elif raw_1s > 0.0:
+        active_peak_tps = raw_1s / float(refill_window_seconds)
+    else:
+        active_peak_tps = 0.0
 
     peak_window_util_pct = (
         (active_peak_tps / effective_window_tps_ceiling) * 100.0
@@ -147,12 +138,18 @@ def evaluate_prefix_cache_dilution(
     tps_per_gsu: float = 2_015.0,
     cached_token_weight: float = 0.1,
     uncached_token_weight: float = 1.0,
+    requests_per_second: float = 1.0,
 ) -> PrefixCacheAudit:
-    """Quantify GSU/replica waste from round-robin prefix-cache dilution ($h / N$)."""
+    """Quantify GSU/replica waste from round-robin prefix-cache dilution ($h / N$).
+
+    Converts per-request burndown tokens into sustained burndown TPS via `requests_per_second`
+    (`tokens/req * req/s = tokens/s`) before dividing by `tps_per_gsu`.
+    """
     total_in = max(0, total_input_tokens)
     prefix_ratio = min(1.0, max(0.0, shared_prefix_ratio))
     h_sticky = min(1.0, max(0.0, baseline_cache_hit_rate))
     n_endpoints = max(1, num_round_robin_endpoints)
+    rps = max(0.0, float(requests_per_second))
 
     h_effective = h_sticky / n_endpoints
 
@@ -171,15 +168,18 @@ def evaluate_prefix_cache_dilution(
         rr_uncached * uncached_token_weight
     )
 
+    sticky_tps = sticky_burndown * rps
+    rr_tps = rr_burndown * rps
+
     inflation_mult = rr_burndown / sticky_burndown if sticky_burndown > 0 else 1.0
     sticky_gsus = (
-        max(1, math.ceil(sticky_burndown / tps_per_gsu))
-        if sticky_burndown > 0 and tps_per_gsu > 0
+        max(1, math.ceil(sticky_tps / tps_per_gsu))
+        if sticky_tps > 0 and tps_per_gsu > 0
         else 0
     )
     rr_gsus = (
-        max(1, math.ceil(rr_burndown / tps_per_gsu))
-        if rr_burndown > 0 and tps_per_gsu > 0
+        max(1, math.ceil(rr_tps / tps_per_gsu))
+        if rr_tps > 0 and tps_per_gsu > 0
         else 0
     )
     wasted_gsus = max(0, rr_gsus - sticky_gsus)
@@ -246,7 +246,6 @@ def evaluate_model_tier_prefix_cache(
             f"floor for {norm}; consolidate static reference context above {min_floor:,} tokens."
         )
 
-    # Check Block-0 contamination or early dynamic offset
     block_zero_contaminated = False
     effective_static_span = static_in
     if dynamic_header_offset_tokens is not None and dynamic_header_offset_tokens < static_in:
@@ -281,7 +280,6 @@ def evaluate_model_tier_prefix_cache(
         aligned_cacheable = effective_static_span
         trailing_uncached = static_in - aligned_cacheable
 
-    # Routing affinity & multi-turn thought_signature continuity
     if single_turn_request and not dummy_turn_anchor_applied:
         routing_affinity = 1.0 / replicas
         remediations.append(
@@ -301,7 +299,6 @@ def evaluate_model_tier_prefix_cache(
     current_cached_tokens = round(aligned_cacheable * routing_affinity)
     effective_hit_rate = current_cached_tokens / total_in if total_in > 0 else 0.0
 
-    # Optimized target: move dynamic tokens to tail, apply dummy turn anchor, keep signatures
     if static_in < min_floor:
         opt_aligned = 0
     elif granularity == "block_4096":

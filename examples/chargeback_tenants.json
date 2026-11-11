@@ -1,0 +1,12 @@
+{
+  "tenants": {
+    "claims-triage": [403000, 420000, 390000, 380000, 80000, 45000, 40000, 50000],
+    "underwriting-copilot": [290000, 310000, 285000, 270000, 60000, 35000, 30000, 40000],
+    "policy-audit": [195000, 210000, 185000, 175000, 35000, 20000, 15000, 25000]
+  },
+  "raw_token_weights": {
+    "claims-triage": 1.85,
+    "underwriting-copilot": 1.10,
+    "policy-audit": 0.45
+  }
+}
