@@ -43,7 +43,7 @@ uv run capacity demo --html-out /tmp/capacity_scorecard.html
 uv run capacity recommend --trace-file examples/diurnal_8x5_trace.json --active-only
 uv run capacity recommend --mode self-hosted --vllm-file examples/vllm_requests.jsonl --active-only
 
-# 3. Built-in Multi-Region Reference Sizing + Short-Horizon Active-Window Holt (+24h) Trend
+# 3. Built-in Multi-Region Reference Sizing + Daily-Peak Holt (+24h) Trend
 uv run capacity recommend --demo --active-only --by-region
 uv run capacity recommend --demo --mode self-hosted --active-only --by-region
 
@@ -127,7 +127,7 @@ Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Re
 
 ## 4. Reference Scorecard, Plain-English 5-KPI Glossary & EDF Schedule
 
-> **Physics vs. Reference Fixture Provenance:** Serving mechanics (`1s`/`10s` token buckets, `<=200K` `1x/0.1x/4x` vs. `>200K` `2x/0.2x/7.5x` burndown weights, `4,096`-token block alignment, and `$0` `PT` vs. `+0.5x` Batch billing) encode deterministic platform rules; Holt's double-exponential smoothing tracks short-horizon active-window trend rather than multi-week seasonal quantiles. Model IDs (`gemini-3.8-flash` `4,096`-block profile, `gemini-4-argon` token-boundary profile, `llama-3.3-70b-fp8`) and `--demo` dollar outputs below come from deterministic built-in reference traces so every check runs offline in `<2s`.
+> **Physics vs. Reference Fixture Provenance:** Serving mechanics (`1s`/`10s` token buckets, `<=200K` `1x/0.1x/4x` vs. `>200K` `2x/0.2x/7.5x` burndown weights, `4,096`-token block alignment, and `$0` `PT` vs. `+0.5x` Batch billing) encode deterministic platform rules; Holt's double-exponential smoothing projects the trend in daily active-window peaks (one point per active day, so it never forecasts an overnight or weekend trough) rather than multi-week seasonal quantiles. Model IDs (`gemini-3.8-flash` `4,096`-block profile, `gemini-4-argon` token-boundary profile, `llama-3.3-70b-fp8`) and `--demo` dollar outputs below come from deterministic built-in reference traces so every check runs offline in `<2s`.
 
 ### 4A. Executive Showcase Scorecard (`capacity demo`) & 5-KPI Definitions
 

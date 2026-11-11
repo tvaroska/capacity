@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
@@ -19,10 +20,10 @@ from capacity.burst import (
     evaluate_prefix_cache_dilution,
 )
 from capacity.capacity import (
-    _find_capacity,
     build_response,
     load_gsu_config,
     normalize_model_id,
+    require_capacity,
 )
 from capacity.core import (
     DEFAULT_DAYS,
@@ -104,6 +105,15 @@ DEFAULT_SYNTHETIC_TENANT_TPM: dict[str, list[float]] = {
     "underwriting-copilot": [250_000.0] * 8 + [30_000.0] * 16,
     "policy-audit": [150_000.0] * 8 + [15_000.0] * 16,
 }
+
+
+def _or_exit[T](fn: Callable[[], T]) -> T:
+    """Turn bad model/profile/config inputs into a one-line CLI error instead of a traceback."""
+    try:
+        return fn()
+    except ValueError as exc:  # includes UnknownModelError
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
 
 
 def _parse_folder_map(raw: str | None) -> dict[str, str]:
@@ -515,7 +525,7 @@ def optimize(
         series = list(DEFAULT_SYNTHETIC_TPM_SERIES)
 
     if mode == CapacityMode.self_hosted:
-        prof = resolve_self_hosted_profile(model)
+        prof = _or_exit(lambda: resolve_self_hosted_profile(model))
         audit = evaluate_self_hosted_endpoint(
             tpm_series=series,
             profile=prof,
@@ -566,7 +576,7 @@ def optimize(
 
     norm_model = normalize_model_id(model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = _or_exit(lambda: require_capacity(norm_model, cfg))
     tps_per_gsu = tpm_per_gsu / 60.0
 
     req_weighted_burndown = compute_weighted_burndown_tokens(
@@ -683,16 +693,18 @@ def gateway(
     ] = OutputFormat.table,
 ) -> None:
     """Generate LiteLLM, Envoy AI Gateway (CEL), and GKE Inference Gateway (epp) configs."""
-    bundle = generate_gateway_bundle(
-        model=model,
-        project_id=project_id,
-        location=location,
-        provisioned_gsus=gsus,
-        target_rps=rps,
-        concurrent_sse_streams=sse_streams,
-        pods=pods,
-        uvicorn_workers_per_pod=workers,
-        self_hosted_model=self_hosted_model,
+    bundle = _or_exit(
+        lambda: generate_gateway_bundle(
+            model=model,
+            project_id=project_id,
+            location=location,
+            provisioned_gsus=gsus,
+            target_rps=rps,
+            concurrent_sse_streams=sse_streams,
+            pods=pods,
+            uvicorn_workers_per_pod=workers,
+            self_hosted_model=self_hosted_model,
+        )
     )
     if output_format == OutputFormat.json:
         typer.echo(bundle.model_dump_json(indent=2))
@@ -738,7 +750,7 @@ def schedule(
     """Run the 3-Tier Residual Capacity Scheduler (Revenue > Hard-Deadline EDF > Evergreen)."""
     norm_model = normalize_model_id(model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = _or_exit(lambda: require_capacity(norm_model, cfg))
 
     report = schedule_residual_capacity(
         provisioned_gsus=gsus,
@@ -834,14 +846,14 @@ def chargeback(
 ) -> None:
     """Compute FinOps FOCUS 1.2 Two-Pool Chargeback (Active Consumed vs Unallocated Idle)."""
     if mode == CapacityMode.self_hosted:
-        prof = resolve_self_hosted_profile(model)
+        prof = _or_exit(lambda: resolve_self_hosted_profile(model))
         tpm_per_unit = prof.tpm_per_replica
         unit_price = prof.reserved_replica_monthly_usd if gsu_price == 2_000.0 else gsu_price
         unit_name = "GPU Replicas"
     else:
         norm_model = normalize_model_id(model)
         cfg = load_gsu_config()
-        tpm_per_unit = _find_capacity(norm_model, cfg) or 120_900
+        tpm_per_unit = _or_exit(lambda: require_capacity(norm_model, cfg))
         unit_price = gsu_price
         unit_name = "GSUs"
 

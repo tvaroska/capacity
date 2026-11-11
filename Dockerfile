@@ -4,13 +4,16 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock .python-version ./
+COPY pyproject.toml uv.lock .python-version README.md ./
 RUN uv sync --frozen --no-install-project --no-dev
 
 COPY capacity/ capacity/
 RUN uv sync --frozen --no-dev
 
+RUN useradd --system --uid 10001 --no-create-home app
+USER app
+
 ENV PORT=8080
 EXPOSE 8080
 
-CMD ["uv", "run", "uvicorn", "capacity.api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["/app/.venv/bin/uvicorn", "capacity.api:app", "--host", "0.0.0.0", "--port", "8080"]

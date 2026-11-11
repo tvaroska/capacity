@@ -24,7 +24,7 @@ from pathlib import Path
 from pydantic import Field
 
 from capacity.burst import compute_weighted_burndown_tokens, evaluate_prefix_cache_dilution
-from capacity.core import percentile
+from capacity.core import UnknownModelError, percentile
 from capacity.finops import MINUTES_PER_MONTH
 from capacity.models import DictAccessModel, DisaggregatedPoolSizing, PrefixCacheAudit
 
@@ -170,10 +170,15 @@ def resolve_self_hosted_profile(model_or_profile: str) -> SelfHostedProfile:
         cleaned = cleaned.split("@", 1)[0]
     if cleaned in DEFAULT_SELF_HOSTED_PROFILES:
         return DEFAULT_SELF_HOSTED_PROFILES[cleaned]
-    for key, prof in DEFAULT_SELF_HOSTED_PROFILES.items():
-        if cleaned.startswith(key) or key.startswith(cleaned):
-            return prof
-    return DEFAULT_SELF_HOSTED_PROFILES["llama-3.3-70b-fp8"]
+    # Only accept suffixed variants of a known profile (e.g. `llama-3.3-70b-fp8-v2`); the reverse
+    # match would size `deepseek-r1` (671B) as `deepseek-r1-distill-32b`.
+    for key in sorted(DEFAULT_SELF_HOSTED_PROFILES, key=len, reverse=True):
+        if cleaned.startswith(key):
+            return DEFAULT_SELF_HOSTED_PROFILES[key]
+    raise UnknownModelError(
+        f"No self-hosted profile for '{model_or_profile}'. "
+        f"Known profiles: {', '.join(sorted(DEFAULT_SELF_HOSTED_PROFILES))}."
+    )
 
 
 def evaluate_self_hosted_endpoint(

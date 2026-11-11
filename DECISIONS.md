@@ -5,6 +5,7 @@
 - **Context:** Summing `consumed_token_throughput` points in Python without a `cross_series_reducer` overwrites timestamps across regions (`us-central1` vs. `europe-west4`), while zero-padding missing minutes across `days * 1440` causes 8x5 enterprise workloads (`~23.8%` duty cycle) to collapse to `0 GSUs` at `P50` and `P75`.
 - **Decision:** Enforce server-side `REDUCE_SUM` grouped by `["resource.label.model_id", "resource.label.location", "metric.label.request_type"]`, expose both `all_hours` (24x7) and `active_hours` (non-zero business minutes + `duty_cycle_pct`) percentiles, support multi-project/folder roll-ups (`--folder-map`), and project short-horizon trajectory via pure-Python **Holt's Double Exponential Smoothing** (`holts_linear_trend`).
 - **Consequences:** Accurate regional GSU/replica sizing for 8x5 enterprise workloads and proactive 24-hour capacity forecasting with zero extra ML library dependencies.
+- **Amendment (2026-11-11):** Holt has no seasonal term, so it runs on one peak per active day (`forecast_steps / 24` days ahead). Running it on per-minute points projected the last few minutes and under-sized the `--demo` trace by ~2x. Unknown models and self-hosted profiles now raise `UnknownModelError` (HTTP 422 / CLI exit 1) instead of defaulting to `gemini-3.8-flash` capacity or `llama-3.3-70b-fp8`; supply `GSU_CAPACITY_<MODEL>` to size a model outside the built-in table.
 
 ## ADR-002: Sub-Second Token-Bucket Micro-Burst, $1/N$ Dilution & Model-Tier Prefix-Cache Physics
 - **Status:** Accepted (`2026-11-05`, expanded `2026-11-08`)

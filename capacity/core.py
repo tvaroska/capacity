@@ -68,7 +68,7 @@ except ImportError:  # pragma: no cover
                 )
 
     duration_pb2 = _DurationNamespace()
-    monitoring_v3 = _MonitoringV3Fallback()
+    monitoring_v3 = _MonitoringV3Fallback()  # type: ignore[assignment]
 
 DEFAULT_DAYS = 30
 DEFAULT_PERCENTILES = [50, 75, 90, 95]
@@ -93,6 +93,10 @@ SELF_HOSTED_GROUP_BY_FIELDS = [
 
 class GCPQueryError(Exception):
     """Raised when a GCP Cloud Monitoring query fails due to auth, permissions, or API errors."""
+
+
+class UnknownModelError(ValueError):
+    """Raised when a model or self-hosted profile has no known capacity, instead of guessing."""
 
 
 def _build_filter(

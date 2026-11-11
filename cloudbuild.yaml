@@ -1,4 +1,4 @@
-# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.2.0)
+# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.3.0)
 substitutions:
   _REGION: us-central1
   _AR_REPO: containers
@@ -22,10 +22,12 @@ steps:
       - -c
       - |
         set -euo pipefail
-        uv sync
+        uv lock --check
+        uv sync --frozen --extra dev
         uv pip install --python /workspace/.venv/bin/python "ast-grep-cli>=0.35"
         /workspace/.venv/bin/ast-grep scan --rule /workspace/specs/ast.rules.yaml
         /workspace/.venv/bin/ruff check capacity/ tests/
+        /workspace/.venv/bin/mypy capacity tests
         /workspace/.venv/bin/pytest tests/ -v
 
   - id: docker-build

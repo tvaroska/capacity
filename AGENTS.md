@@ -30,9 +30,11 @@ Always run the canonical prefix-matchable test runner from the parent workspace:
 <HOME>/projects/bin/proj-test capacity
 ```
 
-Or run `ruff`, `mypy`, and `pytest` directly inside the repository:
+Or run `ruff`, `mypy`, and `pytest` directly inside the repository (after a one-time `uv sync --extra dev`; the runner uses this repo's own `.venv`, never a sibling's):
 
 ```bash
+uv lock --check
 uv run --no-sync ruff check --no-cache capacity tests
+uv run --no-sync mypy capacity tests
 uv run --no-sync pytest -v
 ```

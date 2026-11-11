@@ -6,9 +6,9 @@ import math
 import os
 import re
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import date, datetime
 
-from capacity.core import DEFAULT_PERCENTILES, holts_linear_trend, percentile
+from capacity.core import DEFAULT_PERCENTILES, UnknownModelError, holts_linear_trend, percentile
 from capacity.models import (
     ModelRecommendation,
     PercentileDetail,
@@ -82,7 +82,25 @@ def load_gsu_config(include_defaults: bool = True, mode: str = "gsu") -> dict[st
     return config
 
 
-def _find_capacity(
+def require_capacity(
+    model_id: str,
+    gsu_config: dict[str, int] | None = None,
+    mode: str = "gsu",
+) -> int:
+    """Return TPM per GSU (or replica) for a model, raising instead of guessing a default."""
+    cap = find_capacity(model_id, gsu_config, mode=mode)
+    if cap is None:
+        env_key = ENV_PREFIX + normalize_model_id(model_id).upper().replace(".", "_").replace(
+            "-", "_"
+        )
+        raise UnknownModelError(
+            f"No capacity table entry for model '{model_id}'. "
+            f"Set {env_key}=<TPM per GSU> to supply one."
+        )
+    return cap
+
+
+def find_capacity(
     model_id: str,
     gsu_config: dict[str, int] | None = None,
     mode: str = "gsu",
@@ -148,11 +166,8 @@ def compute_recommendations(
         else:
             folder_name, model_id = None, model_part
 
-        cap = _find_capacity(model_id, gsu_config, mode=mode)
-        ordered_points = [
-            v for _, v in sorted(minute_map.items(), key=lambda kv: kv[0]) if v > 0
-        ]
-        active_vals = sorted(ordered_points)
+        cap = find_capacity(model_id, gsu_config, mode=mode)
+        active_vals = sorted(v for v in minute_map.values() if v > 0)
         active_count = len(active_vals)
         num_zeros = max(0, total_minutes - active_count)
         all_vals = [0] * num_zeros + active_vals
@@ -166,10 +181,17 @@ def compute_recommendations(
             else 0.0
         )
 
-        # Holt's Double Exponential Smoothing forecast over chronological active series
+        # Holt has no seasonality, so forecasting per-minute or hourly diurnal data projects the
+        # last trough (or weekend zeros). Forecast one peak per active day instead.
+        daily_peaks: dict[date, int] = {}
+        for ts, v in minute_map.items():
+            if v > 0:
+                day = ts.date()
+                daily_peaks[day] = max(daily_peaks.get(day, 0), v)
+        peak_series = [daily_peaks[d] for d in sorted(daily_peaks)]
         forecasts = (
-            holts_linear_trend(ordered_points, steps=forecast_steps)
-            if ordered_points and forecast_steps > 0
+            holts_linear_trend(peak_series, steps=max(1, math.ceil(forecast_steps / 24)))
+            if peak_series and forecast_steps > 0
             else [0.0]
         )
         peak_forecast_tpm = round(max(forecasts)) if forecasts else 0

@@ -21,9 +21,9 @@ from capacity.burst import (
 )
 from capacity.capacity import (
     DEFAULT_GSU_CONFIG,
-    _find_capacity,
     build_response,
     compute_recommendations,
+    find_capacity,
     load_gsu_config,
     normalize_model_id,
 )
@@ -126,11 +126,11 @@ def test_default_gsu_config_and_env_override(monkeypatch: pytest.MonkeyPatch) ->
         ("gemini-4.0-pro", 30000),
     ):
         assert DEFAULT_GSU_CONFIG[required_model] == expected_tpm
-        assert _find_capacity(f"{required_model}-001") == expected_tpm
+        assert find_capacity(f"{required_model}-001") == expected_tpm
 
     monkeypatch.setenv("GSU_CAPACITY_GEMINI_3_8_FLASH", "150000")
     cfg = load_gsu_config()
-    assert _find_capacity("gemini-3.8-flash-002", cfg) == 150000
+    assert find_capacity("gemini-3.8-flash-002", cfg) == 150000
 
 
 def test_active_business_hours_vs_all_hours_percentiles_and_holt_forecast() -> None:
@@ -719,8 +719,9 @@ def test_adr005_repository_hygiene() -> None:
         rf"({re.escape(forbidden_prefix)}|\bgo/[a-z0-9_-]+|\bb/\d{{6,}})",
         re.IGNORECASE,
     )
+    skip_dirs = {".git", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
     for path in repo_root.rglob("*"):
-        if not path.is_file() or ".git" in path.parts or "__pycache__" in path.parts:
+        if not path.is_file() or skip_dirs.intersection(path.parts):
             continue
         if path.suffix in (".py", ".md", ".yaml", ".yml", ".toml"):
             content = path.read_text(encoding="utf-8", errors="ignore")

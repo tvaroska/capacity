@@ -22,8 +22,14 @@ configurations across three enterprise AI gateway layers:
 
 from __future__ import annotations
 
-from capacity.capacity import DEFAULT_GSU_CONFIG, normalize_model_id
+import re
+
+from capacity.capacity import load_gsu_config, normalize_model_id, require_capacity
 from capacity.models import (
+    GCP_LOCATION_PATTERN,
+    GCP_PROJECT_ID_PATTERN,
+    K8S_NAME_PATTERN,
+    MODEL_ID_PATTERN,
     GatewayConfigBundle,
     GatewayHeaderPolicy,
     LiteLLMScaleAudit,
@@ -202,10 +208,18 @@ def generate_gateway_bundle(
     self_hosted_model: str = "llama-3.3-70b-fp8",
 ) -> GatewayConfigBundle:
     """Generate production-hardened LiteLLM, Envoy AI Gateway, and GKE epp configurations."""
+    for field_name, value, pattern in (
+        ("model", model, MODEL_ID_PATTERN),
+        ("project_id", project_id, GCP_PROJECT_ID_PATTERN),
+        ("location", location, GCP_LOCATION_PATTERN),
+        ("self_hosted_model", self_hosted_model, K8S_NAME_PATTERN),
+    ):
+        if not re.fullmatch(pattern, value):
+            raise ValueError(f"Invalid {field_name} {value!r}: must match {pattern}")
     norm = normalize_model_id(model)
     gsus = max(1, int(provisioned_gsus))
     refill_window = 1 if gsus >= 50 else 10
-    tpm_per_gsu = DEFAULT_GSU_CONFIG.get(norm, 120_900)
+    tpm_per_gsu = require_capacity(norm, load_gsu_config())
     committed_tpm = gsus * tpm_per_gsu
 
     litellm_audit = audit_litellm_scaling(

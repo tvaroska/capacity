@@ -4,6 +4,13 @@ from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+# These values are interpolated into generated YAML/Kubernetes manifests, so they must not be able
+# to carry quotes, newlines, or YAML syntax.
+GCP_PROJECT_ID_PATTERN = r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
+GCP_LOCATION_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
+MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.@/-]{0,127}$"
+K8S_NAME_PATTERN = r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$"
+
 
 class DictAccessModel(BaseModel):
     """Base Pydantic model supporting both attribute and dictionary-key lookups."""
@@ -517,12 +524,12 @@ class GatewayConfigBundle(DictAccessModel):
 
 
 class GatewayConfigRequest(DictAccessModel):
-    model: str = "gemini-3.8-flash"
-    project_id: str = "prod-genai-pt-host"
-    location: str = "global"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
+    project_id: str = Field(default="prod-genai-pt-host", pattern=GCP_PROJECT_ID_PATTERN)
+    location: str = Field(default="global", pattern=GCP_LOCATION_PATTERN)
     provisioned_gsus: int = Field(default=20, ge=1)
     target_rps: int = Field(default=650, ge=1)
     concurrent_sse_streams: int = Field(default=400, ge=0)
     pods: int = Field(default=12, ge=1)
     uvicorn_workers_per_pod: int = Field(default=4, ge=1)
-    self_hosted_model: str = "llama-3.3-70b-fp8"
+    self_hosted_model: str = Field(default="llama-3.3-70b-fp8", pattern=K8S_NAME_PATTERN)

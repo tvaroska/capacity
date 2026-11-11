@@ -2,11 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from capacity.burst import (
@@ -16,15 +16,16 @@ from capacity.burst import (
     evaluate_prefix_cache_dilution,
 )
 from capacity.capacity import (
-    _find_capacity,
     build_response,
     load_gsu_config,
     normalize_model_id,
+    require_capacity,
 )
 from capacity.core import (
     DEFAULT_DAYS,
     DEFAULT_PERCENTILES,
     GCPQueryError,
+    UnknownModelError,
     build_demo_throughput,
     fetch_throughput,
 )
@@ -82,6 +83,11 @@ app = FastAPI(
 )
 
 
+@app.exception_handler(UnknownModelError)
+async def unknown_model_handler(_request: Request, exc: UnknownModelError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 class SelfHostedAuditRequest(BaseModel):
     profile: str = "llama-3.3-70b-fp8"
     tpm_series: list[float] = Field(
@@ -130,7 +136,7 @@ async def get_recommendations(
     region: Annotated[list[str] | None, Query()] = None,
     active_only: Annotated[bool, Query()] = False,
     by_region: Annotated[bool, Query()] = False,
-    mode: Annotated[str, Query()] = "gsu",
+    mode: Annotated[Literal["gsu", "self-hosted"], Query()] = "gsu",
     demo: Annotated[bool, Query()] = False,
     forecast_hours: Annotated[int, Query(ge=0, le=168)] = 24,
 ) -> RecommendationResponse:
@@ -169,7 +175,7 @@ async def get_recommendations(
 async def post_optimize(req: OptimizeRequest) -> OptimizeResponse:
     norm_model = normalize_model_id(req.model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = require_capacity(norm_model, cfg)
     tps_per_gsu = tpm_per_gsu / 60.0
 
     req_weighted_burndown = compute_weighted_burndown_tokens(
@@ -302,7 +308,7 @@ async def post_gateway_config(req: GatewayConfigRequest) -> GatewayConfigBundle:
 async def post_chargeback(req: ChargebackRequest) -> FocusChargebackReport:
     norm_model = normalize_model_id(req.model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = require_capacity(norm_model, cfg)
 
     return compute_focus_chargeback(
         hourly_consumed_tpm_by_tenant=req.hourly_consumed_tpm_by_tenant,
@@ -322,7 +328,7 @@ async def post_chargeback(req: ChargebackRequest) -> FocusChargebackReport:
 async def post_batch_scavenger(req: BatchScavengerRequest) -> BatchScavengerAudit:
     norm_model = normalize_model_id(req.model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = require_capacity(norm_model, cfg)
     return evaluate_batch_scavenger_economics(
         model=norm_model,
         provisioned_gsus=req.provisioned_gsus,
@@ -338,7 +344,7 @@ async def post_batch_scavenger(req: BatchScavengerRequest) -> BatchScavengerAudi
 async def post_residual_schedule(req: ResidualScheduleRequest) -> ResidualScheduleReport:
     norm_model = normalize_model_id(req.model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = require_capacity(norm_model, cfg)
     return schedule_residual_capacity(
         provisioned_gsus=req.provisioned_gsus,
         tpm_per_gsu=tpm_per_gsu,
@@ -354,7 +360,7 @@ async def post_residual_schedule(req: ResidualScheduleRequest) -> ResidualSchedu
 async def post_folder_pooling(req: FolderPoolingRequest) -> FolderPoolingReport:
     norm_model = normalize_model_id(req.model)
     cfg = load_gsu_config()
-    tpm_per_gsu = _find_capacity(norm_model, cfg) or 120_900
+    tpm_per_gsu = require_capacity(norm_model, cfg)
     return evaluate_folder_pooling(
         hourly_tpm_by_project=req.hourly_tpm_by_project,
         model=norm_model,
