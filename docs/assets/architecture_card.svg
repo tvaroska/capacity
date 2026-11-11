@@ -1,127 +1,197 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" width="1280" height="720" font-family="DejaVu Sans, Arial, Helvetica, sans-serif">
-  <!-- Canvas Background -->
-  <rect x="0" y="0" width="1280" height="720" fill="#f8f9fa"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 940" width="1600" height="940">
+  <defs>
+    <style>
+      .font { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; }
+      .mono { font-family: 'JetBrains Mono', 'Fira Code', 'Courier New', monospace; }
+      .title { font-size: 28px; font-weight: 800; }
+      .subtitle { font-size: 14px; font-weight: 500; }
+      .step-num { font-size: 32px; font-weight: 800; }
+      .step-tag { font-size: 12px; font-weight: 800; letter-spacing: 1px; }
+      .box-title { font-size: 20px; font-weight: 800; }
+      .box-sub { font-size: 13.5px; font-weight: 500; }
+      .pill-title { font-size: 13px; font-weight: 700; }
+      .pill-sub { font-size: 12px; font-weight: 500; }
+      .arrow-label { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; }
+    </style>
+  </defs>
 
-  <!-- Solid Raster-Safe Header Banner -->
-  <rect x="20" y="16" width="1240" height="82" rx="12" fill="#174ea6"/>
-  <rect x="20" y="16" width="1240" height="8" rx="4" fill="#1a73e8"/>
-  <text x="44" y="54" fill="#ffffff" font-size="22" font-weight="700">Capacity: AI Serving Physics, Gateway Policy Compiler &amp; FOCUS 1.2 FinOps</text>
-  <text x="44" y="80" fill="#e8f0fe" font-size="13.5" font-weight="500">Compiles Cloud Monitoring, vLLM Prometheus &amp; OTel Traces into Sizing Plans, Gateway YAML &amp; Two-Pool Chargeback</text>
+  <!-- Outer Soft Slate Canvas -->
+  <rect x="0" y="0" width="1600" height="940" fill="#F8FAFC"/>
+  <rect x="20" y="20" width="1560" height="900" rx="14" fill="#FFFFFF" stroke="#0F172A" stroke-width="2.5"/>
 
-  <!-- Column 1: Trace Ingest & Sizing (x=20..304) -->
-  <rect x="20" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
-  <rect x="20" y="114" width="284" height="44" rx="12" fill="#e8f0fe"/>
-  <rect x="20" y="146" width="284" height="12" fill="#e8f0fe"/>
-  <text x="38" y="142" fill="#174ea6" font-size="15" font-weight="700">1. Trace Ingest &amp; Sizing</text>
+  <!-- Top Dark Navy Swiss Masthead -->
+  <rect x="20" y="20" width="1560" height="104" rx="12" fill="#0F172A"/>
+  <rect x="20" y="90" width="1560" height="34" fill="#0F172A"/>
+  <text x="56" y="66" class="font title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="28" font-weight="800" fill="#FFFFFF">CAPACITY ARCHITECTURE</text>
+  <text x="56" y="96" class="font subtitle" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#94A3B8">Stateless Trace Compiler · Sub-Second Gateway Policy · Zero-Marginal Backfill &amp; FOCUS 1.2</text>
 
-  <rect x="34" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
-  <rect x="48" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
-  <text x="56" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
-  <text x="48" y="238" fill="#202124" font-size="14" font-weight="700">24x7 Zero-Pad &amp; Quota Lock</text>
-  <text x="48" y="266" fill="#3c4043" font-size="12.5">• 8x5 traffic gives P50 = 0 GSUs</text>
-  <text x="48" y="292" fill="#3c4043" font-size="12.5">• Siloed projects strand capacity</text>
-  <text x="48" y="318" fill="#3c4043" font-size="12.5">• GPU max_replicas locks quota</text>
-  <text x="48" y="352" fill="#c5221f" font-size="12" font-weight="700">60%+ overnight idle reservation</text>
+  <!-- Top Right Color Legend Pills -->
+  <rect x="936" y="48" width="192" height="44" rx="8" fill="#1E293B" stroke="#38BDF8" stroke-width="1.5"/>
+  <circle cx="960" cy="70" r="6" fill="#38BDF8"/>
+  <text x="976" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#F8FAFC">Zero Live Daemons</text>
 
-  <rect x="34" y="396" width="256" height="216" rx="10" fill="#e8f0fe" stroke="#1a73e8" stroke-width="1.5"/>
-  <rect x="48" y="412" width="136" height="22" rx="4" fill="#1a73e8"/>
-  <text x="56" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
-  <text x="48" y="458" fill="#202124" font-size="14" font-weight="700">Active-Hours &amp; Pool Sizer</text>
-  <text x="48" y="486" fill="#3c4043" font-size="12.5">• Active-window Newsvendor target</text>
-  <text x="48" y="512" fill="#3c4043" font-size="12.5">• Shared Folder RHPT (-33% GSUs)</text>
-  <text x="48" y="538" fill="#3c4043" font-size="12.5">• Disaggregated Prefill / Decode</text>
-  <text x="48" y="564" fill="#3c4043" font-size="12.5">• Cloud Mon, vLLM &amp; OTel inputs</text>
-  <text x="48" y="594" fill="#174ea6" font-size="12" font-weight="700">CLI: capacity recommend</text>
+  <rect x="1144" y="48" width="204" height="44" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
+  <circle cx="1168" cy="70" r="6" fill="#F59E0B"/>
+  <text x="1184" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">1s to 7.5x Physics</text>
 
-  <!-- Explicit Connector 1 -> 2 (x=304..338) -->
-  <rect x="306" y="370" width="18" height="4" fill="#1a73e8"/>
-  <polygon points="322,364 336,372 322,380" fill="#1a73e8"/>
+  <rect x="1364" y="48" width="184" height="44" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
+  <circle cx="1388" cy="70" r="6" fill="#10B981"/>
+  <text x="1404" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#6EE7B7">Pick One Gateway</text>
 
-  <!-- Column 2: Burst & Cache Physics (x=338..622) -->
-  <rect x="338" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
-  <rect x="338" y="114" width="284" height="44" rx="12" fill="#fef7e0"/>
-  <rect x="338" y="146" width="284" height="12" fill="#fef7e0"/>
-  <text x="356" y="142" fill="#b06000" font-size="15" font-weight="700">2. Burst &amp; Cache Physics</text>
+  <!-- ================================================================= -->
+  <!-- TOP ROW: STAGES 01 -> 02 -> 03 (y=156, h=296)                      -->
+  <!-- ================================================================= -->
 
-  <rect x="352" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
-  <rect x="366" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
-  <text x="374" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
-  <text x="366" y="238" fill="#202124" font-size="14" font-weight="700">60s Illusion &amp; Cache Loss</text>
-  <text x="366" y="266" fill="#3c4043" font-size="12.5">• &lt;70% 60s chart hides 1s 429s</text>
-  <text x="366" y="292" fill="#3c4043" font-size="12.5">• &gt;200K cliff bills 7.5x output</text>
-  <text x="366" y="318" fill="#3c4043" font-size="12.5">• Block-0 UUIDs &amp; 1/N dilution</text>
-  <text x="366" y="352" fill="#c5221f" font-size="12" font-weight="700">Stripped sigs drop cache to 0.8%</text>
+  <!-- STAGE 01: SKY BLUE -->
+  <rect x="56" y="156" width="440" height="296" rx="10" fill="#F8FAFC" stroke="#0284C7" stroke-width="2.5"/>
+  <rect x="56" y="156" width="440" height="64" rx="10" fill="#E0F2FE"/>
+  <rect x="56" y="196" width="440" height="24" fill="#E0F2FE"/>
+  <line x1="56" y1="220" x2="496" y2="220" stroke="#0284C7" stroke-width="2"/>
+  <text x="80" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0369A1">01</text>
+  <text x="140" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#0C4A6E">TRACE INGEST &amp; NORMALIZE</text>
 
-  <rect x="352" y="396" width="256" height="216" rx="10" fill="#fef7e0" stroke="#b06000" stroke-width="1.5"/>
-  <rect x="366" y="412" width="136" height="22" rx="4" fill="#b06000"/>
-  <text x="374" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
-  <text x="366" y="458" fill="#202124" font-size="14" font-weight="700">Burndown &amp; Prefix Auditor</text>
-  <text x="366" y="486" fill="#3c4043" font-size="12.5">• 1s (&gt;=50 GSU) &amp; 10s buckets</text>
-  <text x="366" y="512" fill="#3c4043" font-size="12.5">• Exact &lt;=200K vs &gt;200K weights</text>
-  <text x="366" y="538" fill="#3c4043" font-size="12.5">• 4,096 Block-0 &amp; Turn-0 anchor</text>
-  <text x="366" y="564" fill="#3c4043" font-size="12.5">• thought_signature preservation</text>
-  <text x="366" y="594" fill="#b06000" font-size="12" font-weight="700">CLI: capacity optimize</text>
+  <text x="80" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Serving Trace Intake</text>
+  <text x="80" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#475569">Reads Cloud Monitoring, Prometheus, and OpenTelemetry logs</text>
 
-  <!-- Explicit Connector 2 -> 3 (x=622..656) -->
-  <rect x="624" y="370" width="18" height="4" fill="#1a73e8"/>
-  <polygon points="640,364 654,372 640,380" fill="#1a73e8"/>
+  <rect x="80" y="314" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#7DD3FC" stroke-width="1.5"/>
+  <text x="100" y="345" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0369A1">Active Business Hours vs. 168-Hour Week</text>
 
-  <!-- Column 3: Gateway Policy Compiler (x=656..940) -->
-  <rect x="656" y="114" width="284" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
-  <rect x="656" y="114" width="284" height="44" rx="12" fill="#e8f0fe"/>
-  <rect x="656" y="146" width="284" height="12" fill="#e8f0fe"/>
-  <text x="674" y="142" fill="#174ea6" font-size="15" font-weight="700">3. Gateway Policy (Pick 1)</text>
+  <rect x="80" y="378" width="392" height="52" rx="8" fill="#E0F2FE" stroke="#38BDF8" stroke-width="1.5"/>
+  <text x="100" y="409" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0C4A6E">Zero Cloud Credentials Needed Locally</text>
 
-  <rect x="670" y="176" width="256" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
-  <rect x="684" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
-  <text x="692" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
-  <text x="684" y="238" fill="#202124" font-size="14" font-weight="700">Raw TPM &amp; PT Blackholing</text>
-  <text x="684" y="266" fill="#3c4043" font-size="12.5">• Raw 60s TPM misses 4x-7.5x out</text>
-  <text x="684" y="292" fill="#3c4043" font-size="12.5">• 1s 429s trigger router cooldown</text>
-  <text x="684" y="318" fill="#3c4043" font-size="12.5">• Prisma locks DB above 500 RPS</text>
-  <text x="684" y="352" fill="#c5221f" font-size="12" font-weight="700">Bursting team starves peer PT</text>
+  <!-- Arrow 01 -> 02 -->
+  <line x1="496" y1="304" x2="564" y2="304" stroke="#2563EB" stroke-width="3.5"/>
+  <polygon points="564,295 580,304 564,313" fill="#2563EB"/>
+  <text x="538" y="288" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#1D4ED8">SIZE</text>
 
-  <rect x="670" y="396" width="256" height="216" rx="10" fill="#e8f0fe" stroke="#1a73e8" stroke-width="1.5"/>
-  <rect x="684" y="412" width="136" height="22" rx="4" fill="#1a73e8"/>
-  <text x="692" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
-  <text x="684" y="458" fill="#202124" font-size="14" font-weight="700">Drop-In Gateway Manifests</text>
-  <text x="684" y="486" fill="#3c4043" font-size="12.5">• LiteLLM YAML + CustomLogger</text>
-  <text x="684" y="512" fill="#3c4043" font-size="12.5">• Envoy AIGatewayRoute post-SSE</text>
-  <text x="684" y="538" fill="#3c4043" font-size="12.5">• GKE epp prefix/KV cache scorer</text>
-  <text x="684" y="564" fill="#3c4043" font-size="12.5">• 8 header-pair spillover tiers</text>
-  <text x="684" y="594" fill="#174ea6" font-size="12" font-weight="700">CLI: capacity gateway</text>
+  <!-- STAGE 02: ROYAL BLUE -->
+  <rect x="580" y="156" width="440" height="296" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="2.5"/>
+  <rect x="580" y="156" width="440" height="64" rx="10" fill="#DBEAFE"/>
+  <rect x="580" y="196" width="440" height="24" fill="#DBEAFE"/>
+  <line x1="580" y1="220" x2="1020" y2="220" stroke="#2563EB" stroke-width="2"/>
+  <text x="604" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#1D4ED8">02</text>
+  <text x="664" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#1E3A8A">DUAL-POOL SIZING &amp; CACHE</text>
 
-  <!-- Explicit Connector 3 -> 4 (x=940..974) -->
-  <rect x="942" y="370" width="18" height="4" fill="#137333"/>
-  <polygon points="958,364 972,372 958,380" fill="#137333"/>
+  <text x="604" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Pool Sizing &amp; Prefix Cache</text>
+  <text x="604" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Sizes active commitments and protects shared replica memory</text>
 
-  <!-- Column 4: Backfill & FOCUS 1.2 FinOps (x=974..1258) -->
-  <rect x="974" y="114" width="286" height="516" rx="12" fill="#ffffff" stroke="#dadce0" stroke-width="1.5"/>
-  <rect x="974" y="114" width="286" height="44" rx="12" fill="#e6f4ea"/>
-  <rect x="974" y="146" width="286" height="12" fill="#e6f4ea"/>
-  <text x="992" y="142" fill="#137333" font-size="15" font-weight="700">4. Backfill &amp; FOCUS 1.2</text>
+  <rect x="604" y="314" width="188" height="116" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="2"/>
+  <text x="622" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#047857">Managed PT Pools</text>
+  <text x="622" y="370" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#065F46">Shared folder pooling</text>
+  <text x="622" y="406" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#059669">-33% Peak Units</text>
 
-  <rect x="988" y="176" width="258" height="202" rx="10" fill="#fce8e6" stroke="#c5221f" stroke-width="1.5"/>
-  <rect x="1002" y="192" width="118" height="22" rx="4" fill="#c5221f"/>
-  <text x="1010" y="207" fill="#ffffff" font-size="11" font-weight="700">MONTH-1 TRAP</text>
-  <text x="1002" y="238" fill="#202124" font-size="14" font-weight="700">Batch Double-Pay &amp; Raw Split</text>
-  <text x="1002" y="266" fill="#3c4043" font-size="12.5">• 0.5x Batch ignores sunk 24x7 PT</text>
-  <text x="1002" y="292" fill="#3c4043" font-size="12.5">• Raw tokens underbill 4x decode</text>
-  <text x="1002" y="318" fill="#3c4043" font-size="12.5">• Idle PT taxes early adopters 3x</text>
-  <text x="1002" y="352" fill="#c5221f" font-size="12" font-weight="700">Pays twice while PT sits empty</text>
+  <rect x="808" y="314" width="188" height="116" rx="8" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2"/>
+  <text x="826" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#B45309">Self-Hosted vLLM</text>
+  <text x="826" y="370" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#78350F">Prefill / decode split</text>
+  <text x="826" y="406" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#D97706">4K Prefix Blocks</text>
 
-  <rect x="988" y="396" width="258" height="216" rx="10" fill="#e6f4ea" stroke="#137333" stroke-width="1.5"/>
-  <rect x="1002" y="412" width="136" height="22" rx="4" fill="#137333"/>
-  <text x="1010" y="427" fill="#ffffff" font-size="11" font-weight="700">COMPILED OUTPUT</text>
-  <text x="1002" y="458" fill="#202124" font-size="14" font-weight="700">$0 Scavenger &amp; Two-Pool</text>
-  <text x="1002" y="486" fill="#3c4043" font-size="12.5">• 3-Tier EDF reclaims idle PT ($0)</text>
-  <text x="1002" y="512" fill="#3c4043" font-size="12.5">• Active vs Idle FOCUS 1.2 pools</text>
-  <text x="1002" y="538" fill="#3c4043" font-size="12.5">• 5 KPIs: CPWT_1M, CPVO, TER,</text>
-  <text x="1002" y="564" fill="#3c4043" font-size="12.5">  CSR &amp; 168h ECUR_168h</text>
-  <text x="1002" y="594" fill="#137333" font-size="12" font-weight="700">CLI: schedule &amp; chargeback</text>
+  <!-- Arrow 02 -> 03 -->
+  <line x1="1020" y1="304" x2="1088" y2="304" stroke="#D97706" stroke-width="3.5"/>
+  <polygon points="1088,295 1104,304 1088,313" fill="#D97706"/>
+  <text x="1062" y="288" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#B45309">WEIGHT</text>
 
-  <!-- Bottom Stateless Compiler Summary Strip -->
-  <rect x="20" y="646" width="1240" height="56" rx="10" fill="#ffffff" stroke="#1a73e8" stroke-width="1.5"/>
-  <text x="44" y="679" fill="#174ea6" font-size="13.5" font-weight="700">Stateless Offline Compiler:</text>
-  <text x="242" y="679" fill="#3c4043" font-size="13">Zero cloud credentials needed locally (uv run capacity demo) • Pick 1 gateway target • Export JSON plans to Kueue, Airflow &amp; BigQuery</text>
+  <!-- STAGE 03: DARK NAVY & AMBER GOLD -->
+  <rect x="1104" y="156" width="440" height="296" rx="10" fill="#0F172A" stroke="#F59E0B" stroke-width="3"/>
+  <rect x="1104" y="156" width="440" height="64" rx="10" fill="#1E293B"/>
+  <rect x="1104" y="196" width="440" height="24" fill="#1E293B"/>
+  <line x1="1104" y1="220" x2="1544" y2="220" stroke="#F59E0B" stroke-width="2"/>
+  <text x="1128" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#F59E0B">03</text>
+  <text x="1188" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#FDE68A">BURNDOWN PHYSICS ENGINE</text>
+
+  <text x="1128" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#FFFFFF">Sub-Second Weighted Math</text>
+  <text x="1128" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#CBD5E1">Exposes 1-second 429 bursts hidden by 60-second charts</text>
+
+  <rect x="1128" y="314" width="392" height="52" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
+  <text x="1148" y="345" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">1s &amp; 10s Buckets · 1x Input to 7.5x Output</text>
+
+  <rect x="1128" y="378" width="392" height="52" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
+  <text x="1148" y="409" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#34D399">Two-Phase Pre-Flight + Post-Stream Deduction</text>
+
+  <!-- Downward Connector Stage 03 -> Stage 04 -->
+  <line x1="1324" y1="452" x2="1324" y2="548" stroke="#059669" stroke-width="3.5"/>
+  <polygon points="1315,548 1324,564 1333,548" fill="#059669"/>
+  <text x="1378" y="508" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#047857">COMPILE</text>
+
+  <!-- Direct Headroom Bridge Stage 02 -> Stage 05 -->
+  <line x1="890" y1="452" x2="890" y2="548" stroke="#D97706" stroke-width="3" stroke-dasharray="8,6"/>
+  <polygon points="881,548 890,564 899,548" fill="#D97706"/>
+  <rect x="752" y="486" width="276" height="32" rx="16" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5"/>
+  <text x="890" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#B45309">75% IDLE NIGHT HEADROOM</text>
+
+  <!-- ================================================================= -->
+  <!-- BOTTOM ROW: STAGES 06 <- 05 <- 04 (y=564, h=296)                   -->
+  <!-- ================================================================= -->
+
+  <!-- STAGE 04: EMERALD GREEN -->
+  <rect x="1104" y="564" width="440" height="296" rx="10" fill="#ECFDF5" stroke="#059669" stroke-width="2.5"/>
+  <rect x="1104" y="564" width="440" height="64" rx="10" fill="#D1FAE5"/>
+  <rect x="1104" y="604" width="440" height="24" fill="#D1FAE5"/>
+  <line x1="1104" y1="628" x2="1544" y2="628" stroke="#059669" stroke-width="2"/>
+  <text x="1128" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#047857">04</text>
+  <text x="1188" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#065F46">GATEWAY POLICY COMPILER</text>
+
+  <text x="1128" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Drop-In Proxy Manifests</text>
+  <text x="1128" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Isolates bursting teams and stops 60-second pool blackholes</text>
+
+  <rect x="1128" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="1.5"/>
+  <text x="1148" y="753" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#065F46">LiteLLM · Envoy AI Gateway · GKE Gateway</text>
+
+  <rect x="1128" y="786" width="392" height="52" rx="8" fill="#D1FAE5" stroke="#34D399" stroke-width="1.5"/>
+  <text x="1148" y="817" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">8 Priority Spillover &amp; Cache-Routing Tiers</text>
+
+  <!-- Arrow 04 -> 05 -->
+  <line x1="1104" y1="712" x2="1036" y2="712" stroke="#0891B2" stroke-width="3.5"/>
+  <polygon points="1036,703 1020,712 1036,721" fill="#0891B2"/>
+  <text x="1062" y="696" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#0E7490">PACE</text>
+
+  <!-- STAGE 05: TEAL / CYAN -->
+  <rect x="580" y="564" width="440" height="296" rx="10" fill="#ECFEFF" stroke="#0891B2" stroke-width="2.5"/>
+  <rect x="580" y="564" width="440" height="64" rx="10" fill="#CFFAFE"/>
+  <rect x="580" y="604" width="440" height="24" fill="#CFFAFE"/>
+  <line x1="580" y1="628" x2="1020" y2="628" stroke="#0891B2" stroke-width="2"/>
+  <text x="604" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0E7490">05</text>
+  <text x="664" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#155E75">OVERNIGHT BACKFILL SCHEDULER</text>
+
+  <text x="604" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Zero-Cost Night Scavenging</text>
+  <text x="604" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Drains paid night capacity instead of Batch double-pay</text>
+
+  <rect x="604" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
+  <text x="622" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Deadline Jobs</text>
+  <text x="622" y="778" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#334155">Value-density windows</text>
+  <text x="622" y="814" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">$0 Dedicated PT</text>
+
+  <rect x="808" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
+  <text x="826" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Evergreen Sweep</text>
+  <text x="826" y="778" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#334155">Kueue &amp; Airflow plans</text>
+  <text x="826" y="814" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">0.5x Spill Guard</text>
+
+  <!-- Arrow 05 -> 06 -->
+  <line x1="580" y1="712" x2="512" y2="712" stroke="#7C3AED" stroke-width="3.5"/>
+  <polygon points="512,703 496,712 512,721" fill="#7C3AED"/>
+  <text x="538" y="696" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#6D28D9">SETTLE</text>
+
+  <!-- STAGE 06: VIOLET / PURPLE -->
+  <rect x="56" y="564" width="440" height="296" rx="10" fill="#F5F3FF" stroke="#7C3AED" stroke-width="2.5"/>
+  <rect x="56" y="564" width="440" height="64" rx="10" fill="#EDE9FE"/>
+  <rect x="56" y="604" width="440" height="24" fill="#EDE9FE"/>
+  <line x1="56" y1="628" x2="496" y2="628" stroke="#7C3AED" stroke-width="2"/>
+  <text x="80" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#6D28D9">06</text>
+  <text x="140" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#4C1D95">FOCUS 1.2 FINOPS LEDGER</text>
+
+  <text x="80" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Two-Pool Fair Chargeback</text>
+  <text x="80" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Separates active weighted burn from platform growth buffer</text>
+
+  <rect x="80" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#C4B5FD" stroke-width="1.5"/>
+  <text x="100" y="753" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#5B21B6">Stops 7.5x Reasoning Free-Riding on 0.1x RAG</text>
+
+  <rect x="80" y="786" width="392" height="52" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="1.5"/>
+  <text x="100" y="817" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">BigQuery Ledger + Cost per Verified Outcome</text>
+
+  <!-- Closed-Loop Feedback Connector Stage 06 -> Stage 02 (Up and Right into 02) -->
+  <line x1="276" y1="564" x2="276" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
+  <line x1="276" y1="502" x2="680" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
+  <line x1="680" y1="502" x2="680" y2="468" stroke="#7C3AED" stroke-width="3.5"/>
+  <polygon points="671,468 680,452 689,468" fill="#7C3AED"/>
+  <rect x="342" y="486" width="284" height="32" rx="16" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.5"/>
+  <text x="484" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#5B21B6">RE-CALIBRATES POOL TARGETS</text>
 </svg>

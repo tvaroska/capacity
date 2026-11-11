@@ -1,8 +1,8 @@
-# capacity: your AI reservation throttles at peak and sits idle overnight
+# capacity: why 24x7 AI reservations throttle at noon and pay twice at midnight
 
 ![Capacity Architecture](docs/assets/architecture_card.svg)
 
-Enterprise AI reservations fail in month one because 60-second monitoring averages hide `1s` and `10s` weighted-burndown `429` throttles, stateless round-robin routing dilutes replica KV and prefix caches to `1/N`, and routing overnight batch workloads to "50%-off" Batch APIs pays twice on top of idle 24x7 commitments. **`capacity`** is a stateless offline compiler that ingests Cloud Monitoring, Prometheus `vLLM`, or OpenTelemetry `gen_ai.*` traces to size **Provisioned Throughput (`PT`)** **Generative Serving Units (`GSUs`)** (`--mode gsu`) and **Self-Hosted GPU/TPU Pools** (`--mode self-hosted`), emit drop-in **LiteLLM, Envoy AI Gateway, or GKE Inference Gateway (`epp`)** configs, and export overnight schedules and **FinOps FOCUS 1.2** ledgers into Kueue, Airflow, and BigQuery.
+On Google Cloud Provisioned Throughput (`PT`) and self-hosted `vLLM`, 60-second P95 charts hide `1s` and `10s` weighted-burndown `429` bursts (`1x` input up to `7.5x` long-context decode), stateless gateways dilute prefix caches to `1/N` and blackhole pools for 60 seconds, and "50%-off" Batch APIs bill a second invoice while paid commitments sit `75%` idle overnight. **`capacity`** runs offline with zero cloud credentials or live daemons, compiling Cloud Monitoring, Prometheus, and OpenTelemetry traces into active-hours pool targets, burst-isolating **LiteLLM, Envoy, or GKE** manifests, `$0`-marginal overnight backfill schedules, and two-pool **FOCUS 1.2** chargeback ledgers.
 
 > **Scope Boundary (One Stateless Compiler, Not Seven Daemons):** You do not deploy `capacity` in the request hot path or run all targets at once. Teams feed usage traces in, compile manifests for their **single** chosen gateway (`--target litellm | envoy | epp`), and export JSON sizing/chargeback tables to existing schedulers and data warehouses.
 

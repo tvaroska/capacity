@@ -23,3 +23,30 @@
   - [x] Add model-tier prefix-cache block alignment, Block-0 contamination, Turn-0 dummy-turn anchor, `thought_signature` preservation, and `-fast` high-speed decode tier to [`capacity/burst.py`](../capacity/burst.py) and [`capacity/capacity.py`](../capacity/capacity.py).
   - [x] Add [`capacity/gateway.py`](../capacity/gateway.py) (`capacity gateway --target litellm|envoy|epp|all` and `POST /api/v1/gateway/config`) generating `litellm_config.yaml`, `litellm_burndown_callback.py`, Envoy AI Gateway CEL manifests, GKE `epp` manifests, and LiteLLM high-QPS scale audits.
   - [x] Add Batch API (`0.5x`) double-payment audit, 3-Tier Residual Capacity Scheduler (`capacity schedule`), Shared Folder RHPT pooling audit, and the 5 FinOps for AI KPIs (`CPWT_1M`, `CPVO`, `TER`, `CSR`, `ECUR_168h`) to [`capacity/finops.py`](../capacity/finops.py), plus Disaggregated Prefill/Decode GPU pool sizing to [`capacity/self_hosted.py`](../capacity/self_hosted.py).
+
+---
+
+## 3. Next Horizons (`v0.4.0` — `google/adk-recipes` Runtime Alignment)
+
+- [ ] **ADK Prefix-Cache Reference Patterns ([`capacity/burst.py`](../capacity/burst.py)):** Capture concrete ADK implementation patterns from `google/adk-recipes` (`long-horizon-harness`: `instruction=""` + fixed `static_instruction` + `ContextCacheConfig(min_tokens=4096)`, trailing `<system-reminder>` callbacks, bounded `PreloadMemoryTool` placement in transient user content, and reclaim-thresholded `tool_output_pruning` to prevent Block 0 cache thrash) alongside the simulator's `4,096`-token Block 0 and telemetry models.
+- [ ] **Per-Turn Model Routing & Multi-Backend Proxy Recipes ([`capacity/gateway.py`](../capacity/gateway.py)):** Model per-turn `DispatchingLlm`-style tier switching alongside gateway affinity and `thought_signature` preservation guidance.
+- [ ] **Hygiene & Tooling Enhancements:** Evaluate AST `.env` variable drift checks and Rust-based `ty` / `[tool.uv]` `required-version` pinning alongside `ruff`.
+
+---
+
+## 4. Showcase Panel Wave 2 Hardening & Level 3 Benchmark Backlog (`R1`–`R3` & `I3`)
+
+- [ ] **`R1` — Cold-Clone Packaging, Container Build & Demo/Doc Reconciliation (`-15` Blocker):**
+  - Re-lock [`uv.lock`](../uv.lock) against public PyPI (`--no-config --default-index https://pypi.org/simple`) matching [`pyproject.toml`](../pyproject.toml) (`capacity==0.3.0`, `requires-python >= 3.12`, `python-dotenv`, and `dev` extras).
+  - Add `COPY README.md ./` before `pip install` and a non-root runtime `USER` in [`Dockerfile`](../Dockerfile); align [`cloudbuild.yaml`](../cloudbuild.yaml) to `v0.3.0`, `uv sync --frozen --extra dev`, and `mypy --strict capacity tests`.
+  - Fix monolithic prefill scaling in [`capacity/self_hosted.py`](../capacity/self_hosted.py) (`in_tok / 4.5 + 4.0 * out_tok` without clamping `max(total_disagg, ...)`), unify default `revenue_tpm_by_hour` in [`capacity/finops.py`](../capacity/finops.py) with [`capacity/models.py`](../capacity/models.py) (`8h`), omit `"X-Vertex-AI-LLM-Request-Type"` instead of emitting `"unset"` when unconfigured, sync [`README.md`](../README.md) Section 4A/4B outputs, and assert exact scorecard lines in [`tests/test_documentation_contract.py`](../tests/test_documentation_contract.py).
+- [ ] **`R2` — Physics, BYO Parser, Gateway Callback, Stage UI & Security Hardening (`-20` Blocker):**
+  - Wire Redis `cache.async_increment`, `cached_tokens`, and `reasoning_tokens` in `BurndownAndTrafficTypeLogger` ([`capacity/gateway.py`](../capacity/gateway.py)), and fix Envoy per-BU share + pre-SSE concurrency bounds.
+  - Replace string-template YAML rendering with `yaml.safe_dump` + RFC-1123 slug validation (`[a-z0-9][a-z0-9._-]{0,63}`), bound the [`capacity/self_hosted.py`](../capacity/self_hosted.py) replica sizing loop (`<= 10,000`), reject quote characters in [`capacity/core.py`](../capacity/core.py) filter builders, and add `tests/test_isolation_guard.py` + `@pytest.mark.port` adapter tests.
+  - Aggregate minute series into hourly buckets (or `1,440`-minute horizon) for `forecast_24h_peak_tpm` in [`capacity/capacity.py`](../capacity/capacity.py), scale active-only Newsvendor spillover by duty-cycle hours in [`capacity/finops.py`](../capacity/finops.py), bound `10s` burst tokens by `60s` total in [`capacity/burst.py`](../capacity/burst.py), short-circuit zero-traffic traces and wire parsed `--vllm-file` gauges in [`capacity/cli.py`](../capacity/cli.py), unwrap nested OTel `attributes.gen_ai.usage.*` + timezone-aware `datetime.fromisoformat` + multi-scrape Prometheus counter deltas in [`capacity/self_hosted.py`](../capacity/self_hosted.py), fix static `--html-out` `/docs` links and initial slider jump in [`capacity/portal.py`](../capacity/portal.py), and add **Rejected Options + "Where This Breaks"** to [`DECISIONS.md`](../DECISIONS.md).
+- [ ] **`R3` — Open-Loop `Level 3` Empirical Benchmark (`Class 2 <= 79` -> `Class 3 >= 85`):**
+  - Add `benchmarks/run_l3_benchmark.py`, `benchmarks/corpora/`, `benchmarks/results/l3_receipt.json`, and `tests/test_l3_receipt.py` covering:
+    1. A 7-day multi-region **BurstGPT + Azure Public LLM Inference** trace backtest (`N >= 10,000` requests) benchmarking `capacity`'s causal rolling Holt + Newsvendor + EDF scavenger loop against an ex-post omniscient MILP oracle (`L2`), Naive P99 Static Reservation (`L0`), and Uncapped PayGo (`L1`).
+    2. A containerized **LiteLLM + Redis / Envoy CEL SSE burst harness** (`N >= 500` concurrent requests with bimodal `8K` vs. `240K` contexts and `thought_signature` reasoning chains) verifying sub-second burndown accounting and zero `>200K` cliff false negatives.
+- [ ] **`I3` — [`README.md`](../README.md) Quick-Start & KPI Polish:**
+  - Trim Section 2 Quick Start from 11 commands to 3 progressive Day-1 commands (`capacity demo`, `capacity gateway --target all --gsu 50`, `capacity serve --port 8080`), spell out all 5 FinOps KPI full names (`CPWT_1M`, `CPVO`, `TER`, `CSR`, `ECUR_168h`) in prose/headers, and document the 4 math/control caveats inline.
