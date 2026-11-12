@@ -6,12 +6,12 @@
       .title { font-size: 28px; font-weight: 800; }
       .subtitle { font-size: 14px; font-weight: 500; }
       .step-num { font-size: 32px; font-weight: 800; }
-      .step-tag { font-size: 12px; font-weight: 800; letter-spacing: 1px; }
-      .box-title { font-size: 20px; font-weight: 800; }
-      .box-sub { font-size: 13.5px; font-weight: 500; }
-      .pill-title { font-size: 13px; font-weight: 700; }
-      .pill-sub { font-size: 12px; font-weight: 500; }
-      .arrow-label { font-size: 11px; font-weight: 800; letter-spacing: 0.8px; }
+      .step-tag { font-size: 13.5px; font-weight: 800; letter-spacing: 0.8px; }
+      .box-title { font-size: 21px; font-weight: 800; }
+      .box-sub { font-size: 14px; font-weight: 500; }
+      .pill-title { font-size: 15px; font-weight: 700; }
+      .pill-sub { font-size: 13.5px; font-weight: 500; }
+      .arrow-label { font-size: 13px; font-weight: 800; letter-spacing: 0.6px; }
     </style>
   </defs>
 
@@ -28,15 +28,15 @@
   <!-- Top Right Color Legend Pills -->
   <rect x="936" y="48" width="192" height="44" rx="8" fill="#1E293B" stroke="#38BDF8" stroke-width="1.5"/>
   <circle cx="960" cy="70" r="6" fill="#38BDF8"/>
-  <text x="976" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#F8FAFC">Zero Live Daemons</text>
+  <text x="976" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#F8FAFC">Zero Live Daemons</text>
 
   <rect x="1144" y="48" width="204" height="44" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
   <circle cx="1168" cy="70" r="6" fill="#F59E0B"/>
-  <text x="1184" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">1s to 7.5x Physics</text>
+  <text x="1184" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#FDE68A">1s to 7.5x Physics</text>
 
   <rect x="1364" y="48" width="184" height="44" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
   <circle cx="1388" cy="70" r="6" fill="#10B981"/>
-  <text x="1404" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#6EE7B7">Pick One Gateway</text>
+  <text x="1404" y="75" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="700" fill="#6EE7B7">Pick One Gateway</text>
 
   <!-- ================================================================= -->
   <!-- TOP ROW: STAGES 01 -> 02 -> 03 (y=156, h=296)                      -->
@@ -48,21 +48,21 @@
   <rect x="56" y="196" width="440" height="24" fill="#E0F2FE"/>
   <line x1="56" y1="220" x2="496" y2="220" stroke="#0284C7" stroke-width="2"/>
   <text x="80" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0369A1">01</text>
-  <text x="140" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#0C4A6E">TRACE INGEST &amp; NORMALIZE</text>
+  <text x="140" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#0C4A6E">TRACE INGEST &amp; NORMALIZE</text>
 
-  <text x="80" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Serving Trace Intake</text>
-  <text x="80" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#475569">Reads Cloud Monitoring, Prometheus, and OpenTelemetry logs</text>
+  <text x="80" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#0F172A">Serving Trace Intake</text>
+  <text x="80" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#475569">Reads Cloud Monitoring, Prometheus &amp; OTel logs</text>
 
   <rect x="80" y="314" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#7DD3FC" stroke-width="1.5"/>
-  <text x="100" y="345" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0369A1">Active Business Hours vs. 168-Hour Week</text>
+  <text x="100" y="346" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0369A1">Active Business Hours vs. 168-Hour Week</text>
 
   <rect x="80" y="378" width="392" height="52" rx="8" fill="#E0F2FE" stroke="#38BDF8" stroke-width="1.5"/>
-  <text x="100" y="409" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0C4A6E">Zero Cloud Credentials Needed Locally</text>
+  <text x="100" y="410" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14" font-weight="700" fill="#0C4A6E">Zero Cloud Credentials Needed Locally</text>
 
   <!-- Arrow 01 -> 02 -->
   <line x1="496" y1="304" x2="564" y2="304" stroke="#2563EB" stroke-width="3.5"/>
   <polygon points="564,295 580,304 564,313" fill="#2563EB"/>
-  <text x="538" y="288" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#1D4ED8">SIZE</text>
+  <text x="538" y="286" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#1D4ED8">SIZE</text>
 
   <!-- STAGE 02: ROYAL BLUE -->
   <rect x="580" y="156" width="440" height="296" rx="10" fill="#EFF6FF" stroke="#2563EB" stroke-width="2.5"/>
@@ -70,25 +70,25 @@
   <rect x="580" y="196" width="440" height="24" fill="#DBEAFE"/>
   <line x1="580" y1="220" x2="1020" y2="220" stroke="#2563EB" stroke-width="2"/>
   <text x="604" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#1D4ED8">02</text>
-  <text x="664" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#1E3A8A">DUAL-POOL SIZING &amp; CACHE</text>
+  <text x="664" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#1E3A8A">DUAL-POOL SIZING &amp; CACHE</text>
 
-  <text x="604" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Pool Sizing &amp; Prefix Cache</text>
-  <text x="604" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Sizes active commitments and protects shared replica memory</text>
+  <text x="604" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#0F172A">Pool Sizing &amp; Prefix Cache</text>
+  <text x="604" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#334155">Sizes active pools and guards replica KV memory</text>
 
   <rect x="604" y="314" width="188" height="116" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="2"/>
-  <text x="622" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#047857">Managed PT Pools</text>
-  <text x="622" y="370" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#065F46">Shared folder pooling</text>
-  <text x="622" y="406" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#059669">-33% Peak Units</text>
+  <text x="620" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#047857">Managed PT Pools</text>
+  <text x="620" y="372" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#065F46">Shared folder pooling</text>
+  <text x="620" y="408" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14.5" font-weight="700" fill="#059669">-40% Peak Units</text>
 
   <rect x="808" y="314" width="188" height="116" rx="8" fill="#FFFBEB" stroke="#F59E0B" stroke-width="2"/>
-  <text x="826" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#B45309">Self-Hosted vLLM</text>
-  <text x="826" y="370" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#78350F">Prefill / decode split</text>
-  <text x="826" y="406" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#D97706">4K Prefix Blocks</text>
+  <text x="824" y="344" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#B45309">Self-Hosted vLLM</text>
+  <text x="824" y="372" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#78350F">Prefill / decode split</text>
+  <text x="824" y="408" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14.5" font-weight="700" fill="#D97706">4K Prefix Blocks</text>
 
   <!-- Arrow 02 -> 03 -->
   <line x1="1020" y1="304" x2="1088" y2="304" stroke="#D97706" stroke-width="3.5"/>
   <polygon points="1088,295 1104,304 1088,313" fill="#D97706"/>
-  <text x="1062" y="288" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#B45309">WEIGHT</text>
+  <text x="1062" y="286" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#B45309">WEIGHT</text>
 
   <!-- STAGE 03: DARK NAVY & AMBER GOLD -->
   <rect x="1104" y="156" width="440" height="296" rx="10" fill="#0F172A" stroke="#F59E0B" stroke-width="3"/>
@@ -96,27 +96,27 @@
   <rect x="1104" y="196" width="440" height="24" fill="#1E293B"/>
   <line x1="1104" y1="220" x2="1544" y2="220" stroke="#F59E0B" stroke-width="2"/>
   <text x="1128" y="199" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#F59E0B">03</text>
-  <text x="1188" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#FDE68A">BURNDOWN PHYSICS ENGINE</text>
+  <text x="1188" y="194" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#FDE68A">BURNDOWN PHYSICS ENGINE</text>
 
-  <text x="1128" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#FFFFFF">Sub-Second Weighted Math</text>
-  <text x="1128" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#CBD5E1">Exposes 1-second 429 bursts hidden by 60-second charts</text>
+  <text x="1128" y="262" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#FFFFFF">Sub-Second Weighted Math</text>
+  <text x="1128" y="288" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#CBD5E1">Exposes 1s/10s 429 bursts hidden by 60s charts</text>
 
   <rect x="1128" y="314" width="392" height="52" rx="8" fill="#1E293B" stroke="#F59E0B" stroke-width="1.5"/>
-  <text x="1148" y="345" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#FDE68A">1s &amp; 10s Buckets · 1x Input to 7.5x Output</text>
+  <text x="1148" y="346" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#FDE68A">1s &amp; 10s Buckets · 1x Input to 7.5x Output</text>
 
   <rect x="1128" y="378" width="392" height="52" rx="8" fill="#1E293B" stroke="#10B981" stroke-width="1.5"/>
-  <text x="1148" y="409" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#34D399">Two-Phase Pre-Flight + Post-Stream Deduction</text>
+  <text x="1148" y="410" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14" font-weight="700" fill="#34D399">Two-Phase Pre-Flight + Post-SSE Math</text>
 
   <!-- Downward Connector Stage 03 -> Stage 04 -->
   <line x1="1324" y1="452" x2="1324" y2="548" stroke="#059669" stroke-width="3.5"/>
   <polygon points="1315,548 1324,564 1333,548" fill="#059669"/>
-  <text x="1378" y="508" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#047857">COMPILE</text>
+  <text x="1342" y="510" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#047857">COMPILE</text>
 
   <!-- Direct Headroom Bridge Stage 02 -> Stage 05 -->
   <line x1="890" y1="452" x2="890" y2="548" stroke="#D97706" stroke-width="3" stroke-dasharray="8,6"/>
   <polygon points="881,548 890,564 899,548" fill="#D97706"/>
-  <rect x="752" y="486" width="276" height="32" rx="16" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5"/>
-  <text x="890" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#B45309">75% IDLE NIGHT HEADROOM</text>
+  <rect x="742" y="484" width="296" height="36" rx="18" fill="#FEF3C7" stroke="#F59E0B" stroke-width="1.5"/>
+  <text x="890" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#B45309">75% IDLE NIGHT HEADROOM</text>
 
   <!-- ================================================================= -->
   <!-- BOTTOM ROW: STAGES 06 <- 05 <- 04 (y=564, h=296)                   -->
@@ -128,21 +128,21 @@
   <rect x="1104" y="604" width="440" height="24" fill="#D1FAE5"/>
   <line x1="1104" y1="628" x2="1544" y2="628" stroke="#059669" stroke-width="2"/>
   <text x="1128" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#047857">04</text>
-  <text x="1188" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#065F46">GATEWAY POLICY COMPILER</text>
+  <text x="1188" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#065F46">GATEWAY POLICY COMPILER</text>
 
-  <text x="1128" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Drop-In Proxy Manifests</text>
-  <text x="1128" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Isolates bursting teams and stops 60-second pool blackholes</text>
+  <text x="1128" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#0F172A">Drop-In Proxy Manifests</text>
+  <text x="1128" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#334155">Isolates noisy teams and stops 60s pool blackholes</text>
 
   <rect x="1128" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#6EE7B7" stroke-width="1.5"/>
-  <text x="1148" y="753" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#065F46">LiteLLM · Envoy AI Gateway · GKE Gateway</text>
+  <text x="1148" y="754" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#065F46">LiteLLM · Envoy AI Gateway · GKE Gateway</text>
 
   <rect x="1128" y="786" width="392" height="52" rx="8" fill="#D1FAE5" stroke="#34D399" stroke-width="1.5"/>
-  <text x="1148" y="817" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">8 Priority Spillover &amp; Cache-Routing Tiers</text>
+  <text x="1148" y="818" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14" font-weight="700" fill="#047857">8 Priority Spillover &amp; Cache Tiers</text>
 
   <!-- Arrow 04 -> 05 -->
   <line x1="1104" y1="712" x2="1036" y2="712" stroke="#0891B2" stroke-width="3.5"/>
   <polygon points="1036,703 1020,712 1036,721" fill="#0891B2"/>
-  <text x="1062" y="696" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#0E7490">PACE</text>
+  <text x="1062" y="694" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#0E7490">PACE</text>
 
   <!-- STAGE 05: TEAL / CYAN -->
   <rect x="580" y="564" width="440" height="296" rx="10" fill="#ECFEFF" stroke="#0891B2" stroke-width="2.5"/>
@@ -150,25 +150,25 @@
   <rect x="580" y="604" width="440" height="24" fill="#CFFAFE"/>
   <line x1="580" y1="628" x2="1020" y2="628" stroke="#0891B2" stroke-width="2"/>
   <text x="604" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#0E7490">05</text>
-  <text x="664" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#155E75">OVERNIGHT BACKFILL SCHEDULER</text>
+  <text x="664" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#155E75">OVERNIGHT BACKFILL SCHEDULER</text>
 
-  <text x="604" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Zero-Cost Night Scavenging</text>
-  <text x="604" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Drains paid night capacity instead of Batch double-pay</text>
+  <text x="604" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#0F172A">Zero-Cost Night Scavenging</text>
+  <text x="604" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#334155">Drains paid night capacity vs. Batch double-pay</text>
 
   <rect x="604" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
-  <text x="622" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Deadline Jobs</text>
-  <text x="622" y="778" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#334155">Value-density windows</text>
-  <text x="622" y="814" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">$0 Dedicated PT</text>
+  <text x="620" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0E7490">Deadline Jobs</text>
+  <text x="620" y="780" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Value-density windows</text>
+  <text x="620" y="816" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14.5" font-weight="700" fill="#0891B2">$0 Dedicated PT</text>
 
   <rect x="808" y="722" width="188" height="116" rx="8" fill="#FFFFFF" stroke="#67E8F9" stroke-width="2"/>
-  <text x="826" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#0E7490">Evergreen Sweep</text>
-  <text x="826" y="778" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="12" font-weight="500" fill="#334155">Kueue &amp; Airflow plans</text>
-  <text x="826" y="814" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#0891B2">0.5x Spill Guard</text>
+  <text x="824" y="752" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#0E7490">Evergreen Sweep</text>
+  <text x="824" y="780" class="font pill-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Kueue &amp; Airflow plans</text>
+  <text x="824" y="816" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14.5" font-weight="700" fill="#0891B2">0.5x Spill Guard</text>
 
   <!-- Arrow 05 -> 06 -->
   <line x1="580" y1="712" x2="512" y2="712" stroke="#7C3AED" stroke-width="3.5"/>
   <polygon points="512,703 496,712 512,721" fill="#7C3AED"/>
-  <text x="538" y="696" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#6D28D9">SETTLE</text>
+  <text x="538" y="694" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#6D28D9">SETTLE</text>
 
   <!-- STAGE 06: VIOLET / PURPLE -->
   <rect x="56" y="564" width="440" height="296" rx="10" fill="#F5F3FF" stroke="#7C3AED" stroke-width="2.5"/>
@@ -176,22 +176,22 @@
   <rect x="56" y="604" width="440" height="24" fill="#EDE9FE"/>
   <line x1="56" y1="628" x2="496" y2="628" stroke="#7C3AED" stroke-width="2"/>
   <text x="80" y="607" class="mono step-num" font-family="JetBrains Mono, Courier New, monospace" font-size="32" font-weight="800" fill="#6D28D9">06</text>
-  <text x="140" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="12" font-weight="800" letter-spacing="1" fill="#4C1D95">FOCUS 1.2 FINOPS LEDGER</text>
+  <text x="140" y="602" class="mono step-tag" font-family="JetBrains Mono, Courier New, monospace" font-size="13.5" font-weight="800" letter-spacing="0.8" fill="#4C1D95">FOCUS 1.2 FINOPS LEDGER</text>
 
-  <text x="80" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="20" font-weight="800" fill="#0F172A">Two-Pool Fair Chargeback</text>
-  <text x="80" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13.5" font-weight="500" fill="#334155">Separates active weighted burn from platform growth buffer</text>
+  <text x="80" y="670" class="font box-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="21" font-weight="800" fill="#0F172A">Two-Pool Fair Chargeback</text>
+  <text x="80" y="696" class="font box-sub" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14" font-weight="500" fill="#334155">Splits active weighted burn from growth headroom</text>
 
   <rect x="80" y="722" width="392" height="52" rx="8" fill="#FFFFFF" stroke="#C4B5FD" stroke-width="1.5"/>
-  <text x="100" y="753" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#5B21B6">Stops 7.5x Reasoning Free-Riding on 0.1x RAG</text>
+  <text x="100" y="754" class="font pill-title" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="14.5" font-weight="700" fill="#5B21B6">Stops 7.5x Reasoning Free-Riding on 0.1x RAG</text>
 
   <rect x="80" y="786" width="392" height="52" rx="8" fill="#ECFDF5" stroke="#34D399" stroke-width="1.5"/>
-  <text x="100" y="817" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="700" fill="#047857">BigQuery Ledger + Cost per Verified Outcome</text>
+  <text x="100" y="818" class="mono pill-title" font-family="JetBrains Mono, Courier New, monospace" font-size="14" font-weight="700" fill="#047857">BigQuery Ledger + Cost per Outcome</text>
 
   <!-- Closed-Loop Feedback Connector Stage 06 -> Stage 02 (Up and Right into 02) -->
   <line x1="276" y1="564" x2="276" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
   <line x1="276" y1="502" x2="680" y2="502" stroke="#7C3AED" stroke-width="3.5"/>
   <line x1="680" y1="502" x2="680" y2="468" stroke="#7C3AED" stroke-width="3.5"/>
   <polygon points="671,468 680,452 689,468" fill="#7C3AED"/>
-  <rect x="342" y="486" width="284" height="32" rx="16" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.5"/>
-  <text x="484" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="11" font-weight="800" fill="#5B21B6">RE-CALIBRATES POOL TARGETS</text>
+  <rect x="330" y="484" width="308" height="36" rx="18" fill="#EDE9FE" stroke="#7C3AED" stroke-width="1.5"/>
+  <text x="484" y="507" text-anchor="middle" class="mono arrow-label" font-family="JetBrains Mono, Courier New, monospace" font-size="13" font-weight="800" fill="#5B21B6">RE-CALIBRATES POOL TARGETS</text>
 </svg>
