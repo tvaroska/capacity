@@ -6,6 +6,7 @@ import math
 from collections.abc import Mapping, Sequence
 
 from capacity.forecasting import percentile
+from capacity.model_families import resolve_model_family
 from capacity.models import (
     DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR,
     BatchScavengerAudit,
@@ -614,14 +615,27 @@ def evaluate_folder_pooling(
     diversity = round(siloed_total / pooled_gsus, 2) if pooled_gsus > 0 else 1.0
     monthly_savings = stranded_saved * float(gsu_monthly_price_usd)
 
-    notes = [
-        "Place spoke projects as direct children of a single flat Prod-GenAI Folder "
-        "(nested subfolders do not inherit Folder RHPT).",
-        "Assign an independent GCP Project Spend Cap to each spoke project so a runaway loop "
-        "in one business unit only triggers HTTP 403 on its own spoke project.",
-        "Aggregate child consumed_token_throughput in the Folder Host Project Metrics Scope "
-        "against the folder's dedicated_token_limit.",
-    ]
+    spec = resolve_model_family(model)
+    if spec.supports_folder_rhpt:
+        notes = [
+            "Place spoke projects as direct children of a single flat Prod-GenAI Folder "
+            "(nested subfolders do not inherit Folder RHPT).",
+            "Assign an independent GCP Project Spend Cap to each spoke project so a runaway loop "
+            "in one business unit only triggers HTTP 403 on its own spoke project.",
+            "Aggregate child consumed_token_throughput in the Folder Host Project Metrics Scope "
+            "against the folder's dedicated_token_limit.",
+        ]
+    else:
+        notes = [
+            f"Folder-Level RHPT is 1P Gemini-only and unsupported for {model}; realize these "
+            "pooling savings by consolidating traffic into a central BU-segmented hub project "
+            "with gateway-enforced per-BU weighted burndown token buckets.",
+            "3P Claude Provisioned Throughput uses 30s/60s dual enforcement buckets with no "
+            "1-week term and Standard PayGo spillover (Priority PayGo is 1P-only).",
+            "Monitor unweighted publisher/online_serving/token_count grouped by model_id, "
+            "location, request_type, and type, applying client-side burndown weights "
+            "(1.0x input, 0.1x cache read, 1.25x 5m / 2.0x 1h cache write, 5.0x output).",
+        ]
 
     return FolderPoolingReport(
         model=model,

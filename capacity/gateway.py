@@ -8,6 +8,7 @@ import re
 import yaml
 
 from capacity.capacity import load_gsu_config, normalize_model_id, require_capacity
+from capacity.model_families import resolve_model_family
 from capacity.models import (
     GCP_LOCATION_PATTERN,
     GCP_PROJECT_ID_PATTERN,
@@ -30,6 +31,14 @@ ENVOY_BURNDOWN_CEL_EXPRESSION = (
     "      + double(cached_input_tokens) * 0.1\n"
     "      + double(output_tokens) * 4.0\n"
     "    )\n"
+)
+
+ENVOY_CLAUDE_BURNDOWN_CEL_EXPRESSION = (
+    "int(\n"
+    "    double(input_tokens - cached_input_tokens) * 1.0\n"
+    "    + double(cached_input_tokens) * 0.1\n"
+    "    + double(output_tokens) * 5.0\n"
+    "  )\n"
 )
 
 GATEWAY_HEADER_POLICIES: list[GatewayHeaderPolicy] = [
@@ -162,8 +171,11 @@ def audit_litellm_scaling(
     concurrent_sse_streams: int = 400,
     pods: int = 12,
     uvicorn_workers_per_pod: int = 4,
+    model: str | None = None,
 ) -> LiteLLMScaleAudit:
     """Audit LiteLLM Proxy high-QPS bottlenecks (Prisma engines, Postgres locks, SSE GIL)."""
+    spec = resolve_model_family(model)
+    is_claude = spec.family == "claude_3p"
     gsus = max(1, int(provisioned_gsus))
     rps = max(1, int(target_rps))
     sse = max(0, int(concurrent_sse_streams))
@@ -174,9 +186,10 @@ def audit_litellm_scaling(
     pgbouncer_pool = max(20, min(100, total_prisma // 2 + 10))
     pg_max_conns = max(100, total_prisma + 40)
 
-    cooldown_sec = 2 if gsus >= 50 else 5
+    cooldown_sec = 5 if is_claude else (2 if gsus >= 50 else 5)
     allowed_fails = max(30, gsus * 3)
 
+    bucket_label = "30s/60s" if is_claude else "1s/10s"
     warnings: list[str] = [
         f"Prisma spawns 1 Rust query engine binary per Uvicorn worker ({n_pods} pods * "
         f"{workers} workers = {total_prisma} engines); front PostgreSQL with PgBouncer "
@@ -184,10 +197,16 @@ def audit_litellm_scaling(
         "Enable use_redis_transaction_buffer: true (buffer_time: 10s) to batch SpendLogs writes "
         "and eliminate PostgreSQL row-lock contention on LiteLLM_VerificationToken and "
         "LiteLLM_TeamTable.",
-        "LiteLLM native tpm_limit counts unweighted raw tokens over 60s; attach "
-        "litellm_burndown_callback.py to enforce 1s/10s weighted burndown quotas and capture "
-        "usage_metadata.traffic_type.",
+        f"LiteLLM native tpm_limit counts unweighted raw tokens over 60s; attach "
+        f"litellm_burndown_callback.py to enforce {bucket_label} weighted burndown quotas and "
+        "capture usage_metadata.traffic_type.",
     ]
+    if is_claude:
+        warnings.append(
+            "3P Claude Provisioned Throughput uses 30s/60s dual buckets (0% burst credit), "
+            "lacks Folder RHPT and 1-week terms, and spills over to Standard PayGo rather than "
+            "1P Priority PayGo; enforce per-BU burndown limits in the gateway across hub projects."
+        )
 
     if rps > 1_500 or sse > 1_000:
         status = "migrate_dataplane_to_envoy"
@@ -246,9 +265,11 @@ def generate_gateway_bundle(
         if not re.fullmatch(pattern, value):
             raise ValueError(f"Invalid {field_name} {value!r}: must match {pattern}")
     norm = normalize_model_id(model)
+    spec = resolve_model_family(norm)
+    is_claude = spec.family == "claude_3p"
     gsus = max(1, int(provisioned_gsus))
     bu_count = max(1, int(business_unit_shares))
-    refill_window = 1 if gsus >= 50 else 10
+    refill_window = spec.bucket_short_seconds if is_claude else (1 if gsus >= 50 else 10)
     tpm_per_gsu = require_capacity(norm, load_gsu_config())
     committed_tpm = gsus * tpm_per_gsu
     per_bu_funded_tpm = max(1_024, committed_tpm // bu_count)
@@ -259,8 +280,20 @@ def generate_gateway_bundle(
         concurrent_sse_streams=concurrent_sse_streams,
         pods=pods,
         uvicorn_workers_per_pod=uvicorn_workers_per_pod,
+        model=norm,
     )
 
+    spill_shared_header = "priority" if spec.supports_priority_paygo else "standard"
+    spill_model_name = (
+        f"{norm}-priority-spillover"
+        if spec.supports_priority_paygo
+        else f"{norm}-standard-spillover"
+    )
+    spill_pool_id = (
+        f"vertex-{norm}-priority-paygo"
+        if spec.supports_priority_paygo
+        else f"vertex-{norm}-standard-paygo"
+    )
     litellm_doc = {
         "model_list": [
             {
@@ -279,19 +312,19 @@ def generate_gateway_bundle(
                 },
             },
             {
-                "model_name": f"{norm}-priority-spillover",
+                "model_name": spill_model_name,
                 "litellm_params": {
                     "model": f"vertex_ai/{norm}",
                     "vertex_project": project_id,
                     "vertex_location": location,
                     "extra_headers": {
                         "X-Vertex-AI-LLM-Request-Type": "shared",
-                        "X-Vertex-AI-LLM-Shared-Request-Type": "priority",
+                        "X-Vertex-AI-LLM-Shared-Request-Type": spill_shared_header,
                     },
                     "tags": ["prod", "tier-1", "burst"],
                 },
                 "model_info": {
-                    "id": f"vertex-{norm}-priority-paygo",
+                    "id": spill_pool_id,
                     "input_cost_per_token": 0.00000090,
                     "output_cost_per_token": 0.00000360,
                 },
@@ -328,7 +361,7 @@ def generate_gateway_bundle(
             "num_retries": 1,
             "allowed_fails": litellm_audit.anti_blackhole_allowed_fails,
             "cooldown_time": litellm_audit.anti_blackhole_cooldown_seconds,
-            "fallbacks": [{f"{norm}-pt": [f"{norm}-priority-spillover"]}],
+            "fallbacks": [{f"{norm}-pt": [spill_model_name]}],
         },
         "litellm_settings": {
             "use_redis_transaction_buffer": True,
@@ -345,6 +378,7 @@ def generate_gateway_bundle(
         litellm_doc, sort_keys=False, default_flow_style=False
     )
 
+    lc_threshold_py = repr(spec.long_context_threshold)
     callback_py = f'''"""LiteLLM CustomLogger enforcing stateful Redis weighted burndown shares."""
 
 from __future__ import annotations
@@ -360,7 +394,17 @@ except ImportError:  # pragma: no cover
         pass
 
 
-LONG_CONTEXT_THRESHOLD = 200_000
+MODEL_FAMILY = {spec.family!r}
+LONG_CONTEXT_THRESHOLD: int | None = {lc_threshold_py}
+STD_INPUT_WEIGHT = {spec.standard_input_weight}
+STD_CACHED_WEIGHT = {spec.standard_cached_read_weight}
+STD_OUTPUT_WEIGHT = {spec.standard_output_weight}
+CACHE_WRITE_5M_WEIGHT = {spec.cache_write_5m_weight}
+CACHE_WRITE_1H_WEIGHT = {spec.cache_write_1h_weight}
+LONG_INPUT_WEIGHT = {spec.long_context_input_weight}
+LONG_CACHED_WEIGHT = {spec.long_context_cached_read_weight}
+LONG_OUTPUT_WEIGHT = {spec.long_context_output_weight}
+SPILLOVER_SHARED_HEADER = {spill_shared_header!r}
 COMMITTED_POOL_BURNDOWN_TPM = {committed_tpm}
 DEFAULT_TEAM_FUNDED_BURNDOWN_TPM = {per_bu_funded_tpm}
 PREFLIGHT_FLOOR_TOKENS = 1_024
@@ -372,55 +416,79 @@ def compute_burndown_tokens(
     completion_tokens: int,
     reasoning_tokens: int = 0,
     cached_tokens: int = 0,
+    cache_write_5m_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
 ) -> float:
-    """Compute hardware-weighted burndown tokens (<=200K vs >200K cliff)."""
+    """Compute hardware-weighted burndown tokens for 1P Gemini or 3P Claude PT."""
     total_in = max(0, int(prompt_tokens))
     cached = min(max(0, int(cached_tokens)), total_in)
-    uncached = total_in - cached
+    rem_in = total_in - cached
+    w5 = min(max(0, int(cache_write_5m_tokens)), rem_in)
+    w1 = min(max(0, int(cache_write_1h_tokens)), rem_in - w5)
+    uncached = rem_in - w5 - w1
     decode = max(0, int(completion_tokens)) + max(0, int(reasoning_tokens))
-    if total_in > LONG_CONTEXT_THRESHOLD:
-        return (uncached * 2.0) + (cached * 0.2) + (decode * 7.5)
-    return (uncached * 1.0) + (cached * 0.1) + (decode * 4.0)
-
-
-def _extract_usage_counts(usage: Any) -> tuple[int, int, int, int]:
-    """Extract prompt, completion, reasoning, and cached token counts across SDK/dict shapes."""
-    if isinstance(usage, dict):
-        p_tok = int(usage.get("prompt_tokens", usage.get("input_tokens", 0)) or 0)
-        c_tok = int(usage.get("completion_tokens", usage.get("output_tokens", 0)) or 0)
-        p_det = usage.get("prompt_tokens_details") or {{}}
-        c_det = usage.get("completion_tokens_details") or {{}}
-        cached = int(
-            usage.get("cached_tokens", usage.get("cached_content_token_count", 0))
-            or (p_det.get("cached_tokens", 0) if isinstance(p_det, dict) else 0)
-            or 0
+    if LONG_CONTEXT_THRESHOLD is not None and total_in > LONG_CONTEXT_THRESHOLD:
+        return (
+            (uncached * LONG_INPUT_WEIGHT)
+            + (cached * LONG_CACHED_WEIGHT)
+            + (w5 * CACHE_WRITE_5M_WEIGHT)
+            + (w1 * CACHE_WRITE_1H_WEIGHT)
+            + (decode * LONG_OUTPUT_WEIGHT)
         )
-        reason = int(
-            usage.get("reasoning_tokens", usage.get("thoughts_tokens", 0))
-            or (c_det.get("reasoning_tokens", 0) if isinstance(c_det, dict) else 0)
-            or 0
-        )
-        return p_tok, c_tok, reason, cached
+    return (
+        (uncached * STD_INPUT_WEIGHT)
+        + (cached * STD_CACHED_WEIGHT)
+        + (w5 * CACHE_WRITE_5M_WEIGHT)
+        + (w1 * CACHE_WRITE_1H_WEIGHT)
+        + (decode * STD_OUTPUT_WEIGHT)
+    )
 
-    p_tok = int(getattr(usage, "prompt_tokens", getattr(usage, "input_tokens", 0)) or 0)
-    c_tok = int(getattr(usage, "completion_tokens", getattr(usage, "output_tokens", 0)) or 0)
-    p_det = getattr(usage, "prompt_tokens_details", None)
-    c_det = getattr(usage, "completion_tokens_details", None)
+
+def _field(obj: Any, *names: str) -> Any:
+    for name in names:
+        val = obj.get(name) if isinstance(obj, dict) else getattr(obj, name, None)
+        if val is not None:
+            return val
+    return None
+
+
+def _extract_usage_counts(usage: Any) -> tuple[int, int, int, int, int, int]:
+    """Extract prompt, completion, reasoning, cache read, and 5m/1h cache write tokens."""
+    p_det = _field(usage, "prompt_tokens_details")
+    c_det = _field(usage, "completion_tokens_details")
+    cc = _field(usage, "cache_creation")
     cached = int(
-        getattr(usage, "cached_tokens", getattr(usage, "cached_content_token_count", 0))
-        or (getattr(p_det, "cached_tokens", 0) if p_det is not None else 0)
+        _field(usage, "cached_tokens", "cached_content_token_count", "cache_read_input_tokens")
+        or (_field(p_det, "cached_tokens") if p_det is not None else 0)
         or 0
     )
     reason = int(
-        getattr(usage, "reasoning_tokens", getattr(usage, "thoughts_tokens", 0))
-        or (getattr(c_det, "reasoning_tokens", 0) if c_det is not None else 0)
+        _field(usage, "reasoning_tokens", "thoughts_tokens")
+        or (_field(c_det, "reasoning_tokens") if c_det is not None else 0)
         or 0
     )
-    return p_tok, c_tok, reason, cached
+    w1 = int((_field(cc, "ephemeral_1h_input_tokens") if cc is not None else 0) or 0)
+    w5_raw = _field(cc, "ephemeral_5m_input_tokens") if cc is not None else None
+    cc_total = int(_field(usage, "cache_creation_input_tokens") or 0)
+    w5 = int(w5_raw) if w5_raw is not None else max(0, cc_total - w1)
+    raw_prompt = _field(usage, "prompt_tokens")
+    raw_input = _field(usage, "input_tokens")
+    if raw_prompt is not None:
+        p_tok = max(int(raw_prompt), cached + w5 + w1)
+    elif raw_input is not None:
+        has_3p_cache = (
+            _field(usage, "cache_read_input_tokens", "cache_creation_input_tokens") is not None
+            or cc is not None
+        )
+        p_tok = int(raw_input) + cached + w5 + w1 if has_3p_cache else int(raw_input)
+    else:
+        p_tok = cached + w5 + w1
+    c_tok = int(_field(usage, "completion_tokens", "output_tokens") or 0)
+    return p_tok, c_tok, reason, cached, w5, w1
 
 
 class BurndownAndTrafficTypeLogger(CustomLogger):
-    """Tracks server-side rolling Redis team burndown and flips bursting teams onto Priority."""
+    """Tracks server-side rolling Redis team burndown and flips bursting teams onto spillover."""
 
     def __init__(self, time_fn: Any = time.time) -> None:
         super().__init__()
@@ -469,7 +537,7 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
         )
         key = self._window_key(team_id)
         rolling_burndown = await self._read_counter(cache, key)
-        # Reserve a pre-SSE floor immediately so concurrent slow >200K streams cannot bypass quota.
+        # Reserve a pre-SSE floor immediately so concurrent slow streams cannot bypass quota.
         await self._increment_counter(cache, key, float(PREFLIGHT_FLOOR_TOKENS))
 
         proxy_meta = data.setdefault("litellm_params", {{}}).setdefault("metadata", {{}})
@@ -479,7 +547,7 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
         if rolling_burndown + PREFLIGHT_FLOOR_TOKENS > team_funded_ceiling:
             headers = dict(data.get("extra_headers") or {{}})
             headers["X-Vertex-AI-LLM-Request-Type"] = "shared"
-            headers["X-Vertex-AI-LLM-Shared-Request-Type"] = "priority"
+            headers["X-Vertex-AI-LLM-Shared-Request-Type"] = SPILLOVER_SHARED_HEADER
             data["extra_headers"] = headers
         return data
 
@@ -491,12 +559,14 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
         end_time: Any,
     ) -> None:
         usage = getattr(response_obj, "usage", None) or {{}}
-        prompt_tok, comp_tok, reason_tok, cached_tok = _extract_usage_counts(usage)
+        prompt_tok, comp_tok, reason_tok, cached_tok, w5_tok, w1_tok = _extract_usage_counts(usage)
         burndown = compute_burndown_tokens(
             prompt_tok,
             comp_tok,
             reasoning_tokens=reason_tok,
             cached_tokens=cached_tok,
+            cache_write_5m_tokens=w5_tok,
+            cache_write_1h_tokens=w1_tok,
         )
         litellm_params = kwargs.setdefault("litellm_params", {{}})
         meta = litellm_params.setdefault("metadata", {{}})
@@ -515,6 +585,10 @@ class BurndownAndTrafficTypeLogger(CustomLogger):
 
 burndown_handler = BurndownAndTrafficTypeLogger()
 '''
+
+    envoy_cel_expr = (
+        ENVOY_CLAUDE_BURNDOWN_CEL_EXPRESSION if is_claude else ENVOY_BURNDOWN_CEL_EXPRESSION
+    )
 
     envoy_route_name = _k8s_dns_label(norm, suffix="-weighted-burndown-route")
     envoy_backend_svc = _k8s_dns_label(norm, prefix="vertex-", suffix="-backend")
@@ -561,7 +635,7 @@ burndown_handler = BurndownAndTrafficTypeLogger()
                             {
                                 "metadataKey": "vertex_burndown_tokens",
                                 "type": "CEL",
-                                "cel": _LiteralBlockStr(ENVOY_BURNDOWN_CEL_EXPRESSION),
+                                "cel": _LiteralBlockStr(envoy_cel_expr),
                             },
                         ],
                     }

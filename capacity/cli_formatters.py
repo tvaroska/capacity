@@ -166,8 +166,13 @@ def print_gsu_optimize_report(
         f"(in={input_tokens:,}, cached={cached_tokens:,}, "
         f"out={output_tokens:,}, thoughts={thoughts_tokens:,})"
     )
+    window_desc = (
+        f"{mb.refill_window_seconds}s/{mb.long_window_seconds}s dual bucket"
+        if mb.long_window_seconds is not None
+        else f"{mb.refill_window_seconds}s window"
+    )
     typer.echo(
-        f"Micro-Burst:     {mb.refill_window_seconds}s window | "
+        f"Micro-Burst:     {window_desc} | "
         f"60s Util={mb.apparent_60s_utilization_pct:.1f}% | "
         f"Peak Window Util={mb.peak_window_utilization_pct:.1f}% | "
         f"Spillover={mb.triggers_429_or_spillover} | "

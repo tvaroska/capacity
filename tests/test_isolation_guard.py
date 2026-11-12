@@ -16,6 +16,7 @@ PURE_DOMAIN_MODULES = (
     "capacity.py",
     "gateway.py",
     "forecasting.py",
+    "model_families.py",
     "models.py",
 )
 

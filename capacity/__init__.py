@@ -21,6 +21,8 @@ from capacity.capacity import (
 from capacity.core import (
     DEFAULT_DAYS,
     DEFAULT_PERCENTILES,
+    PARTNER_GROUP_BY_FIELDS,
+    PARTNER_TOKEN_METRIC,
     GCPQueryError,
     UnknownModelError,
     build_demo_throughput,
@@ -43,6 +45,12 @@ from capacity.gateway import (
     GATEWAY_HEADER_POLICIES,
     audit_litellm_scaling,
     generate_gateway_bundle,
+)
+from capacity.model_families import (
+    CLAUDE_GSU_CONFIG,
+    ModelFamilySpec,
+    is_partner_claude,
+    resolve_model_family,
 )
 from capacity.models import (
     BatchScavengerAudit,
@@ -89,6 +97,7 @@ from capacity.self_hosted import (
 )
 
 __all__ = [
+    "CLAUDE_GSU_CONFIG",
     "DEFAULT_DAYS",
     "DEFAULT_GSU_CONFIG",
     "DEFAULT_PERCENTILES",
@@ -97,6 +106,8 @@ __all__ = [
     "GATEWAY_HEADER_POLICIES",
     "LONG_CONTEXT_THRESHOLD_TOKENS",
     "MINUTES_PER_MONTH",
+    "PARTNER_GROUP_BY_FIELDS",
+    "PARTNER_TOKEN_METRIC",
     "SPILLOVER_MULTIPLIERS",
     "BatchScavengerAudit",
     "BatchScavengerRequest",
@@ -116,6 +127,7 @@ __all__ = [
     "HybridCommitmentRecommendation",
     "LiteLLMScaleAudit",
     "MicroBurstAudit",
+    "ModelFamilySpec",
     "ModelRecommendation",
     "ModelTierPrefixCacheAudit",
     "ModelTierPrefixCacheRequest",
@@ -150,6 +162,7 @@ __all__ = [
     "find_capacity",
     "generate_gateway_bundle",
     "holts_linear_trend",
+    "is_partner_claude",
     "load_gsu_config",
     "load_inference_server_file",
     "normalize_model_id",
@@ -158,6 +171,7 @@ __all__ = [
     "percentile",
     "render_showcase_portal_html",
     "require_capacity",
+    "resolve_model_family",
     "resolve_self_hosted_profile",
     "schedule_residual_capacity",
     "size_disaggregated_prefill_decode",

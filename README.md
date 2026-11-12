@@ -190,6 +190,22 @@ Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Re
 | **7** | Off-peak hybrid `PT` + Flex spill | `<unset>` | `flex` | Drains `$0.00` idle `PT` first, then spills excess batch volume to `0.5x` Flex PayGo. |
 | **8** | Off-peak batch without `PT` | `shared` | `offpeak` | Executes on `0.5x` off-peak PayGo in projects with no reserved `PT`. |
 
+### First-Class 3P Anthropic Claude on Vertex AI Provisioned Throughput
+
+`capacity` models physical differences between **1P Gemini PT** and **3P Anthropic Claude PT** (`claude-3-5-sonnet-v2`, `claude-3-7-sonnet`, `claude-sonnet-4-6`, `claude-opus-4-5`, `claude-opus-4-6`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) via [`capacity/model_families.py`](capacity/model_families.py):
+
+| Physics Dimension | 1P Gemini PT | 3P Anthropic Claude PT (`capacity --model claude-*`) |
+| :--- | :--- | :--- |
+| **Burndown Weights** | `1.0x` in · `0.1x` cache read · `4.0x` out (`>200K`: `2.0x / 0.2x / 7.5x`) | Flat `1.0x` in · `0.1x` cache read · `1.25x` 5m cache write · `2.0x` 1h cache write · `5.0x` out |
+| **Token Bucket & Burst Credit** | `1s` (`>=50` GSUs) or `10s` (`<50` GSUs), `+5%` burst credit | Dual `30s` / `60s` token buckets, `0%` burst credit |
+| **Prefix Cache & Spillover** | Implicit `4,096`-token blocks (`6,144` Flash / `2,048` Argon); `priority` PayGo spillover | Explicit `cache_control` breakpoints (`512` v5.5 / `1,024` Sonnet / `4,096` Opus 4.x); `standard` PayGo spillover |
+| **Monitoring & Governance** | `consumed_token_throughput` (pre-weighted) + Shared Folder `RHPT` | `token_count` (weighted client-side by token type) + project-scoped PT (central hub + gateway BU limits) |
+
+```bash
+uv run capacity optimize --model claude-sonnet-4-6 --cache-write-5m-tokens 4000
+uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 400
+```
+
 ---
 
 ## 4. Reference Scorecard, Plain-English 5-KPI Glossary & Level 3 Benchmark
@@ -232,7 +248,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 2276c4ea75ad...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: bdbaa53e18c4...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |
@@ -241,7 +257,7 @@ Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/
 | **Track A** · *Pure Priority PayGo (`L1`, `0` GSUs)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | `100%` Priority PayGo (`$8,981.73`) + `0.5x` Batch (`$1,732.50`); zero commitment (`0.00%` `ECUR_168h`) |
 | **Track A** · *Omniscient Hindsight Oracle (`L2` Lower Bound)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | Ex-post optimum when spiky `10s` arrivals hold `168h` occupancy `< 42.55%` break-even |
 | **Track A** · *`capacity` Causal Compiler (`10s` + Night Scavenge)* | `4` GSUs | **`$11,072.47`** | **`0.00%` Tier-0 `429`** | **`43.03%` savings vs. Static `P99`**, **`3.34%` gap vs. `L1`/`L2`** (`37.02%` `ECUR_168h`) |
-| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `61` peer `PT` starvation events |
+| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `62` peer `PT` starvation events |
 | **Track B** · *Stateless `1/8` Round-Robin + Stripped Signature* | `20` GSUs | `500 / 500` `200 OK` | `51.31%` burndown drift | `0.25%` effective prefix-cache hit rate and `144` peer `PT` starvation events |
 | **Track B** · *`capacity` Two-Phase Redis Gateway + Sticky `epp`* | `20` GSUs | **`500 / 500` `200 OK`** | **`0.00%` burndown drift** | **`0` peer `PT` starvation events**, **`0.00%` blackhole drops**, **`26.84%` cache hit** |
 

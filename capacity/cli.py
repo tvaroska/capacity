@@ -393,6 +393,9 @@ def optimize(
     peak_10s_tps: Annotated[
         float | None, typer.Option(help="Peak 10-second TPS burst for <50 GSU window audit")
     ] = None,
+    peak_30s_tps: Annotated[
+        float | None, typer.Option(help="Peak 30-second TPS burst for 3P Claude dual-bucket audit")
+    ] = None,
     input_tokens: Annotated[
         int, typer.Option(help="Input tokens per concurrency wave / request")
     ] = 20_000,
@@ -403,6 +406,12 @@ def optimize(
         int, typer.Option(help="Reasoning / thought tokens per request")
     ] = 500,
     cached_tokens: Annotated[int, typer.Option(help="Cached prefix tokens per request")] = 16_000,
+    cache_write_5m_tokens: Annotated[
+        int, typer.Option(help="3P Claude 5m ephemeral cache-write tokens per request (1.25x)")
+    ] = 0,
+    cache_write_1h_tokens: Annotated[
+        int, typer.Option(help="3P Claude 1-hour ephemeral cache-write tokens per request (2.0x)")
+    ] = 0,
     shared_prefix_ratio: Annotated[
         float, typer.Option(help="Fraction of input prompt that is shared static prefix (0-1)")
     ] = 0.80,
@@ -472,10 +481,13 @@ def optimize(
             sixty_sec_tpm=sixty_sec_tpm,
             peak_1s_tps=peak_1s_tps,
             peak_10s_tps=peak_10s_tps,
+            peak_30s_tps=peak_30s_tps,
             total_input_tokens=input_tokens,
             output_tokens=output_tokens,
             thoughts_tokens=thoughts_tokens,
             cached_tokens=cached_tokens,
+            cache_write_5m_tokens=cache_write_5m_tokens,
+            cache_write_1h_tokens=cache_write_1h_tokens,
             shared_prefix_ratio=shared_prefix_ratio,
             baseline_cache_hit_rate=baseline_cache_hit_rate,
             num_round_robin_endpoints=endpoints,

@@ -21,6 +21,8 @@ class VllmTelemetrySnapshot(DictAccessModel):
     tpm_series: list[float]
     prompt_tokens_total: int
     cached_tokens_total: int
+    cache_write_5m_tokens_total: int = 0
+    cache_write_1h_tokens_total: int = 0
     completion_tokens_total: int
     thoughts_tokens_total: int
     weighted_burndown_tokens_total: float
@@ -385,6 +387,8 @@ def _parse_jsonl_or_json_logs(
     model_name = default_model
     prompt_total = 0
     cached_total = 0
+    cache_write_5m_total = 0
+    cache_write_1h_total = 0
     completion_total = 0
     thoughts_total = 0
     weighted_total = 0.0
@@ -404,13 +408,17 @@ def _parse_jsonl_or_json_logs(
         c_details_map: Mapping[str, object] = (
             comp_details if isinstance(comp_details, Mapping) else {}
         )
+        cache_creation = usage_map.get("cache_creation")
+        cc_map: Mapping[str, object] = (
+            cache_creation if isinstance(cache_creation, Mapping) else {}
+        )
         attrs = rec.get("attributes")
         attr_map: Mapping[str, object] = attrs if isinstance(attrs, Mapping) else {}
         res_obj = rec.get("resource")
         res_attrs = res_obj.get("attributes") if isinstance(res_obj, Mapping) else None
         res_attr_map: Mapping[str, object] = res_attrs if isinstance(res_attrs, Mapping) else {}
 
-        search_maps = (usage_map, p_details_map, c_details_map, attr_map, res_attr_map, rec)
+        search_maps = (usage_map, p_details_map, c_details_map, cc_map, attr_map, res_attr_map, rec)
 
         mod_candidate = _lookup_first(
             (rec, attr_map, res_attr_map),
@@ -419,15 +427,6 @@ def _parse_jsonl_or_json_logs(
         if isinstance(mod_candidate, str) and mod_candidate.strip():
             model_name = mod_candidate.strip()
 
-        p_tok = _int_from_maps(
-            search_maps,
-            (
-                "prompt_tokens",
-                "input_tokens",
-                "gen_ai.usage.input_tokens",
-                "gen_ai.usage.prompt_tokens",
-            ),
-        )
         c_tok = _int_from_maps(
             search_maps,
             (
@@ -435,8 +434,48 @@ def _parse_jsonl_or_json_logs(
                 "cached_content_token_count",
                 "gen_ai.usage.cached_tokens",
                 "cache_read_input_tokens",
+                "gen_ai.usage.cache_read.input_tokens",
             ),
         )
+        w1_tok = _int_from_maps(
+            search_maps,
+            ("ephemeral_1h_input_tokens", "cache_write_1h_tokens"),
+        )
+        w5_explicit = _lookup_first(
+            search_maps,
+            ("ephemeral_5m_input_tokens", "cache_write_5m_tokens"),
+        )
+        if w5_explicit is not None:
+            w5_tok = max(0, int(float(str(w5_explicit))))
+        else:
+            cc_total = _int_from_maps(
+                search_maps,
+                ("cache_creation_input_tokens", "gen_ai.usage.cache_creation.input_tokens"),
+            )
+            w5_tok = max(0, cc_total - w1_tok)
+
+        raw_prompt = _lookup_first(search_maps, ("prompt_tokens", "gen_ai.usage.prompt_tokens"))
+        raw_input = _lookup_first(search_maps, ("input_tokens", "gen_ai.usage.input_tokens"))
+        if raw_prompt is not None:
+            p_tok = max(max(0, int(float(str(raw_prompt)))), c_tok + w5_tok + w1_tok)
+        elif raw_input is not None:
+            base_in = max(0, int(float(str(raw_input))))
+            has_anthropic_cache = bool(cc_map) or (
+                _lookup_first(
+                    search_maps,
+                    (
+                        "cache_read_input_tokens",
+                        "cache_creation_input_tokens",
+                        "gen_ai.usage.cache_read.input_tokens",
+                        "gen_ai.usage.cache_creation.input_tokens",
+                    ),
+                )
+                is not None
+            )
+            p_tok = base_in + c_tok + w5_tok + w1_tok if has_anthropic_cache else base_in
+        else:
+            p_tok = c_tok + w5_tok + w1_tok
+
         o_tok = _int_from_maps(
             search_maps,
             (
@@ -460,9 +499,14 @@ def _parse_jsonl_or_json_logs(
             output_tokens=o_tok,
             thoughts_tokens=t_tok,
             cached_tokens=c_tok,
+            model=model_name,
+            cache_write_5m_tokens=w5_tok,
+            cache_write_1h_tokens=w1_tok,
         )
         prompt_total += p_tok
         cached_total += c_tok
+        cache_write_5m_total += w5_tok
+        cache_write_1h_total += w1_tok
         completion_total += o_tok
         thoughts_total += t_tok
         weighted_total += w_tok
@@ -507,6 +551,8 @@ def _parse_jsonl_or_json_logs(
         tpm_series=tpm_series,
         prompt_tokens_total=prompt_total,
         cached_tokens_total=cached_total,
+        cache_write_5m_tokens_total=cache_write_5m_total,
+        cache_write_1h_tokens_total=cache_write_1h_total,
         completion_tokens_total=completion_total,
         thoughts_tokens_total=thoughts_total,
         weighted_burndown_tokens_total=round(weighted_total, 2),

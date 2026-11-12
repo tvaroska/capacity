@@ -35,6 +35,7 @@ files:
   - "capacity/capacity.py"
   - "capacity/gateway.py"
   - "capacity/forecasting.py"
+  - "capacity/model_families.py"
   - "capacity/models.py"
 metadata:
   test_path: "capacity/finops.py"
@@ -62,6 +63,7 @@ files:
   - "capacity/capacity.py"
   - "capacity/gateway.py"
   - "capacity/forecasting.py"
+  - "capacity/model_families.py"
   - "capacity/models.py"
 metadata:
   test_path: "capacity/capacity.py"

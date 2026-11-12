@@ -20,6 +20,7 @@ from capacity.forecasting import (
     holts_linear_trend,
     percentile,
 )
+from capacity.model_families import is_partner_claude, resolve_model_family
 from capacity.models import GCP_LOCATION_PATTERN, GCP_PROJECT_ID_PATTERN, MODEL_ID_PATTERN
 
 try:
@@ -75,6 +76,9 @@ except ImportError:  # pragma: no cover
     monitoring_v3 = _MonitoringV3Fallback()  # type: ignore[assignment]
 
 PT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/consumed_token_throughput"
+PARTNER_TOKEN_METRIC = (
+    "aiplatform.googleapis.com/publisher/online_serving/token_count"  # noqa: S105
+)
 SELF_HOSTED_PREDICTION_METRIC = "aiplatform.googleapis.com/prediction/online/prediction_count"
 
 GROUP_BY_FIELDS = [
@@ -83,10 +87,32 @@ GROUP_BY_FIELDS = [
     "metric.label.request_type",
 ]
 
+PARTNER_GROUP_BY_FIELDS = [
+    "resource.label.model_id",
+    "resource.label.location",
+    "metric.label.request_type",
+    "metric.label.type",
+]
+
 SELF_HOSTED_GROUP_BY_FIELDS = [
     "resource.label.endpoint_id",
     "resource.label.location",
 ]
+
+
+def _partner_token_weight(model_id: str, token_type: str) -> float:
+    """Map Cloud Monitoring `token_count` `metric.label.type` to 3P Claude burndown weight."""
+    spec = resolve_model_family(model_id)
+    tt = token_type.strip().lower()
+    if tt == "output":
+        return spec.standard_output_weight
+    if tt in ("cache_read", "cached", "cache_read_input"):
+        return spec.standard_cached_read_weight
+    if tt in ("cache_write_1h", "cache_creation_1h"):
+        return spec.cache_write_1h_weight
+    if tt in ("cache_write", "cache_write_5m", "cache_creation", "cache_creation_5m"):
+        return spec.cache_write_5m_weight
+    return spec.standard_input_weight
 
 
 class GCPQueryError(Exception):
@@ -176,6 +202,7 @@ async def fetch_throughput(
     folder_map: Mapping[str, str] | None = None,
     mode: str = "gsu",
     tokens_per_prediction: int = 1_800,
+    include_partner_models: bool = False,
 ) -> tuple[dict[str, dict[datetime, int]], int]:
     """Fetch per-minute token throughput across one or more GCP projects."""
     raw_projects = [project] if isinstance(project, str) else list(project)
@@ -242,29 +269,41 @@ async def fetch_throughput(
                     sparse[key][dt_key] += val * max(1, tokens_per_prediction)
         return {k: dict(v) for k, v in sparse.items()}, total_minutes
 
-    aggregation = _build_aggregation(group_by_fields=GROUP_BY_FIELDS)
-    dedicated_filter = _build_filter(
-        PT_METRIC,
-        regions,
-        'metric.labels.request_type = "dedicated"',
-    )
-    shared_filter = _build_filter(
-        PT_METRIC,
-        regions,
-        'metric.labels.request_type = "shared"',
-    )
+    has_partner_filter = bool(models_filter and any(is_partner_claude(m) for m in models_filter))
+    has_1p_filter = bool(models_filter and any(not is_partner_claude(m) for m in models_filter))
+    query_1p = models_filter is None or has_1p_filter
+    query_partner = include_partner_models or has_partner_filter
 
     coros = []
-    proj_for_coro: list[str] = []
-    for proj_id in project_list:
-        coros.append(_query_series(client, proj_id, dedicated_filter, interval, aggregation))
-        proj_for_coro.append(proj_id)
-        coros.append(_query_series(client, proj_id, shared_filter, interval, aggregation))
-        proj_for_coro.append(proj_id)
+    coro_meta: list[tuple[str, bool]] = []
+    if query_1p:
+        aggregation = _build_aggregation(group_by_fields=GROUP_BY_FIELDS)
+        dedicated_filter = _build_filter(
+            PT_METRIC,
+            regions,
+            'metric.labels.request_type = "dedicated"',
+        )
+        shared_filter = _build_filter(
+            PT_METRIC,
+            regions,
+            'metric.labels.request_type = "shared"',
+        )
+        for proj_id in project_list:
+            coros.append(_query_series(client, proj_id, dedicated_filter, interval, aggregation))
+            coro_meta.append((proj_id, False))
+            coros.append(_query_series(client, proj_id, shared_filter, interval, aggregation))
+            coro_meta.append((proj_id, False))
+
+    if query_partner:
+        partner_agg = _build_aggregation(group_by_fields=PARTNER_GROUP_BY_FIELDS)
+        partner_filter = _build_filter(PARTNER_TOKEN_METRIC, regions)
+        for proj_id in project_list:
+            coros.append(_query_series(client, proj_id, partner_filter, interval, partner_agg))
+            coro_meta.append((proj_id, True))
 
     all_series_lists = await asyncio.gather(*coros)
 
-    for proj_id, series_list in zip(proj_for_coro, all_series_lists, strict=False):
+    for (proj_id, is_partner_query), series_list in zip(coro_meta, all_series_lists, strict=False):
         folder_prefix = (
             f"{folder_map[proj_id]}/"
             if folder_map and proj_id in folder_map
@@ -273,10 +312,17 @@ async def fetch_throughput(
         for ts in series_list:
             model_id = ts.resource.labels.get("model_id", "unknown")
             location = ts.resource.labels.get("location", "global")
+            if is_partner_query and not is_partner_claude(model_id):
+                continue
             if models_filter and not any(
                 model_id.lower().startswith(m) for m in models_filter
             ):
                 continue
+            token_weight = (
+                _partner_token_weight(model_id, str(ts.metric.labels.get("type", "input")))
+                if is_partner_query
+                else 1.0
+            )
             base_key = f"{folder_prefix}{model_id}"
             key = f"{base_key}@{location}" if by_region else base_key
             for pt in ts.points:
@@ -288,7 +334,7 @@ async def fetch_throughput(
                         second=0, microsecond=0
                     )
                 val = int(pt.value.int64_value or round(pt.value.double_value))
-                sparse[key][dt_key] += val
+                sparse[key][dt_key] += round(val * token_weight) if is_partner_query else val
 
     return {k: dict(v) for k, v in sparse.items()}, total_minutes
 
@@ -321,6 +367,8 @@ __all__ = [
     "DEFAULT_DAYS",
     "DEFAULT_PERCENTILES",
     "GROUP_BY_FIELDS",
+    "PARTNER_GROUP_BY_FIELDS",
+    "PARTNER_TOKEN_METRIC",
     "PT_METRIC",
     "SELF_HOSTED_GROUP_BY_FIELDS",
     "SELF_HOSTED_PREDICTION_METRIC",

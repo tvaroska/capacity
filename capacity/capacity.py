@@ -20,6 +20,7 @@ from capacity.forecasting import (
     holts_linear_trend,
     percentile,
 )
+from capacity.model_families import CLAUDE_GSU_CONFIG, resolve_model_family
 from capacity.models import (
     ModelRecommendation,
     OptimizeRequest,
@@ -51,6 +52,7 @@ DEFAULT_GSU_CONFIG: dict[str, int] = {
     "gemini-embedding-2": 302_400,     # 5,040 TPS/GSU (256-token minimum request floor)
     "gemini-2.0-flash": 161_400,       # 2,690 TPS/GSU
     "gemini-2.0-flash-lite": 484_200,  # 8,070 TPS/GSU
+    **CLAUDE_GSU_CONFIG,
 }
 
 ENV_PREFIX = "GSU_CAPACITY_"
@@ -274,6 +276,7 @@ def build_response(
 def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
     """Shared GSU Newsvendor + sub-second micro-burst + prefix-cache orchestrator (CLI & API)."""
     norm_model = normalize_model_id(req.model)
+    spec = resolve_model_family(norm_model)
     cfg = load_gsu_config()
     tpm_per_gsu = require_capacity(norm_model, cfg)
     tps_per_gsu = tpm_per_gsu / 60.0
@@ -283,6 +286,9 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         output_tokens=req.output_tokens,
         thoughts_tokens=req.thoughts_tokens,
         cached_tokens=req.cached_tokens,
+        model=norm_model,
+        cache_write_5m_tokens=req.cache_write_5m_tokens,
+        cache_write_1h_tokens=req.cache_write_1h_tokens,
     )
 
     commitment = optimize_hybrid_commitment(
@@ -300,6 +306,7 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         any(float(v) > 0.0 for v in req.tpm_series)
         or (req.sixty_sec_tpm is not None and req.sixty_sec_tpm > 0.0)
         or (req.peak_1s_tps is not None and req.peak_1s_tps > 0.0)
+        or (req.peak_30s_tps is not None and req.peak_30s_tps > 0.0)
     )
     if not has_traffic:
         prov_gsus = 0
@@ -319,6 +326,8 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         provisioned_gsus=prov_gsus,
         tps_per_gsu=tps_per_gsu,
         peak_10s_tps=req.peak_10s_tps,
+        model=norm_model,
+        peak_30s_tps=req.peak_30s_tps,
     )
 
     prefix_cache = evaluate_prefix_cache_dilution(
@@ -327,6 +336,8 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         baseline_cache_hit_rate=req.baseline_cache_hit_rate,
         num_round_robin_endpoints=req.num_round_robin_endpoints,
         tps_per_gsu=tps_per_gsu,
+        cached_token_weight=spec.standard_cached_read_weight,
+        uncached_token_weight=spec.standard_input_weight,
         requests_per_second=req.requests_per_second if has_traffic else 0.0,
     )
 

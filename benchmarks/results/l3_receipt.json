@@ -1,11 +1,11 @@
 {
   "schema_version": "capacity.l3_receipt.v1",
-  "generated_at_utc": "2026-11-11T18:38:34Z",
+  "generated_at_utc": "2026-11-12T19:44:10Z",
   "environment": {
     "python": "3.13.15",
     "platform": "Linux-7.1.6-1rodete1-amd64-x86_64-with-glibc2.43"
   },
-  "engine_code_sha256": "62646d5af4dcdbc87a971c56938e8b6bfebefd8b562e8241ae8aff8acf3b08f0",
+  "engine_code_sha256": "4089be09ddd792b32adfa1d7e949e4194fcb9bb8f11d2f427af49b16c13f0934",
   "corpus_file": "benchmarks/corpora/azure_llm_trace_10k.jsonl.gz",
   "corpus_gzip_sha256": "471ea3916fd27b98c3b38de5b4044d54ff4ace95b0e030354b6e3644bea325a7",
   "track_a_empirical_trace_backtest": {
@@ -77,18 +77,18 @@
         "http_200_streams": 454,
         "router_blackhole_drop_rate_pct": 9.2,
         "burndown_accounting_drift_pct": 40.3101,
-        "peer_pt_starvation_events": 61,
+        "peer_pt_starvation_events": 62,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 679.03
+        "p95_sse_stream_latency_ms": 427.96
       },
       "stateless_rr_stripped": {
         "requests_sent": 500,
         "http_200_streams": 500,
         "router_blackhole_drop_rate_pct": 0.0,
-        "burndown_accounting_drift_pct": 51.3085,
+        "burndown_accounting_drift_pct": 51.3082,
         "peer_pt_starvation_events": 144,
         "effective_prefix_cache_hit_pct": 0.25,
-        "p95_sse_stream_latency_ms": 815.54
+        "p95_sse_stream_latency_ms": 456.96
       },
       "capacity_two_phase_gateway": {
         "requests_sent": 500,
@@ -97,9 +97,9 @@
         "burndown_accounting_drift_pct": 0.0,
         "peer_pt_starvation_events": 0,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 928.07
+        "p95_sse_stream_latency_ms": 479.97
       }
     }
   },
-  "receipt_sha256": "2276c4ea75ad5b3a72e62e00ccf603a01c06da21e4c3d9bb440bf891b7f3ea09"
+  "receipt_sha256": "bdbaa53e18c457287f23d7bda0817e5c366b1a26bfc960fc31908e0ebcbd2c8d"
 }

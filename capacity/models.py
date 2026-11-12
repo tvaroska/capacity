@@ -109,11 +109,19 @@ class RecommendationResponse(DictAccessModel):
 
 
 class MicroBurstAudit(DictAccessModel):
-    """Sub-minute token-bucket enforcement audit (1s vs 10s window vs 60s Cloud Monitoring view)."""
+    """Token-bucket enforcement audit (1s/10s 1P or 30s/60s 3P vs 60s Cloud Monitoring view)."""
 
     provisioned_gsus: int
     refill_window_seconds: int = Field(
-        description="1s window for >=50 GSUs; 10s window for <50 GSUs"
+        description="1s (>=50 GSUs) / 10s (<50 GSUs) on 1P Gemini; 30s short bucket on 3P Claude"
+    )
+    long_window_seconds: int | None = Field(
+        default=None,
+        description="Secondary 60s long-term bucket window on 3P dual-bucket enforcement",
+    )
+    enforcement_mode: str = Field(
+        default="1p_subminute_bucket",
+        description="'1p_subminute_bucket' (1s/10s + 5% credit) or '3p_dual_bucket_30s_60s'",
     )
     tps_per_gsu: float
     committed_tps_ceiling: float
@@ -258,10 +266,13 @@ class OptimizeRequest(DictAccessModel):
     sixty_sec_tpm: BoundedTpmFloat | None = None
     peak_1s_tps: BoundedTpmFloat | None = None
     peak_10s_tps: BoundedTpmFloat | None = None
+    peak_30s_tps: BoundedTpmFloat | None = None
     total_input_tokens: int = Field(default=20_000, ge=0, le=2_000_000)
     output_tokens: int = Field(default=1_000, ge=0, le=200_000)
     thoughts_tokens: int = Field(default=500, ge=0, le=200_000)
     cached_tokens: int = Field(default=16_000, ge=0, le=2_000_000)
+    cache_write_5m_tokens: int = Field(default=0, ge=0, le=2_000_000)
+    cache_write_1h_tokens: int = Field(default=0, ge=0, le=2_000_000)
     shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
     baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
     num_round_robin_endpoints: int = Field(default=8, ge=1, le=1_024)

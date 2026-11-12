@@ -70,14 +70,21 @@ PORTAL_CLIENT_SCRIPT = """
       const dynOffset = Math.round(numVal('sim-dyn-offset', '120'));
       const mode = document.getElementById('sim-strip-sig').value;
 
+      const isClaude = model.startsWith('claude-');
       let tpsPerGsu = 2015.0;
-      if (model.includes('argon')) tpsPerGsu = 500.0;
+      if (model.includes('claude-haiku-5-5')) tpsPerGsu = 10417.0;
+      else if (model.includes('claude-sonnet-5-5')) tpsPerGsu = 525.0;
+      else if (model.includes('claude-opus-5-5')) tpsPerGsu = 261.0;
+      else if (model.includes('claude-opus')) tpsPerGsu = 210.0;
+      else if (isClaude) tpsPerGsu = 350.0;
+      else if (model.includes('argon')) tpsPerGsu = 500.0;
       else if (model.includes('-fast')) tpsPerGsu = 1007.5;
       else if (model.includes('lite')) tpsPerGsu = 4030.0;
 
-      const windowSec = gsus >= 50 ? 1 : 10;
+      const windowSec = isClaude ? 30 : (gsus >= 50 ? 1 : 10);
+      const burstCredit = isClaude ? 0.0 : 0.05;
       const committedTps = gsus * tpsPerGsu;
-      const ceilingTps = committedTps * 1.05;
+      const ceilingTps = committedTps * (1.0 + burstCredit);
       const avgTps = tpm60 / 60.0;
       const rawPeak = Math.max(avgTps, peakTps);
       const conservedPeak = tpm60 > 0
@@ -86,7 +93,7 @@ PORTAL_CLIENT_SCRIPT = """
       const util60 = (avgTps / committedTps) * 100.0;
       const utilPeak = (conservedPeak / ceilingTps) * 100.0;
       const reqGsus = conservedPeak > 0
-        ? Math.ceil(conservedPeak / (tpsPerGsu * 1.05))
+        ? Math.ceil(conservedPeak / (tpsPerGsu * (1.0 + burstCredit)))
         : 0;
 
       document.getElementById('burst-60s-val').textContent =
@@ -106,13 +113,19 @@ PORTAL_CLIENT_SCRIPT = """
         'Requires ' + reqGsus + ' GSUs for zero 429s/spillover';
 
       const isArgon = model.includes('argon');
-      const minFloor = isArgon ? 2048 : 6144;
-      const blockSize = isArgon ? 1 : 4096;
+      const isTokenBoundary = isArgon || isClaude;
+      let minFloor = isArgon ? 2048 : 6144;
+      if (isClaude) {
+        if (model.endsWith('-5-5')) minFloor = 512;
+        else if (model.includes('opus-4')) minFloor = 4096;
+        else minFloor = 1024;
+      }
+      const blockSize = isTokenBoundary ? 1 : 4096;
       const effSpan = dynOffset < staticIn ? dynOffset : staticIn;
-      const block0 = !isArgon && dynOffset < 4096;
+      const block0 = !isTokenBoundary && dynOffset < 4096;
       let aligned = 0;
       if (effSpan >= minFloor && !block0) {
-        aligned = isArgon ? effSpan : Math.floor(effSpan / blockSize) * blockSize;
+        aligned = isTokenBoundary ? effSpan : Math.floor(effSpan / blockSize) * blockSize;
       }
       let affinity = 0.90;
       if (mode === 'single_unanchored') affinity = 0.125;
@@ -120,7 +133,7 @@ PORTAL_CLIENT_SCRIPT = """
       const curHit = (Math.round(aligned * affinity) / totalIn) * 100.0;
       let optAligned = 0;
       if (staticIn >= minFloor) {
-        optAligned = isArgon ? staticIn : Math.floor(staticIn / blockSize) * blockSize;
+        optAligned = isTokenBoundary ? staticIn : Math.floor(staticIn / blockSize) * blockSize;
       }
       const optHit = (Math.round(optAligned * 0.90) / totalIn) * 100.0;
 
@@ -149,14 +162,26 @@ PORTAL_CLIENT_SCRIPT = """
             'to 0.77%. Preserve full modelContent across turns.'
           : 'Single-turn request misses prefix router affinity. Prepend a ' +
             '2-token static dummy (user + model) turn pair.';
+      } else if (isClaude && effSpan < minFloor) {
+        cBadge.className = 'badge badge-warn';
+        cBadge.textContent = 'Below Cache Floor (<' + minFloor.toLocaleString() + ' tok)';
+        remBox.style.background = 'var(--warning-bg)';
+        remBox.style.color = 'var(--warning)';
+        remBox.textContent =
+          '3P Claude prompt caching requires an explicit cache_control breakpoint at >=' +
+          minFloor.toLocaleString() + ' tokens (1.25x 5m / 2.0x 1h write vs 0.1x read; ' +
+          '30s/60s dual bucket with 0% burst credit).';
       } else {
         cBadge.className = 'badge badge-green';
         cBadge.textContent = 'Prefix Cache Healthy (' + curHit.toFixed(1) + '% Hit)';
         remBox.style.background = 'var(--success-bg)';
         remBox.style.color = 'var(--success)';
-        remBox.textContent =
-          'Prefix is aligned and routing affinity is active (' +
-          aligned.toLocaleString() + ' cacheable prefix tokens).';
+        remBox.textContent = isClaude
+          ? 'Prefix meets ' + minFloor.toLocaleString() + '-token floor (' +
+            aligned.toLocaleString() + ' cacheable tokens). 3P Claude PT uses 30s/60s dual ' +
+            'buckets (0% credit) and explicit cache_control (1.25x 5m / 2.0x 1h write).'
+          : 'Prefix is aligned and routing affinity is active (' +
+            aligned.toLocaleString() + ' cacheable prefix tokens).';
       }
     }
 

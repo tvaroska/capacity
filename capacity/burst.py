@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import re
 
+from capacity.model_families import resolve_model_family
 from capacity.models import MicroBurstAudit, ModelTierPrefixCacheAudit, PrefixCacheAudit
 
 LONG_CONTEXT_THRESHOLD_TOKENS = 200_000
@@ -28,26 +29,77 @@ def compute_weighted_burndown_tokens(
     output_tokens: int,
     thoughts_tokens: int = 0,
     cached_tokens: int = 0,
-    long_context_threshold: int = LONG_CONTEXT_THRESHOLD_TOKENS,
-    standard_input_weight: float = 1.0,
-    standard_cached_weight: float = 0.1,
-    standard_output_weight: float = 4.0,
-    long_context_input_weight: float = 2.0,
-    long_context_cached_weight: float = 0.2,
-    long_context_output_weight: float = 7.5,
+    long_context_threshold: int | None = None,
+    standard_input_weight: float | None = None,
+    standard_cached_weight: float | None = None,
+    standard_output_weight: float | None = None,
+    long_context_input_weight: float | None = None,
+    long_context_cached_weight: float | None = None,
+    long_context_output_weight: float | None = None,
+    *,
+    model: str | None = None,
+    cache_write_5m_tokens: int = 0,
+    cache_write_1h_tokens: int = 0,
+    cache_write_5m_weight: float | None = None,
+    cache_write_1h_weight: float | None = None,
 ) -> float:
-    """Compute hardware-weighted burndown tokens accounting for reasoning and the `>200K` cliff."""
+    """Compute weighted burndown tokens for 1P Gemini (<=200K/>200K) and 3P Claude PT."""
+    spec = resolve_model_family(model)
     total_in = max(0, input_tokens)
     cached = min(max(0, cached_tokens), total_in)
-    uncached_in = total_in - cached
+    rem_in = total_in - cached
+    write_5m = min(max(0, cache_write_5m_tokens), rem_in)
+    write_1h = min(max(0, cache_write_1h_tokens), rem_in - write_5m)
+    uncached_in = rem_in - write_5m - write_1h
     decode_tokens = max(0, output_tokens) + max(0, thoughts_tokens)
 
-    is_long_context = total_in > long_context_threshold
-    in_w = long_context_input_weight if is_long_context else standard_input_weight
-    cache_w = long_context_cached_weight if is_long_context else standard_cached_weight
-    out_w = long_context_output_weight if is_long_context else standard_output_weight
+    threshold = (
+        spec.long_context_threshold
+        if long_context_threshold is None
+        else long_context_threshold
+    )
+    is_long_context = threshold is not None and total_in > threshold
 
-    return (uncached_in * in_w) + (cached * cache_w) + (decode_tokens * out_w)
+    std_in_w = (
+        spec.standard_input_weight if standard_input_weight is None else standard_input_weight
+    )
+    std_cache_w = (
+        spec.standard_cached_read_weight
+        if standard_cached_weight is None
+        else standard_cached_weight
+    )
+    std_out_w = (
+        spec.standard_output_weight if standard_output_weight is None else standard_output_weight
+    )
+    lc_in_w = (
+        spec.long_context_input_weight
+        if long_context_input_weight is None
+        else long_context_input_weight
+    )
+    lc_cache_w = (
+        spec.long_context_cached_read_weight
+        if long_context_cached_weight is None
+        else long_context_cached_weight
+    )
+    lc_out_w = (
+        spec.long_context_output_weight
+        if long_context_output_weight is None
+        else long_context_output_weight
+    )
+    w_5m = spec.cache_write_5m_weight if cache_write_5m_weight is None else cache_write_5m_weight
+    w_1h = spec.cache_write_1h_weight if cache_write_1h_weight is None else cache_write_1h_weight
+
+    in_w = lc_in_w if is_long_context else std_in_w
+    cache_w = lc_cache_w if is_long_context else std_cache_w
+    out_w = lc_out_w if is_long_context else std_out_w
+
+    return (
+        (uncached_in * in_w)
+        + (cached * cache_w)
+        + (write_5m * w_5m)
+        + (write_1h * w_1h)
+        + (decode_tokens * out_w)
+    )
 
 
 def evaluate_micro_burst_window(
@@ -56,18 +108,29 @@ def evaluate_micro_burst_window(
     provisioned_gsus: int,
     tps_per_gsu: float = 2_015.0,
     peak_10s_tps: float | None = None,
-    burst_credit_pct: float = 0.05,
+    burst_credit_pct: float | None = None,
+    *,
+    model: str | None = None,
+    peak_30s_tps: float | None = None,
 ) -> MicroBurstAudit:
-    """Evaluate sub-minute token-bucket enforcement (`1s` for `>=50 GSUs`, `10s` for `<50 GSUs`).
+    """Evaluate token-bucket enforcement (`1s`/`10s` on 1P Gemini; `30s`/`60s` on 3P Claude).
 
-    Enforces 60-second token conservation: total tokens arriving inside a `1s` or `10s` sub-window
+    Enforces 60-second token conservation: total tokens arriving inside the refill window
     cannot exceed `sixty_sec_tpm` (`active_peak_tps * refill_window_seconds <= sixty_sec_tpm`).
     """
+    spec = resolve_model_family(model)
     gsus = max(0, provisioned_gsus)
-    refill_window_seconds = 1 if gsus >= 50 else 10
+    if spec.family == "claude_3p":
+        refill_window_seconds = spec.bucket_short_seconds
+        long_window_seconds = spec.bucket_long_seconds
+        credit_pct = spec.burst_credit_pct if burst_credit_pct is None else burst_credit_pct
+    else:
+        refill_window_seconds = 1 if gsus >= 50 else 10
+        long_window_seconds = None
+        credit_pct = spec.burst_credit_pct if burst_credit_pct is None else burst_credit_pct
 
     committed_tps = gsus * tps_per_gsu
-    effective_window_tps_ceiling = committed_tps * (1.0 + max(0.0, burst_credit_pct))
+    effective_window_tps_ceiling = committed_tps * (1.0 + max(0.0, credit_pct))
     window_token_budget = effective_window_tps_ceiling * refill_window_seconds
 
     bounded_tpm = max(0.0, float(sixty_sec_tpm))
@@ -77,7 +140,18 @@ def evaluate_micro_burst_window(
     )
 
     raw_1s = max(0.0, float(peak_1s_tps))
-    if refill_window_seconds == 1:
+    if spec.family == "claude_3p":
+        fallback_burst = (
+            max(0.0, float(peak_30s_tps))
+            if peak_30s_tps is not None
+            else (
+                max(0.0, float(peak_10s_tps))
+                if peak_10s_tps is not None
+                else max(sixty_sec_avg_tps, raw_1s)
+            )
+        )
+        raw_peak_tps = max(sixty_sec_avg_tps, fallback_burst)
+    elif refill_window_seconds == 1:
         raw_peak_tps = max(sixty_sec_avg_tps, raw_1s)
     else:
         effective_10s = (
@@ -104,7 +178,7 @@ def evaluate_micro_burst_window(
     triggers_spillover = spillover_tps > 0.0
     illusion_detected = apparent_60s_util_pct < 70.0 and triggers_spillover
 
-    per_gsu_effective_tps = tps_per_gsu * (1.0 + max(0.0, burst_credit_pct))
+    per_gsu_effective_tps = tps_per_gsu * (1.0 + max(0.0, credit_pct))
     required_gsus = (
         math.ceil(active_peak_tps / per_gsu_effective_tps)
         if per_gsu_effective_tps > 0 and active_peak_tps > 0
@@ -114,9 +188,11 @@ def evaluate_micro_burst_window(
     return MicroBurstAudit(
         provisioned_gsus=gsus,
         refill_window_seconds=refill_window_seconds,
+        long_window_seconds=long_window_seconds,
+        enforcement_mode=spec.enforcement_mode,
         tps_per_gsu=round(tps_per_gsu, 2),
         committed_tps_ceiling=round(committed_tps, 2),
-        burst_credit_pct=round(burst_credit_pct * 100.0, 2),
+        burst_credit_pct=round(credit_pct * 100.0, 2),
         effective_window_tps_ceiling=round(effective_window_tps_ceiling, 2),
         window_token_budget=round(window_token_budget, 2),
         sixty_sec_average_tps=round(sixty_sec_avg_tps, 2),
@@ -219,21 +295,15 @@ def evaluate_model_tier_prefix_cache(
 ) -> ModelTierPrefixCacheAudit:
     """Evaluate model-tier prefix-cache block alignment, Block-0 contamination, and routing hash."""
     norm = _normalize_model(model)
+    spec = resolve_model_family(norm)
     total_in = max(1, total_input_tokens)
     static_in = min(max(0, static_prefix_tokens), total_in)
     replicas = max(1, num_replicas)
 
-    is_pro_or_argon = "argon" in norm or "pro" in norm
-    if is_pro_or_argon:
-        granularity = "token_boundary"
-        min_floor = 2_048
-        block_size = 1
-        spillover_pct = 75.0
-    else:
-        granularity = "block_4096"
-        min_floor = 6_144
-        block_size = 4_096
-        spillover_pct = 50.0
+    granularity = spec.checkpoint_granularity
+    min_floor = spec.min_prefix_floor_tokens
+    block_size = spec.prefix_block_size_tokens
+    spillover_pct = 75.0 if granularity == "token_boundary" else 50.0
 
     fast_speedup = 2.5 if "-fast" in norm else 1.0
     fast_cost = 2.0 if "-fast" in norm else 1.0
@@ -313,12 +383,14 @@ def evaluate_model_tier_prefix_cache(
         output_tokens=output_tokens,
         thoughts_tokens=thoughts_tokens,
         cached_tokens=current_cached_tokens,
+        model=norm,
     )
     optimized_burndown = compute_weighted_burndown_tokens(
         input_tokens=total_in,
         output_tokens=output_tokens,
         thoughts_tokens=thoughts_tokens,
         cached_tokens=opt_cached_tokens,
+        model=norm,
     )
     waste_pct = (
         ((current_burndown - optimized_burndown) / current_burndown) * 100.0
@@ -326,7 +398,12 @@ def evaluate_model_tier_prefix_cache(
         else 0.0
     )
 
-    if not remediations:
+    if spec.family == "claude_3p":
+        remediations.append(
+            f"3P Claude explicit prompt caching requires cache_control breakpoints above the "
+            f"{min_floor:,}-token floor (1.25x 5m write / 2.0x 1h write vs. 0.1x cache read)."
+        )
+    elif not remediations:
         remediations.append(
             "Prefix structure is block-aligned and preserves multi-turn router hash affinity."
         )

@@ -414,6 +414,15 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
               <option value="gemini-3.5-flash-lite">
                 gemini-3.5-flash-lite (4,096-block / 6,144 floor)
               </option>
+              <option value="claude-sonnet-4-6">
+                claude-sonnet-4-6 (350 TPS/GSU, 30s bucket, 1,024 floor)
+              </option>
+              <option value="claude-opus-4-6">
+                claude-opus-4-6 (210 TPS/GSU, 30s bucket, 4,096 floor)
+              </option>
+              <option value="claude-sonnet-5-5">
+                claude-sonnet-5-5 (525 TPS/GSU, 30s bucket, 512 floor)
+              </option>
             </select>
           </div>
           <div class="field">
