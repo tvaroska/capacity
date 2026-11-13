@@ -42,3 +42,5 @@ uv run --no-sync mypy capacity tests benchmarks
 uv run --no-sync pytest -v
 uv run --no-sync python -m benchmarks.run_l3_benchmark --offline
 ```
+
+> **Gotchas:** Use `uv lock --check` (never `--offline`, which fails split Python-marker resolution). Any edit to the 6 hashed engine modules (`burst.py`, `capacity.py`, `finops.py`, `forecasting.py`, `gateway.py`, `self_hosted.py`) invalidates `benchmarks/results/l3_receipt.json` until you regenerate it locally via `uv run --no-sync python -m benchmarks.run_l3_benchmark --live`.
