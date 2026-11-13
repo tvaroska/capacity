@@ -4,7 +4,8 @@ __pycache__/
 .venv/
 dist/
 build/
-.claude/
+.claude/*
+!.claude/skills
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
