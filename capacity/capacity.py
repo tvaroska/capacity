@@ -48,7 +48,8 @@ DEFAULT_GSU_CONFIG: dict[str, int] = {
     "gemini-3.7-flash-fast": 60_450,  # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
     "gemini-3.8-flash": 120_900,  # 2,015 TPS/GSU
     "gemini-3.8-flash-fast": 60_450,  # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
-    "gemini-4-argon": 30_000,  # 500 TPS/GSU
+    "gemini-4-argon": 30_000,  # 500 TPS/GSU (Long-Term GA)
+    "gemini-4-carbon": 30_000,  # 500 TPS/GSU (Short-Term GA)
     "gemini-4.0-pro": 30_000,  # 500 TPS/GSU
     "gemini-embedding-2": 302_400,  # 5,040 TPS/GSU (256-token minimum request floor)
     "gemini-2.0-flash": 161_400,  # 2,690 TPS/GSU
@@ -62,8 +63,11 @@ ENV_PREFIX = "GSU_CAPACITY_"
 ASSUMED_PEAK_TO_MEAN_RATIO = 1.9
 
 
-def load_gsu_config(mode: str = "gsu") -> dict[str, int]:
-    """Load capacity config (TPM per 1 GSU or 1 GPU replica) plus GSU_CAPACITY_* env vars."""
+def load_gsu_config(
+    mode: str = "gsu",
+    overrides: Mapping[str, int] | None = None,
+) -> dict[str, int]:
+    """Load capacity config (TPM per 1 GSU or 1 GPU replica) plus env and explicit overrides."""
     config: dict[str, int] = {}
     if mode == "self-hosted":
         config.update({k: prof.tpm_per_replica for k, prof in DEFAULT_SELF_HOSTED_PROFILES.items()})
@@ -85,6 +89,12 @@ def load_gsu_config(mode: str = "gsu") -> dict[str, int]:
                         config[candidate] = cap_val
             except ValueError:
                 continue
+    if overrides:
+        for raw_model, cap_val in overrides.items():
+            cleaned = raw_model.strip().lower()
+            for candidate in (cleaned, normalize_model_id(cleaned)):
+                if candidate:
+                    config[candidate] = int(cap_val)
     return config
 
 
@@ -138,11 +148,12 @@ def compute_recommendations(
     by_region: bool = False,
     forecast_steps: int = 24,
     mode: str = "gsu",
+    gsu_overrides: Mapping[str, int] | None = None,
 ) -> list[ModelRecommendation]:
     """Compute both 24x7 (`all_hours`) and business-hours (`active_hours`) recommendations."""
     if percentiles is None:
         percentiles = DEFAULT_PERCENTILES
-    gsu_config = load_gsu_config(mode=mode)
+    gsu_config = load_gsu_config(mode=mode, overrides=gsu_overrides)
 
     results: list[ModelRecommendation] = []
     for raw_key in sorted(sparse_series):
@@ -217,6 +228,7 @@ def build_response(
     by_region: bool = False,
     forecast_steps: int = 24,
     mode: str = "gsu",
+    gsu_overrides: Mapping[str, int] | None = None,
 ) -> RecommendationResponse:
     recs = compute_recommendations(
         sparse_series,
@@ -226,6 +238,7 @@ def build_response(
         by_region=by_region,
         forecast_steps=forecast_steps,
         mode=mode,
+        gsu_overrides=gsu_overrides,
     )
     return RecommendationResponse(
         project=project,

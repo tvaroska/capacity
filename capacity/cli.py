@@ -17,6 +17,7 @@ from pydantic import ValidationError
 
 from capacity.capacity import evaluate_gsu_optimization, recommend_capacity, require_capacity
 from capacity.cli_formatters import (
+    execute_collect_command,
     load_sparse_from_trace_file,
     parse_folder_map,
     print_chargeback_report,
@@ -47,6 +48,12 @@ from capacity.models import (
     fields_of,
 )
 from capacity.portal import build_showcase_summary_payload, render_showcase_portal_html
+from capacity.scenario import (
+    FinOpsPoolingMode,
+    GatewayPresentationMode,
+    PlatformBrand,
+    load_showcase_scenario,
+)
 from capacity.self_hosted import (
     VllmTelemetrySnapshot,
     evaluate_self_hosted_endpoint,
@@ -139,15 +146,39 @@ def demo(
             help="Optional path to write the self-contained GM3 Light interactive HTML scorecard",
         ),
     ] = None,
+    scenario_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--scenario-file",
+            help="Optional JSON/YAML ShowcaseScenario contract for custom fleet/gateway scorecards",
+        ),
+    ] = None,
+    strict_public_check: Annotated[
+        bool,
+        typer.Option(
+            "--strict-public-check",
+            help="Fail closed if --scenario-file contains unredacted cloud/order/ticket IDs",
+        ),
+    ] = False,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
 ) -> None:
     """Run the end-to-end Showcase demo across all 4 planes (zero cloud credentials needed)."""
+    scenario = (
+        _or_exit(
+            lambda: load_showcase_scenario(scenario_file, strict_public_check=strict_public_check)
+        )
+        if scenario_file is not None
+        else None
+    )
     if html_out is not None:
-        _write_html(html_out, render_showcase_portal_html(static_export=True))
+        _write_html(
+            html_out,
+            render_showcase_portal_html(static_export=True, scenario=scenario),
+        )
 
-    payload = build_showcase_summary_payload()
+    payload = build_showcase_summary_payload(scenario=scenario)
     if output_format == OutputFormat.json:
         typer.echo(json.dumps(payload, indent=2))
         return
@@ -333,7 +364,7 @@ def recommend(
     if output_format == OutputFormat.json:
         typer.echo(resp.model_dump_json(indent=2))
     else:
-        print_recommendations_table(resp, pcts)
+        print_recommendations_table(resp, pcts, forecast_hours=forecast_hours)
 
 
 @app.command()
@@ -722,14 +753,108 @@ def chargeback(
 
 
 @app.command()
+def collect(
+    project: Annotated[
+        list[str] | None,
+        typer.Option(help="GCP project ID to collect Cloud Monitoring metrics from (repeatable)"),
+    ] = None,
+    days: Annotated[int, typer.Option(help="Complete UTC days of history", min=1, max=42)] = 7,
+    by_region: Annotated[
+        bool, typer.Option("--by-region/--no-by-region", help="Split series by GCP region")
+    ] = True,
+    logs_file: Annotated[
+        Path | None,
+        typer.Option(
+            "--logs-file",
+            help="Optional Observability 2.0 inference_request or OTel gen_ai.* JSONL log export",
+        ),
+    ] = None,
+    orders_file: Annotated[
+        Path | None,
+        typer.Option("--orders-file", help="Optional YAML/JSON commercial PT order metadata"),
+    ] = None,
+    project_label: Annotated[
+        str, typer.Option("--project-label", help="Display label for compiled scenario")
+    ] = "enterprise-ai-hub",
+    gateway_mode: Annotated[
+        GatewayPresentationMode,
+        typer.Option("--gateway-mode", help="Tab 3 mode: oss_stack or central_proxy"),
+    ] = "oss_stack",
+    pooling_mode: Annotated[
+        FinOpsPoolingMode,
+        typer.Option(
+            "--pooling-mode", help="Tab 4 mode: folder_rhpt, 1p_vs_3p_hub, or silo_stranding_audit"
+        ),
+    ] = "folder_rhpt",
+    platform_brand: Annotated[
+        PlatformBrand,
+        typer.Option("--platform-brand", help="Heading brand: 'Gemini Platform' or 'Vertex AI'"),
+    ] = "Gemini Platform",
+    self_hosted: Annotated[
+        bool, typer.Option("--self-hosted/--no-self-hosted", help="Include self-hosted GPU plane")
+    ] = True,
+    check_auth: Annotated[
+        bool,
+        typer.Option("--check-auth", help="Run read-only ADC + Monitoring API pre-flight check"),
+    ] = False,
+    strict_public_check: Annotated[
+        bool,
+        typer.Option("--strict-public-check", help="Fail closed on unredacted IDs before writing"),
+    ] = False,
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Output path for compiled ShowcaseScenario JSON"),
+    ] = None,
+    output_format: Annotated[
+        OutputFormat, typer.Option("--format", "-f", help="Output format")
+    ] = OutputFormat.table,
+) -> None:
+    """Collect customer Cloud Monitoring metrics and/or inference logs into a ShowcaseScenario."""
+    _or_exit(
+        lambda: execute_collect_command(
+            proj_list=project or [],
+            days=days,
+            by_region=by_region,
+            logs_file=logs_file,
+            orders_file=orders_file,
+            project_label=project_label,
+            gateway_mode=gateway_mode,
+            pooling_mode=pooling_mode,
+            platform_brand=platform_brand,
+            self_hosted=self_hosted,
+            check_auth=check_auth,
+            strict_public_check=strict_public_check,
+            out=out,
+            json_output=output_format == OutputFormat.json,
+            or_exit=_or_exit,
+            fail=_fail,
+        )
+    )
+
+
+@app.command()
 def serve(
     host: Annotated[
         str, typer.Option(help="Bind host (use 0.0.0.0 to listen on every interface)")
     ] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Bind port")] = 8080,
+    scenario_file: Annotated[
+        Path | None,
+        typer.Option("--scenario-file", help="Optional ShowcaseScenario JSON/YAML to serve at /"),
+    ] = None,
+    strict_public_check: Annotated[
+        bool,
+        typer.Option("--strict-public-check", help="Validate --scenario-file against ID leaks"),
+    ] = False,
 ) -> None:
     """Start the FastAPI web server and interactive GM3 Light capacity calculator."""
     import uvicorn
+
+    if scenario_file is not None:
+        _or_exit(
+            lambda: load_showcase_scenario(scenario_file, strict_public_check=strict_public_check)
+        )
+        os.environ["CAPACITY_SCENARIO_FILE"] = str(scenario_file.resolve())
 
     uvicorn.run("capacity.api:app", host=host, port=port)
 

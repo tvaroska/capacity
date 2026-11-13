@@ -1,0 +1,108 @@
+{
+  "schema_version": "capacity.scenario.v1",
+  "presentation": {
+    "title": "Gemini Platform Capacity, Gateway & FOCUS 1.2 Scorecard",
+    "subtitle": "Central Multi-Tenant Hub • 1P Gemini + 3P Claude PT • Upstream Gateway Contracts • FOCUS 1.2 Chargeback",
+    "platform_brand": "Gemini Platform",
+    "primary_badge": "Central Gateway Hub",
+    "secondary_badge": "FOCUS 1.2 & CPVO Ready",
+    "wave_badge_label": "Weekday Trading & Advisory Wave"
+  },
+  "gsu_sizing": {
+    "project_label": "central-gateway-hub",
+    "days": 1,
+    "by_region": true,
+    "active_only": true,
+    "forecast_hours": 24,
+    "minute_tpm_series": {
+      "gemini-3.5-flash-lite@global": [28800000.0, 27600000.0, 26100000.0, 24200000.0, 19800000.0, 0.0, 0.0, 0.0],
+      "gemini-3.8-flash@global": [7800000.0, 7250000.0, 6900000.0, 5800000.0, 4600000.0, 0.0, 0.0, 0.0],
+      "gemini-4-argon@us-east4": [1450000.0, 1380000.0, 1290000.0, 1100000.0, 920000.0, 0.0, 0.0, 0.0],
+      "gemini-4-carbon@global": [420000.0, 380000.0, 310000.0, 240000.0, 180000.0, 0.0, 0.0, 0.0],
+      "claude-sonnet-4-6@global": [3900000.0, 3650000.0, 3400000.0, 3100000.0, 2750000.0, 0.0, 0.0, 0.0]
+    },
+    "inventory_annotations": {
+      "gemini-3.5-flash-lite@global": {
+        "contracted_gsus": 136,
+        "scope_label": "Central Hub",
+        "spillover_requests": 475969,
+        "http_429_count": 16886,
+        "lifecycle_track": "long_term_ga",
+        "renewal_mode": "mixed",
+        "expiry_date": "2026-12-19",
+        "expiring_fixed_gsus": 16
+      },
+      "gemini-3.8-flash@global": {
+        "contracted_gsus": 120,
+        "scope_label": "Central Hub",
+        "spillover_requests": 12400,
+        "http_429_count": 0,
+        "lifecycle_track": "long_term_ga",
+        "renewal_mode": "mixed",
+        "expiry_date": "2026-12-19",
+        "expiring_fixed_gsus": 62
+      },
+      "gemini-4-argon@us-east4": {
+        "contracted_gsus": 40,
+        "scope_label": "Regional Pool",
+        "spillover_requests": 1850,
+        "http_429_count": 0,
+        "lifecycle_track": "long_term_ga",
+        "renewal_mode": "auto_renew"
+      },
+      "gemini-4-carbon@global": {
+        "contracted_gsus": 0,
+        "scope_label": "Priority PayGo Only",
+        "spillover_requests": 8400,
+        "http_429_count": 0,
+        "lifecycle_track": "short_term_ga",
+        "renewal_mode": "none"
+      },
+      "claude-sonnet-4-6@global": {
+        "contracted_gsus": 160,
+        "scope_label": "3P Hub Pool",
+        "spillover_requests": 92400,
+        "http_429_count": 1420,
+        "lifecycle_track": "long_term_ga",
+        "renewal_mode": "auto_renew"
+      }
+    }
+  },
+  "self_hosted": {
+    "enabled": false
+  },
+  "burst_and_cache": {
+    "default_model": "gemini-3.8-flash",
+    "provisioned_gsus": 62,
+    "sixty_sec_tpm": 7800000.0,
+    "peak_1s_tps": 165000.0
+  },
+  "gateway": {
+    "presentation_mode": "central_proxy",
+    "proxy_label": "Enterprise Central LLM Gateway",
+    "config": {
+      "model": "gemini-3.8-flash",
+      "project_id": "central-ai-pt-host",
+      "location": "global",
+      "provisioned_gsus": 62,
+      "target_rps": 900,
+      "concurrent_sse_streams": 550,
+      "business_unit_shares": 6
+    }
+  },
+  "finops": {
+    "pooling_mode": "1p_vs_3p_hub",
+    "chargeback": {
+      "model": "gemini-3.8-flash",
+      "provisioned_gsus": 62,
+      "gsu_monthly_price_usd": 2000.0,
+      "hourly_consumed_tpm_by_tenant": {
+        "markets-desk-agents": [2800000.0, 2950000.0, 2700000.0, 2400000.0, 320000.0, 180000.0],
+        "wealth-advisory-coach": [1900000.0, 2100000.0, 1850000.0, 1750000.0, 240000.0, 140000.0],
+        "enterprise-doc-search": [1400000.0, 1550000.0, 1500000.0, 1300000.0, 190000.0, 110000.0],
+        "developer-coding-assist": [1100000.0, 1250000.0, 1200000.0, 980000.0, 150000.0, 90000.0]
+      },
+      "async_batch_waterfill_tpm": 1800000.0
+    }
+  }
+}

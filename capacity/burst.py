@@ -127,6 +127,18 @@ def evaluate_micro_burst_window(
         if per_gsu_effective_tps > 0 and active_peak_tps > 0
         else 0
     )
+    if (
+        spec.family != "claude_3p"
+        and refill_window_seconds == 10
+        and required_gsus >= 50
+        and per_gsu_effective_tps > 0
+    ):
+        # Buying >=50 GSUs switches 1P enforcement from the 10s bucket to the 1s bucket, so
+        # zero-spillover sizing must also cover the conserved 1s burst in that regime.
+        conserved_1s_tps = (
+            min(max(sixty_sec_avg_tps, raw_1s), bounded_tpm) if bounded_tpm > 0.0 else raw_1s
+        )
+        required_gsus = max(50, math.ceil(conserved_1s_tps / per_gsu_effective_tps))
 
     return MicroBurstAudit(
         provisioned_gsus=gsus,

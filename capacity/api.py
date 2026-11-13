@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Annotated, Literal
 
 from dotenv import load_dotenv
@@ -56,6 +57,7 @@ from capacity.models import (
     fields_of,
 )
 from capacity.portal import render_showcase_portal_html
+from capacity.scenario import load_showcase_scenario
 from capacity.self_hosted import (
     SelfHostedEndpointAudit,
     VllmTelemetrySnapshot,
@@ -88,7 +90,9 @@ async def unknown_model_handler(_request: Request, exc: UnknownModelError) -> JS
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    return HTMLResponse(content=render_showcase_portal_html(static_export=False))
+    scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
+    scenario = load_showcase_scenario(scenario_path) if scenario_path else None
+    return HTMLResponse(content=render_showcase_portal_html(static_export=False, scenario=scenario))
 
 
 @app.get("/healthz")

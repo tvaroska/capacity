@@ -1,0 +1,34 @@
+# Optional customer-side commercial Provisioned Throughput order metadata overlay
+# Merge onto live Cloud Monitoring + BigQuery inference_request exports via:
+#   uv run capacity collect --logs-file bql_export.jsonl --orders-file examples/orders_overlay.yaml --out scenario.json
+
+orders:
+  gemini-3.8-flash@global:
+    contracted_gsus: 120
+    scope_label: "Central Hub"
+    lifecycle_track: long_term_ga
+    renewal_mode: mixed
+    expiry_date: "2026-12-19"
+    expiring_fixed_gsus: 62
+  gemini-3.5-flash-lite@global:
+    contracted_gsus: 136
+    scope_label: "Central Hub"
+    lifecycle_track: long_term_ga
+    renewal_mode: mixed
+    expiry_date: "2026-12-19"
+    expiring_fixed_gsus: 16
+  gemini-4-argon@us-east4:
+    contracted_gsus: 40
+    scope_label: "Regional Pool"
+    lifecycle_track: long_term_ga
+    renewal_mode: auto_renew
+  gemini-4-carbon@global:
+    contracted_gsus: 0
+    scope_label: "Priority PayGo Only"
+    lifecycle_track: short_term_ga
+    renewal_mode: none
+  claude-sonnet-4-6@global:
+    contracted_gsus: 160
+    scope_label: "3P Hub Pool"
+    lifecycle_track: long_term_ga
+    renewal_mode: auto_renew

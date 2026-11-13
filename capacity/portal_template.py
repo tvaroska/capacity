@@ -17,7 +17,7 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Capacity v0.3.0 — AI Capacity, Micro-Burst, Multi-Gateway &amp; FOCUS 1.2 Showcase</title>
+  <title>__PAGE_TITLE__</title>
   <link rel="icon" type="image/svg+xml" href="__FAVICON_URI__" />
   <style>
     :root {
@@ -112,6 +112,7 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
       border-radius: 12px;
       padding: 18px 20px;
       margin-bottom: 18px;
+      overflow-x: auto;
     }
     .card h2 { font-size: 15.5px; margin: 0 0 6px; color: var(--on-surface); }
     .card p.sub { margin: 0 0 14px; font-size: 12.5px; color: var(--on-surface-variant); }
@@ -220,17 +221,13 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
   <header>
     <div class="brand">
       <div>
-        <h1>Capacity Showcase Workbench (v0.3.0)</h1>
-        <p>
-          Managed Gemini Platform GSUs + Self-Hosted GPU/vLLM &bull;
-          Sub-Second Burst &amp; Prefix Cache &bull;
-          LiteLLM / Envoy / K8s epp &bull; FOCUS 1.2 FinOps
-        </p>
+        <h1>__BRAND_HEADING__</h1>
+        <p>__BRAND_SUBTITLE__</p>
       </div>
     </div>
     <div>
-      <span class="badge badge-blue">GM3 Light Tier-2 Showcase</span>
-      <span class="badge badge-green">FOCUS 1.2 &amp; bq-eval CPVO Ready</span>
+      <span class="badge badge-blue">__BADGE_PRIMARY__</span>
+      <span class="badge badge-green">__BADGE_SECONDARY__</span>
       __DOCS_HEADER_RIGHT__
     </div>
   </header>
@@ -238,13 +235,13 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
   <main>
     <nav class="tabs" role="tablist">
       <button class="tab-btn active" onclick="switchTab('tab-sizing', this)">
-        1. Dual-Mode Sizing &amp; Holt Forecast
+        __TAB1_BUTTON_LABEL__
       </button>
       <button class="tab-btn" onclick="switchTab('tab-burst', this)">
         2. Micro-Burst &amp; Prefix-Cache Physics
       </button>
       <button class="tab-btn" onclick="switchTab('tab-gateway', this)">
-        3. Multi-Gateway (LiteLLM / Envoy / K8s epp)
+        __TAB3_BUTTON_LABEL__
       </button>
       <button class="tab-btn" onclick="switchTab('tab-finops', this)">
         4. FOCUS 1.2 FinOps, EDF Scheduler &amp; 5 KPIs
@@ -252,58 +249,15 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
     </nav>
 
     <section id="tab-sizing" class="tab-panel active">
-      <div class="kpi-grid">
-        <div class="kpi-card">
-          <div class="kpi-label">Active vs 24x7 Duty Cycle</div>
-          <div class="kpi-value">23.8%</div>
-          <span class="badge badge-blue">8x5 Business Wave</span>
-          <div class="kpi-caption">Prevents 24x7 zero-padding P50=0 under-sizing</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Upfront GPU Quota Lock</div>
-          <div class="kpi-value" id="kpi-locked-gpus">__LOCKED_GPUS__ GPUs</div>
-          <span class="badge badge-danger">__STRANDED_GPUS__ Stranded vs Min</span>
-          <div class="kpi-caption">
-            max_replica_count (__MAX_REPS__) &times; __ACCEL_PER_REP__ __ACCEL_TYPE__
-          </div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Disaggregated P/D Pool</div>
-          <div class="kpi-value" id="kpi-disagg-reps">__PREFILL_REPS__P + __DECODE_REPS__D</div>
-          <span class="badge badge-green" id="kpi-disagg-badge">
-            Saves __REPLICA_DELTA__ Replica(s) vs Monolithic
-          </span>
-          <div class="kpi-caption">Isolates TTFT prefill bursts from TPOT decode</div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Non-Prod Scale-to-Zero</div>
-          <div class="kpi-value">$__SCALE_ZERO_SAVINGS__/mo</div>
-          <span class="badge badge-green">ScaleToZeroSpec (108h/wk idle)</span>
-          <div class="kpi-caption">Eliminates overnight/weekend idle GPU burn</div>
-        </div>
-      </div>
+      __SIZING_KPIS__
 
       <div class="card">
-        <h2>
-          Managed Gemini Platform GSU Sizing &amp; +24h Holt Forecast
-          (Active Business Hours vs 24x7)
-        </h2>
-        <p class="sub">
-          Includes standard and high-speed (<code>-fast</code>) decode tiers,
-          suffix normalization, and daily-peak Holt trend projection.
-        </p>
+        <h2>__SIZING_CARD_TITLE__</h2>
+        <p class="sub">__SIZING_CARD_SUB__</p>
         <table>
           <thead>
             <tr>
-              <th>Model</th>
-              <th>Region</th>
-              <th class="num">1 GSU Cap (TPM)</th>
-              <th class="num">Duty Cycle</th>
-              <th class="num">24x7 P50 (Zero-Padded)</th>
-              <th class="num">Active P50</th>
-              <th class="num">Active P90</th>
-              <th class="num">Active P95</th>
-              <th class="num">Holt Forecast +24h Peak</th>
+              __GSU_TABLE_HEADERS__
             </tr>
           </thead>
           <tbody>
@@ -312,59 +266,19 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
         </table>
       </div>
 
-      <div class="card">
-        <h2>
-          Interactive Disaggregated Prefill / Decode GPU Pool Sizer
-          (llm-d / GKE Inference Gateway)
-        </h2>
-        <p class="sub">
-          Separate compute-bound Prefill replicas (TTFT SLA) from HBM
-          bandwidth/KV-bound Decode replicas (TPOT SLA).
-        </p>
-        <div class="controls-grid">
-          <div class="field">
-            <label for="pd-qps">Peak Arrival QPS</label>
-            <input
-              id="pd-qps" type="number" value="18" min="0.1" max="500" step="1"
-              oninput="recalcDisagg()"
-            />
-          </div>
-          <div class="field">
-            <label for="pd-in">Avg Input Tokens</label>
-            <input
-              id="pd-in" type="number" value="6400" min="256" max="128000" step="256"
-              oninput="recalcDisagg()"
-            />
-          </div>
-          <div class="field">
-            <label for="pd-out">Avg Output Tokens</label>
-            <input
-              id="pd-out" type="number" value="450" min="32" max="16384" step="50"
-              oninput="recalcDisagg()"
-            />
-          </div>
-          <div class="field">
-            <label for="pd-ttft">Target TTFT (ms)</label>
-            <input
-              id="pd-ttft" type="number" value="350" min="50" max="2000" step="25"
-              oninput="recalcDisagg()"
-            />
-          </div>
-        </div>
-        <div id="pd-output" class="info-banner">__DISAGG_RECOMMENDATION__</div>
-      </div>
+      __SELF_HOSTED_SECTION__
     </section>
 
     <section id="tab-burst" class="tab-panel">
       <div class="kpi-grid">
         <div class="kpi-card">
           <div class="kpi-label">60s Chart vs Sub-Second Reality</div>
-          <div class="kpi-value" id="burst-60s-val">62.0% &rarr; 118.2%</div>
-          <span class="badge badge-danger" id="burst-badge">
-            60s Illusion Detected (10s Bucket)
+          <div class="kpi-value" id="burst-60s-val">__BURST_UTIL_SUMMARY__</div>
+          <span class="badge __BURST_BADGE_CLASS__" id="burst-badge">
+            __BURST_BADGE_TEXT__
           </span>
           <div class="kpi-caption" id="burst-caption">
-            Requires 12 GSUs for zero 429s/spillover
+            Requires __BURST_REQ_GSUS__ GSUs for zero 429s/spillover
           </div>
         </div>
         <div class="kpi-card">
@@ -379,15 +293,17 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Argon/Pro Token Checkpointing</div>
-          <div class="kpi-value">70.0% Hit</div>
+          <div class="kpi-value">__PRO_CACHE_CUR__% Hit</div>
           <span class="badge badge-green">2,048 Floor + Token Boundary</span>
           <div class="kpi-caption">Checkpoints exact system_instruction &amp; tools boundary</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">1/N Round-Robin Cache Dilution</div>
-          <div class="kpi-value">80% &rarr; 10% Hit</div>
-          <span class="badge badge-warn">5 Wasted GSUs Across 8 Replicas</span>
-          <div class="kpi-caption">Sticky / epp prefix routing saves 54.6% burndown</div>
+          <div class="kpi-value">__RR_DILUTION_SUMMARY__</div>
+          <span class="badge badge-warn">__RR_WASTED_GSUS__ Wasted GSUs Across Replicas</span>
+          <div class="kpi-caption">
+            Sticky / prefix-aware routing saves __RR_SAVINGS_PCT__% burndown
+          </div>
         </div>
       </div>
 
@@ -395,54 +311,34 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
         <h2>Interactive Sub-Second Token-Bucket &amp; Model-Tier Prefix-Cache Simulator</h2>
         <p class="sub">
           Adjust GSU pool size, prompt tokens, static prefix length, and dynamic
-          header offset to test 1s (&ge;50 GSUs) vs 10s (&lt;50 GSUs) buckets and
-          Block-0 contamination.
+          header offset to test 1s (&ge;50 GSUs) vs 10s (&lt;50 GSUs) buckets,
+          3P Claude 30s/60s buckets, Short-Term vs Long-Term GA rules, and Block-0 contamination.
         </p>
         <div class="controls-grid">
           <div class="field">
             <label for="sim-model">Model Tier</label>
             <select id="sim-model" onchange="recalcBurstAndCache()">
-              <option value="gemini-3.8-flash">
-                gemini-3.8-flash (4,096-block / 6,144 floor)
-              </option>
-              <option value="gemini-3.8-flash-fast">
-                gemini-3.8-flash-fast (2.5x decode speed)
-              </option>
-              <option value="gemini-4-argon">
-                gemini-4-argon (token-boundary / 2,048 floor)
-              </option>
-              <option value="gemini-3.5-flash-lite">
-                gemini-3.5-flash-lite (4,096-block / 6,144 floor)
-              </option>
-              <option value="claude-sonnet-4-6">
-                claude-sonnet-4-6 (350 TPS/GSU, 30s bucket, 1,024 floor)
-              </option>
-              <option value="claude-opus-4-6">
-                claude-opus-4-6 (210 TPS/GSU, 30s bucket, 4,096 floor)
-              </option>
-              <option value="claude-sonnet-5-5">
-                claude-sonnet-5-5 (525 TPS/GSU, 30s bucket, 512 floor)
-              </option>
+              __SIM_MODEL_OPTIONS__
             </select>
           </div>
           <div class="field">
             <label for="sim-gsus">Provisioned GSUs</label>
             <input
-              id="sim-gsus" type="number" value="10" min="1" max="200"
+              id="sim-gsus" type="number" value="__SIM_GSUS_DEFAULT__" min="1" max="2000"
               oninput="recalcBurstAndCache()"
             />
           </div>
           <div class="field">
             <label for="sim-60s-tpm">60s Cloud Monitoring TPM</label>
             <input
-              id="sim-60s-tpm" type="number" value="750000" min="0" step="25000"
+              id="sim-60s-tpm" type="number" value="__SIM_TPM60_DEFAULT__" min="0" step="25000"
               oninput="recalcBurstAndCache()"
             />
           </div>
           <div class="field">
             <label for="sim-peak-tps">Sub-Second Peak TPS</label>
             <input
-              id="sim-peak-tps" type="number" value="25000" min="0" step="1000"
+              id="sim-peak-tps" type="number" value="__SIM_PEAK_TPS_DEFAULT__" min="0" step="1000"
               oninput="recalcBurstAndCache()"
             />
           </div>
@@ -489,132 +385,10 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
     </section>
 
     <section id="tab-gateway" class="tab-panel">
-      <div class="kpi-grid">
-        <div class="kpi-card">
-          <div class="kpi-label">LiteLLM Prisma Engines</div>
-          <div class="kpi-value" id="gw-prisma-val">48 Engines</div>
-          <span class="badge badge-warn" id="gw-status-badge">
-            Tune Required (&ge;500 RPS)
-          </span>
-          <div class="kpi-caption" id="gw-pg-caption">
-            PgBouncer pool=34, Postgres max_conns&ge;100
-          </div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Anti-Blackhole Cooldown</div>
-          <div class="kpi-value" id="gw-cooldown-val">5s Cooldown</div>
-          <span class="badge badge-green">Matched to 10s PT Bucket</span>
-          <div class="kpi-caption">
-            Prevents 1s/10s micro-burst 429 from blackholing PT
-          </div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Envoy AI Gateway CEL</div>
-          <div class="kpi-value">Two-Phase RLS</div>
-          <span class="badge badge-blue">cost.request=256 + SSE CEL</span>
-          <div class="kpi-caption">
-            Enforces &le;200K &amp; &gt;200K per-BU burndown at &gt;2,000 RPS
-          </div>
-        </div>
-        <div class="kpi-card">
-          <div class="kpi-label">GKE Inference Gateway (epp)</div>
-          <div class="kpi-value">Weight 4:2:2:1</div>
-          <span class="badge badge-green">Prefix + KV + Queue + LoRA</span>
-          <div class="kpi-caption">Eliminates 1/N GPU prefix-cache dilution</div>
-        </div>
-      </div>
+      __GATEWAY_TOP_SECTION__
 
       <div class="card">
-        <h2>Interactive LiteLLM Proxy High-QPS Scale &amp; Bottleneck Auditor</h2>
-        <p class="sub">
-          Simulate target RPS, streaming SSE concurrency, and pod/worker topology
-          to size PgBouncer pools and detect the Envoy data-plane crossover.
-        </p>
-        <div class="controls-grid">
-          <div class="field">
-            <label for="gw-rps">Target Gateway RPS</label>
-            <input
-              id="gw-rps" type="number" value="650" min="10" max="10000" step="50"
-              oninput="recalcGatewayAudit()"
-            />
-          </div>
-          <div class="field">
-            <label for="gw-sse">Concurrent SSE Streams</label>
-            <input
-              id="gw-sse" type="number" value="400" min="0" max="5000" step="50"
-              oninput="recalcGatewayAudit()"
-            />
-          </div>
-          <div class="field">
-            <label for="gw-pods">LiteLLM Pods</label>
-            <input
-              id="gw-pods" type="number" value="12" min="1" max="100" step="1"
-              oninput="recalcGatewayAudit()"
-            />
-          </div>
-          <div class="field">
-            <label for="gw-workers">Uvicorn Workers / Pod</label>
-            <input
-              id="gw-workers" type="number" value="4" min="1" max="16" step="1"
-              oninput="recalcGatewayAudit()"
-            />
-          </div>
-        </div>
-        <div id="gw-audit-msg" class="warn-banner">
-          48 Prisma Rust query engines active across 12 pods. Enable
-          use_redis_transaction_buffer: true (10s), LITELLM_RUST=1, and front
-          PostgreSQL with PgBouncer transaction pooling.
-        </div>
-      </div>
-
-      <div class="two-col">
-        <div class="card">
-          <h2>1. LiteLLM Proxy Config (<code>litellm_config.yaml</code>)</h2>
-          <p class="sub">
-            Tag-based PT &rarr; Priority 1.8x spillover, Non-Prod 0.5x Flex
-            isolation, and anti-blackholing cooldowns.
-          </p>
-          <pre><code>__LITELLM_CFG__</code></pre>
-        </div>
-        <div class="card">
-          <h2>
-            2. LiteLLM Weighted Burndown Hook (<code>litellm_burndown_callback.py</code>)
-          </h2>
-          <p class="sub">
-            Enforces stateful Redis weighted burndown quotas, dynamic PT-bypass on burst,
-            and 0ms <code>traffic_type</code> SpendLogs tagging.
-          </p>
-          <pre><code>__LITELLM_CB__</code></pre>
-        </div>
-      </div>
-
-      <div class="two-col">
-        <div class="card">
-          <h2>
-            3. Envoy AI Gateway CEL (<code>AIGatewayRoute</code> +
-            <code>BackendTrafficPolicy</code>)
-          </h2>
-          <p class="sub">
-            Two-phase pre-flight floor (<code>cost=256</code>) + post-response SSE
-            <code>type: CEL</code> per-BU burndown deduction.
-          </p>
-          <pre><code>__ENVOY_CFG__</code></pre>
-        </div>
-        <div class="card">
-          <h2>
-            4. GKE Inference Gateway (<code>InferencePool</code> +
-            <code>EndpointPickerConfig</code>)
-          </h2>
-          <p class="sub">
-            Prefix-cache affinity and KV-cache utilization pod scoring with
-            Critical/Sheddable admission.
-          </p>
-          <pre><code>__EPP_CFG__</code></pre>
-        </div>
-      </div>
-
-      <div class="card">
-        <h2>8 Canonical Vertex AI Gateway Header Routing Policies (6-Rank UTA Admission)</h2>
+        <h2>__HEADER_CARD_TITLE__</h2>
         <table>
           <thead>
             <tr>
@@ -649,14 +423,7 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
           </span>
           <div class="kpi-caption">Paced online scavenging vs separate 0.5x Batch API</div>
         </div>
-        <div class="kpi-card">
-          <div class="kpi-label">Shared Folder RHPT Pooling</div>
-          <div class="kpi-value">__POOL_SILOED__ &rarr; __POOL_POOLED__ GSUs</div>
-          <span class="badge badge-blue">
-            Saves $__POOL_MO_SAVINGS__/mo ($__POOL_YR_SAVINGS__/yr)
-          </span>
-          <div class="kpi-caption">Follow-the-sun EMEA + AMER + APAC spoke pooling</div>
-        </div>
+        __FINOPS_POOL_KPI_CARD__
         <div class="kpi-card">
           <div class="kpi-label">Token &amp; Cache Efficiency</div>
           <div class="kpi-value">CSR __KPI_CSR__%</div>
@@ -666,6 +433,8 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
           <div class="kpi-caption">FinOps Foundation 5 Standardized AI KPIs</div>
         </div>
       </div>
+
+      __FINOPS_POOL_DETAIL_CARD__
 
       <div class="card">
         <h2>

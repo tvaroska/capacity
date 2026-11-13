@@ -41,11 +41,16 @@ Start with the single offline showcase command (generates the scorecard and the 
 
 ```bash
 uv run capacity demo --html-out /tmp/capacity_scorecard.html
+uv run capacity demo --scenario-file examples/scenarios/multi_tenant_enterprise.json --strict-public-check --html-out /tmp/enterprise_scorecard.html
 ```
 
-### Bring Your Own Traces, Gateways & Benchmarks
+### Bring Your Own Traces, Customer Logs, Gateways & Benchmarks
 
 ```bash
+# 0. Collect Customer Cloud Monitoring Metrics & BigQuery `inference_request` Logs into a Scenario
+uv run capacity collect --project my-gcp-project --check-auth
+uv run capacity collect --logs-file examples/otel_genai_spans.jsonl --orders-file examples/orders_overlay.yaml --gateway-mode central_proxy --out /tmp/scenario.json
+
 # 1. Bring Your Own Traces (JSON minute TPM, multi-scrape vLLM Prometheus, or OTel gen_ai.* JSONL)
 uv run capacity recommend --trace-file examples/diurnal_8x5_trace.json --active-only
 uv run capacity recommend --mode self-hosted --vllm-file examples/otel_genai_spans.jsonl --active-only
@@ -248,7 +253,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 1b7b92189b64...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 5eff4e0068c5...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |
@@ -257,7 +262,7 @@ Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/
 | **Track A** · *Pure Priority PayGo (`L1`, `0` GSUs)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | `100%` Priority PayGo (`$8,981.73`) + `0.5x` Batch (`$1,732.50`); zero commitment (`0.00%` `ECUR_168h`) |
 | **Track A** · *Omniscient Hindsight Oracle (`L2` Lower Bound)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | Ex-post optimum when spiky `10s` arrivals hold `168h` occupancy `< 42.55%` break-even |
 | **Track A** · *`capacity` Causal Compiler (`10s` + Night Scavenge)* | `4` GSUs | **`$11,072.47`** | **`0.00%` Tier-0 `429`** | **`43.03%` savings vs. Static `P99`**, **`3.34%` gap vs. `L1`/`L2`** (`37.02%` `ECUR_168h`) |
-| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `62` peer `PT` starvation events |
+| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `61` peer `PT` starvation events |
 | **Track B** · *Stateless `1/8` Round-Robin + Stripped Signature* | `20` GSUs | `500 / 500` `200 OK` | `51.31%` burndown drift | `0.25%` effective prefix-cache hit rate and `144` peer `PT` starvation events |
 | **Track B** · *`capacity` Two-Phase Redis Gateway + Sticky `epp`* | `20` GSUs | **`500 / 500` `200 OK`** | **`0.00%` burndown drift** | **`0` peer `PT` starvation events**, **`0.00%` blackhole drops**, **`26.84%` cache hit** |
 

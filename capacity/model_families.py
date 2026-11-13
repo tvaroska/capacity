@@ -170,6 +170,6 @@ def resolve_model_family(model_id: str | None) -> ModelFamilySpec:
         if "opus-4-5" in norm or "opus-4-6" in norm:
             return CLAUDE_3P_OPUS_4_SPEC
         return CLAUDE_3P_SONNET_SPEC
-    if "argon" in norm or "pro" in norm:
+    if "argon" in norm or "carbon" in norm or "pro" in norm:
         return GEMINI_1P_PRO_SPEC
     return GEMINI_1P_FLASH_SPEC

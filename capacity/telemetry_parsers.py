@@ -9,13 +9,15 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from pydantic import Field
+
 from capacity.burst import compute_weighted_burndown_tokens
-from capacity.model_families import resolve_model_family
+from capacity.model_families import normalize_model_id, resolve_model_family
 from capacity.models import StrictModel
 
 
 class VllmTelemetrySnapshot(StrictModel):
-    """Normalized telemetry extracted from Phase 2 vLLM/SGLang Prometheus scrapes or JSONL logs."""
+    """Normalized telemetry extracted from Prometheus scrapes, OTel spans, or inference logs."""
 
     source_format: str
     model: str
@@ -25,12 +27,22 @@ class VllmTelemetrySnapshot(StrictModel):
     cache_write_5m_tokens_total: int = 0
     cache_write_1h_tokens_total: int = 0
     completion_tokens_total: int
-    thoughts_tokens_total: int
+    thoughts_tokens_total: int = 0
     weighted_burndown_tokens_total: float
     observed_kv_cache_usage_pct: float
     observed_requests_waiting: float
     observed_cache_hit_rate: float
     hourly_consumed_tpm_by_tenant: dict[str, list[float]]
+    total_requests: int = 0
+    spillover_requests: int = 0
+    http_429_count: int = 0
+    peak_1s_burndown_tps: float = 0.0
+    peak_10s_burndown_tps: float = 0.0
+    peak_30s_burndown_tps: float = 0.0
+    minute_tpm_by_model_region: dict[str, list[float]] = Field(default_factory=dict)
+    requests_by_model_region: dict[str, int] = Field(default_factory=dict)
+    spillover_by_model_region: dict[str, int] = Field(default_factory=dict)
+    http_429_by_model_region: dict[str, int] = Field(default_factory=dict)
 
 
 _PROM_METRIC_RE = re.compile(
@@ -340,13 +352,17 @@ def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
     """Return a record's UTC time, or fail: a log without times has no rate to size from."""
     attrs = rec.get("attributes")
     attr_map = attrs if isinstance(attrs, Mapping) else {}
+    json_payload = rec.get("jsonPayload")
+    payload_map = json_payload if isinstance(json_payload, Mapping) else {}
     raw_ts = (
         rec.get("minute")
         or rec.get("timestamp")
+        or rec.get("receiveTimestamp")
         or rec.get("start_time")
         or rec.get("timeUnixNano")
         or rec.get("startTimeUnixNano")
         or attr_map.get("timestamp")
+        or payload_map.get("timestamp")
     )
     if raw_ts is None:
         raise ValueError(
@@ -396,6 +412,26 @@ def _hourly_series_by_tenant(
     }
 
 
+def _minute_series_by_key(
+    key_minute_tokens: Mapping[str, Mapping[datetime, float]],
+) -> dict[str, list[float]]:
+    observed = [minute for minutes in key_minute_tokens.values() for minute in minutes]
+    if not observed:
+        return {}
+    first, last = min(observed), max(observed)
+    span = int((last - first).total_seconds() // 60) + 1
+    if span > _MAX_HOURLY_SPAN * 60 or span * len(key_minute_tokens) > _MAX_TENANT_HOUR_CELLS:
+        return {
+            key: [round(minutes[m], 2) for m in sorted(minutes)]
+            for key, minutes in key_minute_tokens.items()
+        }
+    axis = [first + timedelta(minutes=i) for i in range(span)]
+    return {
+        key: [round(minutes.get(minute, 0.0), 2) for minute in axis]
+        for key, minutes in key_minute_tokens.items()
+    }
+
+
 def _parse_jsonl_or_json_logs(
     text: str,
     default_model: str = "llama-3.3-70b-fp8",
@@ -423,12 +459,33 @@ def _parse_jsonl_or_json_logs(
     weighted_total = 0.0
     kv_max = 0.0
     wait_max = 0.0
+    spillover_total = 0
+    http_429_total = 0
     minute_buckets: dict[datetime, float] = {}
+    sec1_buckets: dict[int, float] = {}
+    sec10_buckets: dict[int, float] = {}
+    sec30_buckets: dict[int, float] = {}
     tenant_hour_tokens: dict[str, dict[datetime, float]] = {}
+    model_region_minutes: dict[str, dict[datetime, float]] = {}
+    reqs_by_mr: dict[str, int] = {}
+    spill_by_mr: dict[str, int] = {}
+    err429_by_mr: dict[str, int] = {}
 
     for idx, rec in enumerate(records):
         usage = rec.get("usage")
         usage_map: Mapping[str, object] = usage if isinstance(usage, Mapping) else {}
+        json_payload = rec.get("jsonPayload")
+        payload_map: Mapping[str, object] = (
+            json_payload if isinstance(json_payload, Mapping) else {}
+        )
+        payload_usage = payload_map.get("usage_metadata") or payload_map.get("usage")
+        p_usage_map: Mapping[str, object] = (
+            payload_usage if isinstance(payload_usage, Mapping) else {}
+        )
+        req_labels = payload_map.get("request_labels") or payload_map.get("labels")
+        req_label_map: Mapping[str, object] = req_labels if isinstance(req_labels, Mapping) else {}
+        top_labels = rec.get("labels")
+        top_label_map: Mapping[str, object] = top_labels if isinstance(top_labels, Mapping) else {}
         prompt_details = usage_map.get("prompt_tokens_details")
         p_details_map: Mapping[str, object] = (
             prompt_details if isinstance(prompt_details, Mapping) else {}
@@ -443,16 +500,51 @@ def _parse_jsonl_or_json_logs(
         attr_map: Mapping[str, object] = attrs if isinstance(attrs, Mapping) else {}
         res_obj = rec.get("resource")
         res_attrs = res_obj.get("attributes") if isinstance(res_obj, Mapping) else None
+        res_labels = res_obj.get("labels") if isinstance(res_obj, Mapping) else None
         res_attr_map: Mapping[str, object] = res_attrs if isinstance(res_attrs, Mapping) else {}
+        res_label_map: Mapping[str, object] = res_labels if isinstance(res_labels, Mapping) else {}
 
-        search_maps = (usage_map, p_details_map, c_details_map, cc_map, attr_map, res_attr_map, rec)
+        search_maps = (
+            usage_map,
+            p_usage_map,
+            p_details_map,
+            c_details_map,
+            cc_map,
+            payload_map,
+            attr_map,
+            res_attr_map,
+            res_label_map,
+            rec,
+        )
 
         mod_candidate = _lookup_first(
-            (rec, attr_map, res_attr_map),
-            ("model", "gen_ai.response.model", "gen_ai.request.model"),
+            (rec, payload_map, attr_map, res_attr_map, res_label_map),
+            (
+                "model",
+                "model_id",
+                "model_user_id",
+                "publisher_model_id",
+                "gen_ai.response.model",
+                "gen_ai.request.model",
+            ),
         )
-        if isinstance(mod_candidate, str) and mod_candidate.strip():
-            model_name = mod_candidate.strip()
+        rec_model = (
+            mod_candidate.strip()
+            if isinstance(mod_candidate, str) and mod_candidate.strip()
+            else model_name
+        )
+        model_name = rec_model
+
+        loc_candidate = _lookup_first(
+            (rec, payload_map, attr_map, res_attr_map, res_label_map),
+            ("location", "region", "request_cloud_region", "cloud.region"),
+        )
+        rec_region = (
+            str(loc_candidate).strip().removeprefix("prod-")
+            if loc_candidate is not None and str(loc_candidate).strip()
+            else "global"
+        )
+        mr_key = f"{normalize_model_id(rec_model)}@{rec_region}"
 
         c_tok = _int_from_maps(
             search_maps,
@@ -481,7 +573,10 @@ def _parse_jsonl_or_json_logs(
             )
             w5_tok = max(0, cc_total - w1_tok)
 
-        raw_prompt = _lookup_first(search_maps, ("prompt_tokens", "gen_ai.usage.prompt_tokens"))
+        raw_prompt = _lookup_first(
+            search_maps,
+            ("prompt_tokens", "prompt_token_count", "gen_ai.usage.prompt_tokens"),
+        )
         raw_input = _lookup_first(search_maps, ("input_tokens", "gen_ai.usage.input_tokens"))
         if raw_prompt is not None:
             p_tok = max(max(0, int(float(str(raw_prompt)))), c_tok + w5_tok + w1_tok)
@@ -507,6 +602,7 @@ def _parse_jsonl_or_json_logs(
             search_maps,
             (
                 "completion_tokens",
+                "candidates_token_count",
                 "output_tokens",
                 "gen_ai.usage.output_tokens",
                 "gen_ai.usage.completion_tokens",
@@ -517,6 +613,7 @@ def _parse_jsonl_or_json_logs(
             (
                 "reasoning_tokens",
                 "thoughts_tokens",
+                "thoughts_token_count",
                 "gen_ai.usage.reasoning_tokens",
             ),
         )
@@ -526,7 +623,7 @@ def _parse_jsonl_or_json_logs(
             output_tokens=o_tok,
             thoughts_tokens=t_tok,
             cached_tokens=c_tok,
-            model=model_name,
+            model=rec_model,
             cache_write_5m_tokens=w5_tok,
             cache_write_1h_tokens=w1_tok,
         )
@@ -538,34 +635,79 @@ def _parse_jsonl_or_json_logs(
         thoughts_total += t_tok
         weighted_total += w_tok
 
+        status_code = _int_from_maps(
+            (rec, payload_map, attr_map),
+            ("status_code", "http_status_code", "response_code", "http.response.status_code"),
+        )
+        traffic_type_raw = _lookup_first(
+            (rec, payload_map, p_usage_map, attr_map, top_label_map),
+            ("traffic_type", "request_type", "gen_ai.vertex.traffic_type"),
+        )
+        tt_upper = str(traffic_type_raw).strip().upper() if traffic_type_raw is not None else ""
+        reqs_by_mr[mr_key] = reqs_by_mr.get(mr_key, 0) + 1
+        if status_code == 429:
+            http_429_total += 1
+            err429_by_mr[mr_key] = err429_by_mr.get(mr_key, 0) + 1
+        if tt_upper in {
+            "ON_DEMAND",
+            "ON_DEMAND_PRIORITY",
+            "ON_DEMAND_FLEX",
+            "SHARED",
+            "SPILLOVER",
+        }:
+            spillover_total += 1
+            spill_by_mr[mr_key] = spill_by_mr.get(mr_key, 0) + 1
+
         kv_val = _float_from_maps(
-            (rec, attr_map),
+            (rec, payload_map, attr_map),
             ("gpu_cache_usage_pct", "kv_cache_usage_pct", "vllm.gpu_cache_usage_perc"),
         )
         wait_val = _float_from_maps(
-            (rec, attr_map),
+            (rec, payload_map, attr_map),
             ("num_requests_waiting", "queue_depth", "vllm.num_requests_waiting"),
         )
         kv_max = max(kv_max, kv_val * 100.0 if 0.0 < kv_val <= 1.0 else kv_val)
         wait_max = max(wait_max, wait_val)
 
-        minute_key = _record_time_utc(rec, idx).replace(second=0, microsecond=0)
+        ts_utc = _record_time_utc(rec, idx)
+        epoch_sec = int(ts_utc.timestamp())
+        sec1_buckets[epoch_sec] = sec1_buckets.get(epoch_sec, 0.0) + w_tok
+        sec10_buckets[epoch_sec // 10] = sec10_buckets.get(epoch_sec // 10, 0.0) + w_tok
+        sec30_buckets[epoch_sec // 30] = sec30_buckets.get(epoch_sec // 30, 0.0) + w_tok
+
+        minute_key = ts_utc.replace(second=0, microsecond=0)
         hour_key = minute_key.replace(minute=0)
         minute_buckets[minute_key] = minute_buckets.get(minute_key, 0.0) + w_tok
+        mr_minutes = model_region_minutes.setdefault(mr_key, {})
+        mr_minutes[minute_key] = mr_minutes.get(minute_key, 0.0) + w_tok
 
         tenant_val = _lookup_first(
-            (rec, attr_map, res_attr_map),
-            ("tenant", "team", "x-business-unit", "gen_ai.tenant", "service.name"),
+            (rec, req_label_map, top_label_map, payload_map, attr_map, res_attr_map),
+            (
+                "tenant",
+                "team",
+                "x-business-unit",
+                "business_unit",
+                "app_id",
+                "cost_center",
+                "workload",
+                "gen_ai.tenant",
+                "service.name",
+            ),
         )
         tenant = str(tenant_val).strip() if tenant_val is not None else "default"
         t_hours = tenant_hour_tokens.setdefault(tenant or "default", {})
         t_hours[hour_key] = t_hours.get(hour_key, 0.0) + w_tok
 
     tenant_series = _hourly_series_by_tenant(tenant_hour_tokens)
+    mr_series = _minute_series_by_key(model_region_minutes)
 
     hit_rate = cached_total / prompt_total if prompt_total > 0 else 0.0
     ordered_minutes = [minute_buckets[k] for k in sorted(minute_buckets)]
     tpm_series = [round(v, 2) for v in ordered_minutes] or [0.0]
+    peak_1s = max(sec1_buckets.values(), default=0.0)
+    peak_10s = max(sec10_buckets.values(), default=0.0) / 10.0
+    peak_30s = max(sec30_buckets.values(), default=0.0) / 30.0
 
     return VllmTelemetrySnapshot(
         source_format="jsonl",
@@ -582,4 +724,14 @@ def _parse_jsonl_or_json_logs(
         observed_requests_waiting=round(wait_max, 2),
         observed_cache_hit_rate=round(hit_rate, 4),
         hourly_consumed_tpm_by_tenant=tenant_series,
+        total_requests=len(records),
+        spillover_requests=spillover_total,
+        http_429_count=http_429_total,
+        peak_1s_burndown_tps=round(peak_1s, 2),
+        peak_10s_burndown_tps=round(peak_10s, 2),
+        peak_30s_burndown_tps=round(peak_30s, 2),
+        minute_tpm_by_model_region=mr_series,
+        requests_by_model_region=reqs_by_mr,
+        spillover_by_model_region=spill_by_mr,
+        http_429_by_model_region=err429_by_mr,
     )

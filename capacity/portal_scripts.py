@@ -12,10 +12,13 @@ PORTAL_CLIENT_SCRIPT = """
     }
 
     function numVal(id, defVal) {
-      return parseFloat(document.getElementById(id).value || defVal);
+      const el = document.getElementById(id);
+      return el ? parseFloat(el.value || defVal) : parseFloat(defVal);
     }
 
     function recalcDisagg() {
+      const outEl = document.getElementById('pd-output');
+      if (!outEl) return;
       const qps = Math.max(0.01, numVal('pd-qps', '18'));
       const inTok = Math.max(1, Math.round(numVal('pd-in', '6400')));
       const outTok = Math.max(1, Math.round(numVal('pd-out', '450')));
@@ -37,21 +40,25 @@ PORTAL_CLIENT_SCRIPT = """
       const monoReps = Math.max(1, Math.ceil(monoWeighted / 3200.0), Math.ceil(activeKv / kvSafe));
       const saved = monoReps - totalDisagg;
 
-      document.getElementById('kpi-disagg-reps').textContent =
-        prefillReps + 'P + ' + decodeReps + 'D';
+      const repsEl = document.getElementById('kpi-disagg-reps');
+      if (repsEl) repsEl.textContent = prefillReps + 'P + ' + decodeReps + 'D';
       const dBadge = document.getElementById('kpi-disagg-badge');
       if (saved > 0) {
-        dBadge.className = 'badge badge-green';
-        dBadge.textContent = 'Saves ' + saved + ' Replica(s) vs Monolithic';
-        document.getElementById('pd-output').textContent =
+        if (dBadge) {
+          dBadge.className = 'badge badge-green';
+          dBadge.textContent = 'Saves ' + saved + ' Replica(s) vs Monolithic';
+        }
+        outEl.textContent =
           'Deploy ' + prefillReps + ' prefill + ' + decodeReps + ' decode replicas (' +
           totalDisagg + ' total vs ' + monoReps + ' monolithic, saving ' + saved +
           ' H100 replica[s] / $' + (saved * 18500).toLocaleString() +
           '/mo) behind GKE Inference Gateway (epp).';
       } else {
-        dBadge.className = 'badge badge-warn';
-        dBadge.textContent = 'Monolithic Cheaper at Low QPS';
-        document.getElementById('pd-output').textContent =
+        if (dBadge) {
+          dBadge.className = 'badge badge-warn';
+          dBadge.textContent = 'Monolithic Cheaper at Low QPS';
+        }
+        outEl.textContent =
           'Keep ' + monoReps + ' monolithic replica(s) at ' + qps.toFixed(2) +
           ' QPS (disaggregation requires ' + totalDisagg + ' minimum replicas).';
       }
@@ -69,13 +76,14 @@ PORTAL_CLIENT_SCRIPT = """
       const mode = document.getElementById('sim-strip-sig').value;
 
       const isClaude = model.startsWith('claude-');
+      const isCarbon = model.includes('carbon');
       let tpsPerGsu = 2015.0;
       if (model.includes('claude-haiku-5-5')) tpsPerGsu = 10417.0;
       else if (model.includes('claude-sonnet-5-5')) tpsPerGsu = 525.0;
       else if (model.includes('claude-opus-5-5')) tpsPerGsu = 261.0;
       else if (model.includes('claude-opus')) tpsPerGsu = 210.0;
       else if (isClaude) tpsPerGsu = 350.0;
-      else if (model.includes('argon')) tpsPerGsu = 500.0;
+      else if (model.includes('argon') || isCarbon) tpsPerGsu = 500.0;
       else if (model.includes('-fast')) tpsPerGsu = 1007.5;
       else if (model.includes('lite')) tpsPerGsu = 4030.0;
 
@@ -90,12 +98,15 @@ PORTAL_CLIENT_SCRIPT = """
         : (peakTps > 0 ? peakTps / windowSec : 0);
       const util60 = (avgTps / committedTps) * 100.0;
       const utilPeak = (conservedPeak / ceilingTps) * 100.0;
-      const reqGsus = conservedPeak > 0
-        ? Math.ceil(conservedPeak / (tpsPerGsu * (1.0 + burstCredit)))
-        : 0;
+      const effPerGsu = tpsPerGsu * (1.0 + burstCredit);
+      let reqGsus = conservedPeak > 0 ? Math.ceil(conservedPeak / effPerGsu) : 0;
+      if (!isClaude && windowSec === 10 && reqGsus >= 50) {
+        const conserved1s = tpm60 > 0 ? Math.min(rawPeak, tpm60) : rawPeak;
+        reqGsus = Math.max(50, Math.ceil(conserved1s / effPerGsu));
+      }
 
       document.getElementById('burst-60s-val').textContent =
-        util60.toFixed(1) + '% \u2192 ' + utilPeak.toFixed(1) + '%';
+        util60.toFixed(1) + '% \\u2192 ' + utilPeak.toFixed(1) + '%';
       const burstBadge = document.getElementById('burst-badge');
       if (util60 < 70.0 && utilPeak > 100.0) {
         burstBadge.className = 'badge badge-danger';
@@ -110,9 +121,8 @@ PORTAL_CLIENT_SCRIPT = """
       document.getElementById('burst-caption').textContent =
         'Requires ' + reqGsus + ' GSUs for zero 429s/spillover';
 
-      const isArgon = model.includes('argon');
-      const isTokenBoundary = isArgon || isClaude;
-      let minFloor = isArgon ? 2048 : 6144;
+      const isTokenBoundary = model.includes('argon') || isCarbon || isClaude;
+      let minFloor = isTokenBoundary ? 2048 : 6144;
       if (isClaude) {
         if (model.endsWith('-5-5')) minFloor = 512;
         else if (model.includes('opus-4')) minFloor = 4096;
@@ -136,7 +146,7 @@ PORTAL_CLIENT_SCRIPT = """
       const optHit = (Math.round(optAligned * 0.90) / totalIn) * 100.0;
 
       document.getElementById('cache-hit-val').textContent =
-        curHit.toFixed(1) + '% \u2192 ' + optHit.toFixed(1) + '%';
+        curHit.toFixed(1) + '% \\u2192 ' + optHit.toFixed(1) + '%';
       const cBadge = document.getElementById('cache-block0-badge');
       const remBox = document.getElementById('sim-remediation-box');
       if (block0) {
@@ -160,6 +170,15 @@ PORTAL_CLIENT_SCRIPT = """
             'to 0.77%. Preserve full modelContent across turns.'
           : 'Single-turn request misses prefix router affinity. Prepend a ' +
             '2-token static dummy (user + model) turn pair.';
+      } else if (isCarbon) {
+        cBadge.className = 'badge badge-warn';
+        cBadge.textContent = 'Short-Term GA (Eval / Pilot Only)';
+        remBox.style.background = 'var(--warning-bg)';
+        remBox.style.color = 'var(--warning)';
+        remBox.textContent =
+          'gemini-4-carbon is a Short-Term GA endpoint: keep off 12-month fixed PT ' +
+          'commitments (use Priority PayGo for pilots; anchor production PT on Long-Term ' +
+          'GA gemini-4-argon, gemini-3.8-flash, or gemini-3.5-flash-lite).';
       } else if (isClaude && effSpan < minFloor) {
         cBadge.className = 'badge badge-warn';
         cBadge.textContent = 'Below Cache Floor (<' + minFloor.toLocaleString() + ' tok)';
@@ -184,6 +203,8 @@ PORTAL_CLIENT_SCRIPT = """
     }
 
     function recalcGatewayAudit() {
+      const valEl = document.getElementById('gw-prisma-val');
+      if (!valEl) return;
       const rps = Math.max(1, Math.round(numVal('gw-rps', '650')));
       const sse = Math.max(0, Math.round(numVal('gw-sse', '400')));
       const pods = Math.max(1, Math.round(numVal('gw-pods', '12')));
@@ -192,9 +213,9 @@ PORTAL_CLIENT_SCRIPT = """
       const pgb = Math.max(20, Math.min(100, Math.floor(prisma / 2) + 10));
       const pgMax = Math.max(100, prisma + 40);
 
-      document.getElementById('gw-prisma-val').textContent = prisma + ' Engines';
+      valEl.textContent = prisma + ' Engines';
       document.getElementById('gw-pg-caption').textContent =
-        'PgBouncer pool=' + pgb + ', Postgres max_conns\u2265' + pgMax;
+        'PgBouncer pool=' + pgb + ', Postgres max_conns\\u2265' + pgMax;
       const badge = document.getElementById('gw-status-badge');
       const msg = document.getElementById('gw-audit-msg');
       if (rps > 1500 || sse > 1000) {
@@ -208,7 +229,7 @@ PORTAL_CLIENT_SCRIPT = """
           'burndown rate limiting to Envoy AI Gateway.';
       } else if (rps >= 500 || sse >= 300 || prisma >= 32) {
         badge.className = 'badge badge-warn';
-        badge.textContent = 'Tune Required (\u2265500 RPS)';
+        badge.textContent = 'Tune Required (\\u2265500 RPS)';
         msg.style.background = 'var(--warning-bg)';
         msg.style.color = 'var(--warning)';
         msg.textContent =
