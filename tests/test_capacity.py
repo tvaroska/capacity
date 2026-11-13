@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,7 +25,6 @@ from capacity.capacity import (
     compute_recommendations,
     find_capacity,
     load_gsu_config,
-    normalize_model_id,
 )
 from capacity.cli import app as cli_app
 from capacity.core import (
@@ -45,6 +44,7 @@ from capacity.finops import (
     schedule_residual_capacity,
 )
 from capacity.gateway import audit_litellm_scaling, generate_gateway_bundle
+from capacity.model_families import normalize_model_id
 from capacity.models import DeadlineJobSpec
 from capacity.self_hosted import (
     DEFAULT_SELF_HOSTED_PROFILES,
@@ -203,14 +203,21 @@ async def test_fetch_throughput_regional_bucketing_and_folder_map() -> None:
         )
 
     assert total_mins == 1440
-    assert sparse_reg["retail-banking/gemini-3.8-flash@us-central1"][t0] == 120_900
-    assert sparse_reg["retail-banking/gemini-3.8-flash@europe-west4"][t0] == 50_000
+    minute = t0 - timedelta(minutes=1)
+    assert sparse_reg["retail-banking/gemini-3.8-flash@us-central1"][minute] == 120_900
+    assert sparse_reg["retail-banking/gemini-3.8-flash@europe-west4"][minute] == 50_000
     assert len(captured_requests) == 2
     agg = captured_requests[0]["aggregation"]
     assert list(agg.group_by_fields) == GROUP_BY_FIELDS
 
     resp = build_response(
-        "demo-project", 1, sparse_reg, total_mins, percentiles=[95], active_only=True, by_region=True
+        "demo-project",
+        1,
+        sparse_reg,
+        total_mins,
+        percentiles=[95],
+        active_only=True,
+        by_region=True,
     )
     by_reg = {m.region: m for m in resp.models}
     assert by_reg["us-central1"].percentiles["P95"].recommended_gsus == 1
@@ -245,7 +252,7 @@ async def test_fetch_throughput_self_hosted_mode() -> None:
         )
 
     assert total_mins == 1440
-    assert sparse["llama-3.3-70b-fp8@us-central1"][t0] == 400_000
+    assert sparse["llama-3.3-70b-fp8@us-central1"][t0 - timedelta(minutes=1)] == 400_000
 
 
 def test_weighted_burndown_tokens_standard_and_long_context_cliff() -> None:
@@ -318,6 +325,9 @@ def test_self_hosted_endpoint_audit_and_phase2_parsers() -> None:
     assert audit.locked_regional_accelerators == 64
     assert audit.active_baseline_accelerators == 16
     assert audit.stranded_quota_accelerators == 48
+    assert audit.scale_to_zero_nonprod_savings_usd == pytest.approx(
+        2 * 38.8 * 720 * 108 / 168, abs=0.01
+    )
     assert audit.duty_cycle_illusion_detected is True
     assert audit.kv_preemption_risk is True
     assert audit.optimal_reserved_replicas >= 1
@@ -375,10 +385,7 @@ def test_compute_focus_chargeback_and_raw_vs_weighted_tokens() -> None:
     assert report.total_commitment_cost_usd == pytest.approx(20_000.0)
     assert report.active_consumed_cost_usd < report.total_commitment_cost_usd
     assert report.reclaimed_waterfill_cost_usd > 0.0
-    assert (
-        report.net_unallocated_idle_cost_usd
-        < report.unallocated_idle_cost_before_waterfill_usd
-    )
+    assert report.net_unallocated_idle_cost_usd < report.unallocated_idle_cost_before_waterfill_usd
     claims = next(t for t in report.tenants if t.tenant == "claims-triage")
     assert claims.idle_penalty_avoided_usd > 0.0
     assert claims.active_allocated_cost_usd > claims.unweighted_raw_token_cost_usd
@@ -402,8 +409,15 @@ def test_cli_commands_recommend_optimize_chargeback(tmp_path: Path) -> None:
 
     res_default_opt = runner.invoke(cli_app, ["optimize"])
     assert res_default_opt.exit_code == 0
-    assert "Illusion=True" in res_default_opt.stdout
+    assert "Micro-Burst:     not evaluated" in res_default_opt.stdout
     assert "Round-Robin(8)" in res_default_opt.stdout
+
+    res_burst_opt = runner.invoke(
+        cli_app, ["optimize", "--sixty-sec-tpm", "150000", "--peak-1s-tps", "4750"]
+    )
+    assert res_burst_opt.exit_code == 0
+    assert "60s Util=62.0%" in res_burst_opt.stdout
+    assert "Illusion=True" in res_burst_opt.stdout
 
     res_sh_opt = runner.invoke(
         cli_app,
@@ -412,6 +426,7 @@ def test_cli_commands_recommend_optimize_chargeback(tmp_path: Path) -> None:
     assert res_sh_opt.exit_code == 0
     assert "Self-Hosted GPU Endpoint Audit" in res_sh_opt.stdout
     assert "Upfront GPU Quota Lock" in res_sh_opt.stdout
+    assert "Reps at an assumed 1 request/s (" in res_sh_opt.stdout
 
     trace_path = tmp_path / "trace.json"
     trace_path.write_text(json.dumps([362_700, 241_800, 120_900]), encoding="utf-8")
@@ -472,8 +487,19 @@ def test_fastapi_endpoints() -> None:
     assert r_opt.status_code == 200
     opt_data = r_opt.json()
     assert opt_data["normalized_model"] == "gemini-3.8-flash"
-    assert opt_data["micro_burst"]["illusion_detected"] is True
+    assert opt_data["micro_burst"] is None
     assert opt_data["prefix_cache"]["num_round_robin_endpoints"] == 8
+
+    r_opt_burst = client.post(
+        "/api/v1/optimize",
+        json={
+            "tpm_series": [362_700, 241_800, 120_900],
+            "sixty_sec_tpm": 150_000,
+            "peak_1s_tps": 4_750,
+        },
+    )
+    assert r_opt_burst.status_code == 200
+    assert r_opt_burst.json()["micro_burst"]["illusion_detected"] is True
 
     r_sh = client.post(
         "/api/v1/self-hosted/audit",
@@ -682,7 +708,8 @@ def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) ->
 
     kpis = compute_finops_kpis()
     assert kpis.cpvo_usd == pytest.approx(0.175)
-    assert kpis.csr_pct > 60.0
+    assert kpis.total_weighted_burndown_tokens == pytest.approx(4.36e9)
+    assert kpis.csr_pct == pytest.approx(68.4)
 
     html_out = tmp_path / "scorecard.html"
     res_demo = runner.invoke(cli_app, ["demo", "--html-out", str(html_out)])

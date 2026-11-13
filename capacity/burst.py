@@ -3,25 +3,9 @@
 from __future__ import annotations
 
 import math
-import re
 
-from capacity.model_families import resolve_model_family
+from capacity.model_families import normalize_model_id, resolve_model_family
 from capacity.models import MicroBurstAudit, ModelTierPrefixCacheAudit, PrefixCacheAudit
-
-LONG_CONTEXT_THRESHOLD_TOKENS = 200_000
-_SUFFIX_RE = re.compile(
-    r"(?:-(?:00\d|preview(?:-\d{2}-\d{2})?|exp(?:-\d{4})?|rc\d*|ga|qcd|latest|v\d+))+$",
-    re.IGNORECASE,
-)
-
-
-def _normalize_model(model_id: str) -> str:
-    cleaned = model_id.strip().lower()
-    if "@" in cleaned:
-        cleaned = cleaned.split("@", 1)[0]
-    if "/" in cleaned:
-        cleaned = cleaned.rsplit("/", 1)[-1]
-    return _SUFFIX_RE.sub("", cleaned)
 
 
 def compute_weighted_burndown_tokens(
@@ -29,21 +13,12 @@ def compute_weighted_burndown_tokens(
     output_tokens: int,
     thoughts_tokens: int = 0,
     cached_tokens: int = 0,
-    long_context_threshold: int | None = None,
-    standard_input_weight: float | None = None,
-    standard_cached_weight: float | None = None,
-    standard_output_weight: float | None = None,
-    long_context_input_weight: float | None = None,
-    long_context_cached_weight: float | None = None,
-    long_context_output_weight: float | None = None,
     *,
     model: str | None = None,
     cache_write_5m_tokens: int = 0,
     cache_write_1h_tokens: int = 0,
-    cache_write_5m_weight: float | None = None,
-    cache_write_1h_weight: float | None = None,
 ) -> float:
-    """Compute weighted burndown tokens for 1P Gemini (<=200K/>200K) and 3P Claude PT."""
+    """Compute one request's weighted burndown: 1P Gemini (<=200K/>200K) or 3P Claude PT."""
     spec = resolve_model_family(model)
     total_in = max(0, input_tokens)
     cached = min(max(0, cached_tokens), total_in)
@@ -53,51 +28,21 @@ def compute_weighted_burndown_tokens(
     uncached_in = rem_in - write_5m - write_1h
     decode_tokens = max(0, output_tokens) + max(0, thoughts_tokens)
 
-    threshold = (
-        spec.long_context_threshold
-        if long_context_threshold is None
-        else long_context_threshold
-    )
-    is_long_context = threshold is not None and total_in > threshold
-
-    std_in_w = (
-        spec.standard_input_weight if standard_input_weight is None else standard_input_weight
-    )
-    std_cache_w = (
-        spec.standard_cached_read_weight
-        if standard_cached_weight is None
-        else standard_cached_weight
-    )
-    std_out_w = (
-        spec.standard_output_weight if standard_output_weight is None else standard_output_weight
-    )
-    lc_in_w = (
-        spec.long_context_input_weight
-        if long_context_input_weight is None
-        else long_context_input_weight
-    )
-    lc_cache_w = (
-        spec.long_context_cached_read_weight
-        if long_context_cached_weight is None
-        else long_context_cached_weight
-    )
-    lc_out_w = (
-        spec.long_context_output_weight
-        if long_context_output_weight is None
-        else long_context_output_weight
-    )
-    w_5m = spec.cache_write_5m_weight if cache_write_5m_weight is None else cache_write_5m_weight
-    w_1h = spec.cache_write_1h_weight if cache_write_1h_weight is None else cache_write_1h_weight
-
-    in_w = lc_in_w if is_long_context else std_in_w
-    cache_w = lc_cache_w if is_long_context else std_cache_w
-    out_w = lc_out_w if is_long_context else std_out_w
+    threshold = spec.long_context_threshold
+    if threshold is not None and total_in > threshold:
+        in_w = spec.long_context_input_weight
+        cache_w = spec.long_context_cached_read_weight
+        out_w = spec.long_context_output_weight
+    else:
+        in_w = spec.standard_input_weight
+        cache_w = spec.standard_cached_read_weight
+        out_w = spec.standard_output_weight
 
     return (
         (uncached_in * in_w)
         + (cached * cache_w)
-        + (write_5m * w_5m)
-        + (write_1h * w_1h)
+        + (write_5m * spec.cache_write_5m_weight)
+        + (write_1h * spec.cache_write_1h_weight)
         + (decode_tokens * out_w)
     )
 
@@ -108,7 +53,6 @@ def evaluate_micro_burst_window(
     provisioned_gsus: int,
     tps_per_gsu: float = 2_015.0,
     peak_10s_tps: float | None = None,
-    burst_credit_pct: float | None = None,
     *,
     model: str | None = None,
     peak_30s_tps: float | None = None,
@@ -120,14 +64,13 @@ def evaluate_micro_burst_window(
     """
     spec = resolve_model_family(model)
     gsus = max(0, provisioned_gsus)
+    credit_pct = spec.burst_credit_pct
     if spec.family == "claude_3p":
         refill_window_seconds = spec.bucket_short_seconds
         long_window_seconds = spec.bucket_long_seconds
-        credit_pct = spec.burst_credit_pct if burst_credit_pct is None else burst_credit_pct
     else:
         refill_window_seconds = 1 if gsus >= 50 else 10
         long_window_seconds = None
-        credit_pct = spec.burst_credit_pct if burst_credit_pct is None else burst_credit_pct
 
     committed_tps = gsus * tps_per_gsu
     effective_window_tps_ceiling = committed_tps * (1.0 + max(0.0, credit_pct))
@@ -240,29 +183,19 @@ def evaluate_prefix_cache_dilution(
 
     rr_cached = shared_tokens * h_effective
     rr_uncached = dynamic_tokens + (shared_tokens - rr_cached)
-    rr_burndown = (rr_cached * cached_token_weight) + (
-        rr_uncached * uncached_token_weight
-    )
+    rr_burndown = (rr_cached * cached_token_weight) + (rr_uncached * uncached_token_weight)
 
     sticky_tps = sticky_burndown * rps
     rr_tps = rr_burndown * rps
 
     inflation_mult = rr_burndown / sticky_burndown if sticky_burndown > 0 else 1.0
     sticky_gsus = (
-        max(1, math.ceil(sticky_tps / tps_per_gsu))
-        if sticky_tps > 0 and tps_per_gsu > 0
-        else 0
+        max(1, math.ceil(sticky_tps / tps_per_gsu)) if sticky_tps > 0 and tps_per_gsu > 0 else 0
     )
-    rr_gsus = (
-        max(1, math.ceil(rr_tps / tps_per_gsu))
-        if rr_tps > 0 and tps_per_gsu > 0
-        else 0
-    )
+    rr_gsus = max(1, math.ceil(rr_tps / tps_per_gsu)) if rr_tps > 0 and tps_per_gsu > 0 else 0
     wasted_gsus = max(0, rr_gsus - sticky_gsus)
     savings_pct = (
-        ((rr_burndown - sticky_burndown) / rr_burndown) * 100.0
-        if rr_burndown > 0
-        else 0.0
+        ((rr_burndown - sticky_burndown) / rr_burndown) * 100.0 if rr_burndown > 0 else 0.0
     )
 
     return PrefixCacheAudit(
@@ -270,6 +203,7 @@ def evaluate_prefix_cache_dilution(
         shared_prefix_ratio=round(prefix_ratio, 4),
         baseline_cache_hit_rate=round(h_sticky, 4),
         num_round_robin_endpoints=n_endpoints,
+        requests_per_second=rps,
         effective_cache_hit_rate=round(h_effective, 4),
         sticky_burndown_tokens=round(sticky_burndown, 2),
         round_robin_burndown_tokens=round(rr_burndown, 2),
@@ -294,7 +228,7 @@ def evaluate_model_tier_prefix_cache(
     num_replicas: int = 8,
 ) -> ModelTierPrefixCacheAudit:
     """Evaluate model-tier prefix-cache block alignment, Block-0 contamination, and routing hash."""
-    norm = _normalize_model(model)
+    norm = normalize_model_id(model)
     spec = resolve_model_family(norm)
     total_in = max(1, total_input_tokens)
     static_in = min(max(0, static_prefix_tokens), total_in)

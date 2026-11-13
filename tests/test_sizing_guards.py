@@ -41,9 +41,7 @@ def test_forecast_follows_rising_daily_peaks() -> None:
     sparse, total_minutes = build_demo_throughput(days=5, by_region=False)
     series = sparse["gemini-3.8-flash"]
     first_day = min(series).date()
-    grown = {
-        ts: int(v * (1.0 + 0.1 * (ts.date() - first_day).days)) for ts, v in series.items()
-    }
+    grown = {ts: int(v * (1.0 + 0.1 * (ts.date() - first_day).days)) for ts, v in series.items()}
     rec = compute_recommendations({"gemini-3.8-flash": grown}, total_minutes)[0]
     assert rec.forecast_24h_peak_tpm > max(grown.values())
 
@@ -76,9 +74,15 @@ def test_suffixed_self_hosted_profile_still_resolves() -> None:
     ("method", "path", "body"),
     [
         ("post", "/api/v1/optimize", {"model": "claude-sonnet-9", "tpm_series": [1.0]}),
-        ("post", "/api/v1/chargeback", {"model": "claude-sonnet-9",
-                                        "hourly_consumed_tpm_by_tenant": {"a": [1.0]},
-                                        "provisioned_gsus": 1}),
+        (
+            "post",
+            "/api/v1/chargeback",
+            {
+                "model": "claude-sonnet-9",
+                "hourly_consumed_tpm_by_tenant": {"a": [1.0]},
+                "provisioned_gsus": 1,
+            },
+        ),
         ("post", "/api/v1/finops/scavenger", {"model": "claude-sonnet-9"}),
         ("post", "/api/v1/finops/schedule", {"model": "claude-sonnet-9"}),
         ("post", "/api/v1/finops/folder-pooling", {"model": "claude-sonnet-9"}),

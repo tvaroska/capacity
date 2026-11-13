@@ -41,11 +41,14 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         re.compile(r"~/" + r"customers|~/notes|~/ideas|~/robotics|~/projects"),
     ),
     ("Cookie-gated GCS URL", re.compile(r"https://storage\.cloud\.google\.com/")),
+    # A kernel release string names the machine image a file was generated on.
+    ("Machine kernel string", re.compile(r"\bLinux-\d+\.\d+\.\d+-")),
 ]
 
 
 def _resolve_ast_grep_binary() -> str | None:
-    venv_candidate = Path(sys.executable).resolve().parent / "ast-grep"
+    # Not `.resolve()`: the venv's python is a symlink, and ast-grep sits beside the link.
+    venv_candidate = Path(sys.executable).parent / "ast-grep"
     if venv_candidate.is_file():
         return str(venv_candidate)
     which_candidate = shutil.which("ast-grep")
@@ -57,28 +60,47 @@ def _resolve_ast_grep_binary() -> str | None:
     return None
 
 
+TEXT_SUFFIXES = {
+    ".py",
+    ".md",
+    ".yaml",
+    ".yml",
+    ".toml",
+    ".svg",
+    ".json",
+    ".jsonl",
+    ".txt",
+    ".lock",
+    ".sh",
+    ".html",
+    ".cfg",
+    ".ini",
+}
+# Shipped files the suffix list would miss. The local `.env` is left out: it is never tracked.
+TEXT_NAMES = {
+    "Dockerfile",
+    "LICENSE",
+    ".dockerignore",
+    ".gcloudignore",
+    ".gitignore",
+    ".env.example",
+    ".python-version",
+}
+
+
 def _iter_tracked_text_files() -> list[Path]:
     files: list[Path] = []
     for path in sorted(REPO_ROOT.rglob("*")):
         if not path.is_file():
             continue
-        rel_parts = path.relative_to(REPO_ROOT).parts
-        if any((p.startswith(".") and p != ".stitch") or p in EXCLUDED_DIRS for p in rel_parts):
+        *dirs, name = path.relative_to(REPO_ROOT).parts
+        if any((d.startswith(".") and d != ".stitch") or d in EXCLUDED_DIRS for d in dirs):
             continue
-        if rel_parts == ("tests", "test_repo_hygiene.py"):
+        if (*dirs, name) == ("tests", "test_repo_hygiene.py"):
             continue
-        if path.suffix.lower() in {
-            ".py",
-            ".md",
-            ".yaml",
-            ".yml",
-            ".toml",
-            ".svg",
-            ".json",
-            ".jsonl",
-            ".txt",
-            ".lock",
-        }:
+        if name in TEXT_NAMES or (
+            not name.startswith(".") and path.suffix.lower() in TEXT_SUFFIXES
+        ):
             files.append(path)
     return files
 
@@ -144,14 +166,12 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     rules_path = REPO_ROOT / "specs" / "ast.rules.yaml"
     assert rules_path.is_file(), "Missing specs/ast.rules.yaml declarative AST contract"
     raw = rules_path.read_text(encoding="utf-8")
-    blocks = [
-        c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)
-    ]
+    blocks = [c for c in re.split(r"(?m)^---\s*$", raw) if re.search(r"(?m)^id:\s*\S+", c)]
     assert len(blocks) >= 5, "Expected >= 5 rules in specs/ast.rules.yaml"
 
     ast_grep = _resolve_ast_grep_binary()
     if ast_grep is None:
-        pytest.skip("ast-grep binary not installed on this runner")
+        pytest.fail("ast-grep is missing; run `uv sync --extra dev` (a skip would hide the gate)")
 
     live = subprocess.run(  # noqa: S603
         [ast_grep, "scan", "--rule", str(rules_path)],
@@ -165,9 +185,7 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
     for idx, chunk in enumerate(blocks):
         id_m = re.search(r"(?m)^id:\s*(\S+)", chunk)
         sev_m = re.search(r"(?m)^severity:\s*(\S+)", chunk)
-        path_m = re.search(
-            r'(?m)^\s+test_path:\s*["\']?([^"\'\r\n]+)["\']?\s*$', chunk
-        )
+        path_m = re.search(r'(?m)^\s+test_path:\s*["\']?([^"\'\r\n]+)["\']?\s*$', chunk)
         assert id_m is not None and sev_m is not None and path_m is not None
         rule_id = id_m.group(1)
         assert sev_m.group(1) == "error", f"{rule_id} must set severity: error"
@@ -201,3 +219,17 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
                     assert res.returncode == expected_rc, (
                         f"{rule_id} ({key}) failed on {snippet!r}:\n{res.stdout}"
                     )
+
+
+def test_code_is_formatted() -> None:
+    ruff = Path(sys.executable).parent / "ruff"
+    result = subprocess.run(  # noqa: S603
+        [str(ruff), "format", "--check", "--no-cache", "capacity", "tests", "benchmarks"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"Run `ruff format capacity tests benchmarks`:\n{result.stdout}{result.stderr}"
+    )

@@ -1,0 +1,11 @@
+{
+  "config": [
+    "ruff:C90",
+    "ruff:PLR0911",
+    "ruff:PLR0912",
+    "ruff:PLR0913",
+    "ruff:PLR0915"
+  ],
+  "oversized_files": {},
+  "narration_comments": 0
+}

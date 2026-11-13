@@ -6,7 +6,7 @@ import importlib.util
 import json
 import sys
 import types
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -23,13 +23,18 @@ from capacity.burst import (
     evaluate_micro_burst_window,
     evaluate_model_tier_prefix_cache,
 )
-from capacity.capacity import DEFAULT_GSU_CONFIG, normalize_model_id, require_capacity
+from capacity.capacity import DEFAULT_GSU_CONFIG, require_capacity
 from capacity.cli import app as cli_app
 from capacity.core import PARTNER_TOKEN_METRIC, PT_METRIC, fetch_throughput
 from capacity.finops import evaluate_folder_pooling
 from capacity.forecasting import UnknownModelError
 from capacity.gateway import generate_gateway_bundle
-from capacity.model_families import CLAUDE_GSU_CONFIG, is_partner_claude, resolve_model_family
+from capacity.model_families import (
+    CLAUDE_GSU_CONFIG,
+    is_partner_claude,
+    normalize_model_id,
+    resolve_model_family,
+)
 from capacity.telemetry_parsers import parse_inference_server_telemetry
 
 runner = CliRunner()
@@ -72,9 +77,7 @@ def _partner_ts(
     )
 
 
-def _pt_ts(
-    model: str, loc: str, req_type: str, pts: list[tuple[datetime, int]]
-) -> SimpleNamespace:
+def _pt_ts(model: str, loc: str, req_type: str, pts: list[tuple[datetime, int]]) -> SimpleNamespace:
     return SimpleNamespace(
         resource=SimpleNamespace(labels={"model_id": model, "location": loc}),
         metric=SimpleNamespace(labels={"request_type": req_type}),
@@ -232,12 +235,11 @@ async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models()
         "capacity.core.monitoring_v3.MetricServiceAsyncClient",
         return_value=_FakeMonitoringClient(),
     ):
-        sparse_claude, _ = await fetch_throughput(
-            "demo-proj", days=1, models=["claude-sonnet-4-6"]
-        )
+        sparse_claude, _ = await fetch_throughput("demo-proj", days=1, models=["claude-sonnet-4-6"])
 
     # Expected: 10000*1.0 + 5000*0.1 + 4000*1.25 + 1000*2.0 + 2000*5.0 = 27,500
-    assert sparse_claude == {"claude-sonnet-4-6": {t0: 27_500}}
+    minute = t0 - timedelta(minutes=1)
+    assert sparse_claude == {"claude-sonnet-4-6": {minute: 27_500}}
     assert len(captured_filters) == 1
     assert PARTNER_TOKEN_METRIC in captured_filters[0]
 
@@ -250,8 +252,8 @@ async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models()
             "demo-proj", days=1, models=["gemini-3.8-flash", "claude-sonnet-4-6"]
         )
 
-    assert sparse_mixed["gemini-3.8-flash"][t0] == 120_900
-    assert sparse_mixed["claude-sonnet-4-6"][t0] == 27_500
+    assert sparse_mixed["gemini-3.8-flash"][minute] == 120_900
+    assert sparse_mixed["claude-sonnet-4-6"][minute] == 27_500
     assert any(PT_METRIC in f for f in captured_filters)
     assert any(PARTNER_TOKEN_METRIC in f for f in captured_filters)
 
@@ -462,7 +464,10 @@ def test_claude_cli_and_api_endpoints_plus_portal() -> None:
         "/api/v1/finops/folder-pooling",
         json={
             "model": "claude-sonnet-4-6",
-            "hourly_tpm_by_project": {"spoke-a": [210_000.0, 42_000.0], "spoke-b": [42_000.0, 210_000.0]},
+            "hourly_tpm_by_project": {
+                "spoke-a": [210_000.0, 42_000.0],
+                "spoke-b": [42_000.0, 210_000.0],
+            },
         },
     )
     assert fp_res.status_code == 200

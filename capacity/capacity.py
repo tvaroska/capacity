@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 
 from capacity.burst import (
@@ -16,11 +16,12 @@ from capacity.burst import (
 from capacity.finops import optimize_hybrid_commitment
 from capacity.forecasting import (
     DEFAULT_PERCENTILES,
+    TelemetryPort,
     UnknownModelError,
     holts_linear_trend,
     percentile,
 )
-from capacity.model_families import CLAUDE_GSU_CONFIG, resolve_model_family
+from capacity.model_families import CLAUDE_GSU_CONFIG, normalize_model_id, resolve_model_family
 from capacity.models import (
     ModelRecommendation,
     OptimizeRequest,
@@ -32,58 +33,42 @@ from capacity.self_hosted import DEFAULT_SELF_HOSTED_PROFILES
 
 # Built-in GSU capacity table (sustained burndown Tokens Per Minute per 1 GSU = TPS_per_GSU * 60).
 DEFAULT_GSU_CONFIG: dict[str, int] = {
-    "gemini-2.5-pro": 39_000,          # 650 TPS/GSU
-    "gemini-2.5-flash": 161_400,       # 2,690 TPS/GSU
+    "gemini-2.5-pro": 39_000,  # 650 TPS/GSU
+    "gemini-2.5-flash": 161_400,  # 2,690 TPS/GSU
     "gemini-2.5-flash-lite": 484_200,  # 8,070 TPS/GSU
-    "gemini-3-pro": 30_000,            # 500 TPS/GSU
-    "gemini-3.1-pro": 30_000,          # 500 TPS/GSU
-    "gemini-3-flash": 120_900,         # 2,015 TPS/GSU
+    "gemini-3-pro": 30_000,  # 500 TPS/GSU
+    "gemini-3.1-pro": 30_000,  # 500 TPS/GSU
+    "gemini-3-flash": 120_900,  # 2,015 TPS/GSU
     "gemini-3.1-flash-lite": 241_800,  # 4,030 TPS/GSU
-    "gemini-3.5-pro": 30_000,          # 500 TPS/GSU
-    "gemini-3.5-flash": 120_900,       # 2,015 TPS/GSU
+    "gemini-3.5-pro": 30_000,  # 500 TPS/GSU
+    "gemini-3.5-flash": 120_900,  # 2,015 TPS/GSU
     "gemini-3.5-flash-lite": 241_800,  # 4,030 TPS/GSU
-    "gemini-3.6-flash": 120_900,       # 2,015 TPS/GSU
-    "gemini-3.7-flash": 120_900,       # 2,015 TPS/GSU
-    "gemini-3.7-flash-fast": 60_450,   # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
-    "gemini-3.8-flash": 120_900,       # 2,015 TPS/GSU
-    "gemini-3.8-flash-fast": 60_450,   # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
-    "gemini-4-argon": 30_000,          # 500 TPS/GSU
-    "gemini-4.0-pro": 30_000,          # 500 TPS/GSU
-    "gemini-embedding-2": 302_400,     # 5,040 TPS/GSU (256-token minimum request floor)
-    "gemini-2.0-flash": 161_400,       # 2,690 TPS/GSU
+    "gemini-3.6-flash": 120_900,  # 2,015 TPS/GSU
+    "gemini-3.7-flash": 120_900,  # 2,015 TPS/GSU
+    "gemini-3.7-flash-fast": 60_450,  # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
+    "gemini-3.8-flash": 120_900,  # 2,015 TPS/GSU
+    "gemini-3.8-flash-fast": 60_450,  # 1,007.5 TPS/GSU (~2.5x decode speed @ 2.0x compute weight)
+    "gemini-4-argon": 30_000,  # 500 TPS/GSU
+    "gemini-4.0-pro": 30_000,  # 500 TPS/GSU
+    "gemini-embedding-2": 302_400,  # 5,040 TPS/GSU (256-token minimum request floor)
+    "gemini-2.0-flash": 161_400,  # 2,690 TPS/GSU
     "gemini-2.0-flash-lite": 484_200,  # 8,070 TPS/GSU
     **CLAUDE_GSU_CONFIG,
 }
 
 ENV_PREFIX = "GSU_CAPACITY_"
 
-_VERSION_SUFFIX_RE = re.compile(
-    r"(?:-(?:00\d|preview(?:-\d{2}-\d{2})?|exp(?:-\d{4})?|rc\d*|ga|qcd|latest|v\d+))+$",
-    re.IGNORECASE,
-)
+# ADR-002: without sub-second gateway logs, the peak is assumed at this multiple of the mean.
+ASSUMED_PEAK_TO_MEAN_RATIO = 1.9
 
 
-def normalize_model_id(model_id: str) -> str:
-    """Normalize a model identifier by stripping publisher prefixes, folders, and suffixes."""
-    cleaned = model_id.strip().lower()
-    if "@" in cleaned:
-        cleaned = cleaned.split("@", 1)[0]
-    if "/" in cleaned:
-        cleaned = cleaned.rsplit("/", 1)[-1]
-    cleaned = _VERSION_SUFFIX_RE.sub("", cleaned)
-    return cleaned
-
-
-def load_gsu_config(include_defaults: bool = True, mode: str = "gsu") -> dict[str, int]:
+def load_gsu_config(mode: str = "gsu") -> dict[str, int]:
     """Load capacity config (TPM per 1 GSU or 1 GPU replica) plus GSU_CAPACITY_* env vars."""
     config: dict[str, int] = {}
-    if include_defaults:
-        if mode == "self-hosted":
-            config.update(
-                {k: prof.tpm_per_replica for k, prof in DEFAULT_SELF_HOSTED_PROFILES.items()}
-            )
-        else:
-            config.update(DEFAULT_GSU_CONFIG)
+    if mode == "self-hosted":
+        config.update({k: prof.tpm_per_replica for k, prof in DEFAULT_SELF_HOSTED_PROFILES.items()})
+    else:
+        config.update(DEFAULT_GSU_CONFIG)
     for key, val in os.environ.items():
         if key.startswith(ENV_PREFIX):
             model_name = key[len(ENV_PREFIX) :].lower().replace("_", "-")
@@ -103,13 +88,9 @@ def load_gsu_config(include_defaults: bool = True, mode: str = "gsu") -> dict[st
     return config
 
 
-def require_capacity(
-    model_id: str,
-    gsu_config: dict[str, int] | None = None,
-    mode: str = "gsu",
-) -> int:
-    """Return TPM per GSU (or replica) for a model, raising instead of guessing a default."""
-    cap = find_capacity(model_id, gsu_config, mode=mode)
+def require_capacity(model_id: str, gsu_config: dict[str, int] | None = None) -> int:
+    """Return TPM per GSU for a model, raising instead of guessing a default."""
+    cap = find_capacity(model_id, gsu_config)
     if cap is None:
         env_key = ENV_PREFIX + normalize_model_id(model_id).upper().replace(".", "_").replace(
             "-", "_"
@@ -121,24 +102,15 @@ def require_capacity(
     return cap
 
 
-def find_capacity(
-    model_id: str,
-    gsu_config: dict[str, int] | None = None,
-    mode: str = "gsu",
-) -> int | None:
-    cfg = gsu_config if gsu_config is not None else load_gsu_config(mode=mode)
+def find_capacity(model_id: str, gsu_config: dict[str, int] | None = None) -> int | None:
+    """Return TPM per GSU (or replica) for a listed model, or None; never a neighbour's rate."""
+    cfg = gsu_config if gsu_config is not None else load_gsu_config()
     raw = model_id.lower().split("@", 1)[0]
     if "/" in raw:
         raw = raw.rsplit("/", 1)[-1]
-    norm = normalize_model_id(raw)
-
-    for candidate in (raw, norm):
+    for candidate in (raw, normalize_model_id(raw)):
         if candidate in cfg:
             return cfg[candidate]
-
-    for prefix in sorted(cfg, key=len, reverse=True):
-        if raw.startswith(prefix) or norm.startswith(prefix):
-            return cfg[prefix]
     return None
 
 
@@ -162,7 +134,6 @@ def compute_recommendations(
     sparse_series: dict[str, dict[datetime, int]],
     total_minutes: int,
     percentiles: Sequence[int] | None = None,
-    gsu_config: dict[str, int] | None = None,
     active_only: bool = False,
     by_region: bool = False,
     forecast_steps: int = 24,
@@ -171,8 +142,7 @@ def compute_recommendations(
     """Compute both 24x7 (`all_hours`) and business-hours (`active_hours`) recommendations."""
     if percentiles is None:
         percentiles = DEFAULT_PERCENTILES
-    if gsu_config is None:
-        gsu_config = load_gsu_config(mode=mode)
+    gsu_config = load_gsu_config(mode=mode)
 
     results: list[ModelRecommendation] = []
     for raw_key in sorted(sparse_series):
@@ -187,7 +157,7 @@ def compute_recommendations(
         else:
             folder_name, model_id = None, model_part
 
-        cap = find_capacity(model_id, gsu_config, mode=mode)
+        cap = find_capacity(model_id, gsu_config)
         active_vals = sorted(v for v in minute_map.values() if v > 0)
         active_count = len(active_vals)
         num_zeros = max(0, total_minutes - active_count)
@@ -196,11 +166,7 @@ def compute_recommendations(
         all_hours_map = _build_percentile_map(all_vals, percentiles, cap)
         active_hours_map = _build_percentile_map(active_vals, percentiles, cap)
         primary_map = active_hours_map if active_only else all_hours_map
-        duty_cycle = (
-            round((active_count / total_minutes) * 100.0, 2)
-            if total_minutes > 0
-            else 0.0
-        )
+        duty_cycle = round((active_count / total_minutes) * 100.0, 2) if total_minutes > 0 else 0.0
 
         daily_peaks: dict[date, int] = {}
         for ts, v in minute_map.items():
@@ -247,7 +213,6 @@ def build_response(
     sparse_series: dict[str, dict[datetime, int]],
     total_minutes: int,
     percentiles: Sequence[int] | None = None,
-    gsu_config: dict[str, int] | None = None,
     active_only: bool = False,
     by_region: bool = False,
     forecast_steps: int = 24,
@@ -257,7 +222,6 @@ def build_response(
         sparse_series,
         total_minutes,
         percentiles,
-        gsu_config,
         active_only=active_only,
         by_region=by_region,
         forecast_steps=forecast_steps,
@@ -273,12 +237,43 @@ def build_response(
     )
 
 
+async def recommend_capacity(
+    source: TelemetryPort,
+    *,
+    project: str | Sequence[str],
+    days: int,
+    percentiles: Sequence[int] | None = None,
+    models: Sequence[str] | None = None,
+    regions: Sequence[str] | None = None,
+    active_only: bool = False,
+    by_region: bool = False,
+    folder_map: Mapping[str, str] | None = None,
+    forecast_steps: int = 24,
+    mode: str = "gsu",
+) -> RecommendationResponse:
+    """Read throughput through a telemetry port and size it: the one path CLI and API share."""
+    sparse, total_minutes = await source.fetch_series(
+        project, days, models, regions, by_region=by_region, folder_map=folder_map, mode=mode
+    )
+    label = project if isinstance(project, str) else ",".join(project)
+    return build_response(
+        label,
+        days,
+        sparse,
+        total_minutes,
+        percentiles,
+        active_only=active_only,
+        by_region=by_region,
+        forecast_steps=forecast_steps,
+        mode=mode,
+    )
+
+
 def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
     """Shared GSU Newsvendor + sub-second micro-burst + prefix-cache orchestrator (CLI & API)."""
     norm_model = normalize_model_id(req.model)
     spec = resolve_model_family(norm_model)
-    cfg = load_gsu_config()
-    tpm_per_gsu = require_capacity(norm_model, cfg)
+    tpm_per_gsu = require_capacity(norm_model)
     tps_per_gsu = tpm_per_gsu / 60.0
 
     req_weighted_burndown = compute_weighted_burndown_tokens(
@@ -302,33 +297,36 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         active_duty_cycle_pct=req.active_duty_cycle_pct,
     )
 
-    has_traffic = (
-        any(float(v) > 0.0 for v in req.tpm_series)
-        or (req.sixty_sec_tpm is not None and req.sixty_sec_tpm > 0.0)
-        or (req.peak_1s_tps is not None and req.peak_1s_tps > 0.0)
-        or (req.peak_30s_tps is not None and req.peak_30s_tps > 0.0)
-    )
-    if not has_traffic:
-        prov_gsus = 0
-        sixty_s = 0.0
-        peak_1s = 0.0
-    else:
-        prov_gsus = max(1, commitment.optimal_gsus)
-        committed_tpm = prov_gsus * tpm_per_gsu
-        default_60s = committed_tpm * 0.62
-        sixty_s = req.sixty_sec_tpm if req.sixty_sec_tpm is not None else default_60s
-        default_1s = (sixty_s / 60.0) * 1.90
-        peak_1s = req.peak_1s_tps if req.peak_1s_tps is not None else default_1s
+    peak_minute_tpm = max(req.tpm_series, default=0.0)
+    burst_inputs = (req.sixty_sec_tpm, req.peak_1s_tps, req.peak_10s_tps, req.peak_30s_tps)
+    has_traffic = peak_minute_tpm > 0.0 or any(v is not None and v > 0.0 for v in burst_inputs)
 
-    micro_burst = evaluate_micro_burst_window(
-        sixty_sec_tpm=sixty_s,
-        peak_1s_tps=peak_1s,
-        provisioned_gsus=prov_gsus,
-        tps_per_gsu=tps_per_gsu,
-        peak_10s_tps=req.peak_10s_tps,
-        model=norm_model,
-        peak_30s_tps=req.peak_30s_tps,
-    )
+    # A burst verdict needs burst data. With none supplied there is nothing to audit, and an
+    # invented load would hand every workload the same alarm.
+    micro_burst = None
+    if any(v is not None for v in burst_inputs):
+        sixty_s = req.sixty_sec_tpm if req.sixty_sec_tpm is not None else peak_minute_tpm
+        peak_1s = (
+            req.peak_1s_tps
+            if req.peak_1s_tps is not None
+            else (sixty_s / 60.0) * ASSUMED_PEAK_TO_MEAN_RATIO
+        )
+        micro_burst = evaluate_micro_burst_window(
+            sixty_sec_tpm=sixty_s,
+            peak_1s_tps=peak_1s,
+            provisioned_gsus=max(1, commitment.optimal_gsus) if has_traffic else 0,
+            tps_per_gsu=tps_per_gsu,
+            peak_10s_tps=req.peak_10s_tps,
+            model=norm_model,
+            peak_30s_tps=req.peak_30s_tps,
+        )
+
+    if req.requests_per_second is not None:
+        requests_per_second = req.requests_per_second
+    elif req_weighted_burndown > 0.0:
+        requests_per_second = (peak_minute_tpm / 60.0) / req_weighted_burndown
+    else:
+        requests_per_second = 0.0
 
     prefix_cache = evaluate_prefix_cache_dilution(
         total_input_tokens=req.total_input_tokens,
@@ -338,7 +336,7 @@ def evaluate_gsu_optimization(req: OptimizeRequest) -> OptimizeResponse:
         tps_per_gsu=tps_per_gsu,
         cached_token_weight=spec.standard_cached_read_weight,
         uncached_token_weight=spec.standard_input_weight,
-        requests_per_second=req.requests_per_second if has_traffic else 0.0,
+        requests_per_second=requests_per_second if has_traffic else 0.0,
     )
 
     return OptimizeResponse(

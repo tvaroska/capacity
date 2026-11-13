@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 
-from capacity.forecasting import percentile
+from capacity.forecasting import argmin_convex_int, percentile
 from capacity.model_families import resolve_model_family
 from capacity.models import (
     DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR,
@@ -36,7 +36,7 @@ DEFAULT_TENANT_RAW_TOKEN_WEIGHTS: dict[str, float] = {
 }
 
 
-def _clean_finite_series(series: Sequence[int | float]) -> list[float]:
+def clean_finite_series(series: Sequence[int | float]) -> list[float]:
     if not series:
         return [0.0]
     cleaned: list[float] = []
@@ -58,13 +58,13 @@ def optimize_hybrid_commitment(
     fsp_discount_pct: float = 0.0,
     active_duty_cycle_pct: float = 100.0,
 ) -> HybridCommitmentRecommendation:
-    """Solve the Newsvendor critical fractile and integer GSU grid for lowest monthly cost.
+    """Solve the Newsvendor critical fractile and the GSU count with the lowest monthly cost.
 
     When `tpm_series` contains active-hours-only samples (e.g. an 8x5 daytime slice), pass
     `active_duty_cycle_pct` (such as `23.81` for 40h/168h) so variable spillover is integrated
     over active monthly minutes rather than 24x7 `43,200` minutes while PT still bills 24x7.
     """
-    cleaned_series = _clean_finite_series(tpm_series)
+    cleaned_series = clean_finite_series(tpm_series)
     gsu_cap = max(1, int(tpm_per_gsu))
     duty_fraction = min(1.0, max(1e-6, float(active_duty_cycle_pct) / 100.0))
     active_month_minutes = MINUTES_PER_MONTH * duty_fraction
@@ -87,9 +87,7 @@ def optimize_hybrid_commitment(
     full_24x7_millions = (gsu_cap * MINUTES_PER_MONTH) / 1_000_000.0
     full_24x7_spill_equiv = full_24x7_millions * effective_spill_per_1m
     breakeven_utilization = (
-        min(1.0, effective_gsu_price / full_24x7_spill_equiv)
-        if full_24x7_spill_equiv > 0
-        else 1.0
+        min(1.0, effective_gsu_price / full_24x7_spill_equiv) if full_24x7_spill_equiv > 0 else 1.0
     )
     active_window_breakeven = (
         min(1.0, effective_gsu_price / spillover_equiv_active_per_gsu)
@@ -111,45 +109,15 @@ def optimize_hybrid_commitment(
     def _evaluate_monthly_cost(candidate_gsus: int) -> tuple[float, float, float]:
         pt_cost = candidate_gsus * effective_gsu_price
         committed_tpm = candidate_gsus * gsu_cap
-        mean_spill_tpm = (
-            sum(max(0.0, x - committed_tpm) for x in cleaned_series) / n_points
-        )
+        mean_spill_tpm = sum(max(0.0, x - committed_tpm) for x in cleaned_series) / n_points
         monthly_spill_millions = (mean_spill_tpm * active_month_minutes) / 1_000_000.0
         spill_cost = monthly_spill_millions * effective_spill_per_1m
         return pt_cost + spill_cost, pt_cost, spill_cost
 
     max_gsus = math.ceil(cleaned_series[-1] / gsu_cap) if cleaned_series[-1] > 0 else 0
-    quantile_tpm = percentile(cleaned_series, critical_quantile * 100.0)
-    seed_gsus = math.floor(quantile_tpm / gsu_cap)
-
-    candidates = sorted(
-        {
-            g
-            for g in [
-                *range(min(max_gsus + 1, 501)),
-                seed_gsus - 1,
-                seed_gsus,
-                seed_gsus + 1,
-                p50_gsus,
-                p90_gsus,
-                p99_gsus,
-                max_gsus,
-            ]
-            if 0 <= g <= max_gsus
-        }
-    )
-    if max_gsus > 500:
-        for g in range(max(0, seed_gsus - 100), min(max_gsus + 1, seed_gsus + 101)):
-            candidates.append(g)
-        candidates = sorted(set(candidates))
-
-    best_gsus = 0
-    best_total, best_pt, best_spill = _evaluate_monthly_cost(0)
-    for g in candidates:
-        tot, pt_c, sp_c = _evaluate_monthly_cost(g)
-        if tot < best_total:
-            best_gsus = g
-            best_total, best_pt, best_spill = tot, pt_c, sp_c
+    # Monthly cost is convex in the commitment, so bisection finds the exact optimum.
+    best_gsus = argmin_convex_int(lambda g: _evaluate_monthly_cost(g)[0], max_gsus)
+    best_total, best_pt, best_spill = _evaluate_monthly_cost(best_gsus)
 
     mean_total_tpm = sum(cleaned_series) / n_points
     paygo_100pct_cost = (
@@ -162,9 +130,7 @@ def optimize_hybrid_commitment(
         (savings_vs_paygo / paygo_100pct_cost) * 100.0 if paygo_100pct_cost > 0 else 0.0
     )
     savings_vs_p99 = max(0.0, p99_pt_cost - best_total)
-    savings_vs_p99_pct = (
-        (savings_vs_p99 / p99_pt_cost) * 100.0 if p99_pt_cost > 0 else 0.0
-    )
+    savings_vs_p99_pct = (savings_vs_p99 / p99_pt_cost) * 100.0 if p99_pt_cost > 0 else 0.0
 
     return HybridCommitmentRecommendation(
         model=model,
@@ -287,9 +253,7 @@ def compute_focus_chargeback(
     tenant_rows: list[TenantChargebackRow] = []
     for t in sorted(normalized_tenants):
         w_share = (
-            tenant_tokens[t] / total_tokens_all_tenants
-            if total_tokens_all_tenants > 0
-            else 0.0
+            tenant_tokens[t] / total_tokens_all_tenants if total_tokens_all_tenants > 0 else 0.0
         )
         raw_share = (
             tenant_raw_tokens[t] / total_raw_tokens_all_tenants
@@ -323,9 +287,7 @@ def compute_focus_chargeback(
         provisioned_gsus=gsus,
         total_commitment_cost_usd=round(total_commitment_cost, 2),
         active_utilization_pct=round((sum_active_util / max_hours) * 100.0, 2),
-        effective_utilization_with_waterfill_pct=round(
-            (sum_effective_util / max_hours) * 100.0, 2
-        ),
+        effective_utilization_with_waterfill_pct=round((sum_effective_util / max_hours) * 100.0, 2),
         active_consumed_cost_usd=round(total_active_cost, 2),
         unallocated_idle_cost_before_waterfill_usd=round(unallocated_before_wf, 2),
         reclaimed_waterfill_cost_usd=round(total_waterfill_cost, 2),
@@ -409,26 +371,43 @@ def _is_edf_feasible(
     return True
 
 
+_EXACT_SEARCH_MAX_JOBS = 24
+# Jobs of equal value defeat the value bound and cost 2^N node visits (24 tied jobs: over
+# 3 seconds). The budget caps the search at roughly 50 ms.
+_EXACT_SEARCH_NODE_BUDGET = 250_000
+
+
+def _admit_by_value_density(
+    eligible: Sequence[DeadlineJobSpec],
+    cum_residual: Sequence[float],
+    horizon_hours: int,
+) -> list[DeadlineJobSpec]:
+    ranked = sorted(
+        eligible,
+        key=lambda j: (-(j.value_usd / max(1.0, j.burndown_tokens)), j.deadline_hour),
+    )
+    chosen: list[DeadlineJobSpec] = []
+    for cand in ranked:
+        if _is_edf_feasible([*chosen, cand], cum_residual, horizon_hours):
+            chosen.append(cand)
+    return chosen
+
+
 def _select_optimal_deadline_subset(
     jobs_in: Sequence[DeadlineJobSpec],
     cum_residual: Sequence[float],
     horizon_hours: int,
 ) -> set[str]:
-    """Select the deadline-feasible subset maximizing SLA-protected business value (`<= 24` B&B)."""
+    """Select the deadline-feasible subset maximizing SLA-protected business value.
+
+    Exact branch-and-bound up to 24 jobs and a node budget. Past either limit the answer is
+    the greedy value-density ranking, or the search's best admission if that is worth more.
+    """
     eligible = [j for j in jobs_in if 1 <= j.deadline_hour <= horizon_hours]
     if not eligible:
         return set()
-
-    if len(eligible) > 24:
-        ranked = sorted(
-            eligible,
-            key=lambda j: (-(j.value_usd / max(1.0, j.burndown_tokens)), j.deadline_hour),
-        )
-        chosen: list[DeadlineJobSpec] = []
-        for cand in ranked:
-            if _is_edf_feasible([*chosen, cand], cum_residual, horizon_hours):
-                chosen.append(cand)
-        return {j.job_id for j in chosen}
+    if len(eligible) > _EXACT_SEARCH_MAX_JOBS:
+        return {j.job_id for j in _admit_by_value_density(eligible, cum_residual, horizon_hours)}
 
     edf_jobs = sorted(eligible, key=lambda j: (j.deadline_hour, -j.value_usd, j.job_id))
     gains = [j.value_usd for j in edf_jobs]
@@ -440,9 +419,13 @@ def _select_optimal_deadline_subset(
     best_tokens = float("inf")
     best_ids: set[str] = set()
     current_ids: list[str] = []
+    nodes_visited = 0
 
     def _dfs(idx: int, cum_tokens: float, acc_gain: float) -> None:
-        nonlocal best_gain, best_tokens, best_ids
+        nonlocal best_gain, best_tokens, best_ids, nodes_visited
+        nodes_visited += 1
+        if nodes_visited > _EXACT_SEARCH_NODE_BUDGET:
+            return
         if acc_gain + suffix_gain[idx] < best_gain - 1e-9:
             return
         if idx == len(edf_jobs):
@@ -462,6 +445,10 @@ def _select_optimal_deadline_subset(
         _dfs(idx + 1, cum_tokens, acc_gain)
 
     _dfs(0, 0.0, 0.0)
+    if nodes_visited > _EXACT_SEARCH_NODE_BUDGET:
+        greedy = _admit_by_value_density(eligible, cum_residual, horizon_hours)
+        if sum(j.value_usd for j in greedy) > best_gain + 1e-9:
+            return {j.job_id for j in greedy}
     return best_ids
 
 
@@ -652,6 +639,11 @@ def evaluate_folder_pooling(
     )
 
 
+# The scorecard takes no model, so it weighs tokens at the standard 1P burndown rates.
+_KPI_CACHED_WEIGHT = 0.10
+_KPI_OUTPUT_WEIGHT = 4.0
+
+
 def compute_finops_kpis(
     total_amortized_cost_usd: float = 24_500.0,
     uncached_input_tokens: int = 1_200_000_000,
@@ -662,8 +654,6 @@ def compute_finops_kpis(
     verified_outcomes: int = 140_000,
     hourly_reserved_burndown_capacity: float = 72_540_000.0,
     weekly_consumed_burndown_tokens: float = 6_950_000_000.0,
-    cached_weight: float = 0.10,
-    output_weight: float = 4.0,
 ) -> FinOpsKpiScorecard:
     """Compute the 5 standardized FinOps for AI KPIs (bridging CPVO to bq-eval)."""
     cost = max(0.0, float(total_amortized_cost_usd))
@@ -676,8 +666,8 @@ def compute_finops_kpis(
 
     weighted_burndown = (
         float(u_in)
-        + (float(c_in) * cached_weight)
-        + (float(out_tok + think_tok + retry_tok) * output_weight)
+        + (float(c_in) * _KPI_CACHED_WEIGHT)
+        + (float(out_tok + think_tok + retry_tok) * _KPI_OUTPUT_WEIGHT)
     )
     cpwt_1m = (cost / (weighted_burndown / 1_000_000.0)) if weighted_burndown > 0 else 0.0
     cpvo = cost / outcomes
@@ -687,7 +677,7 @@ def compute_finops_kpis(
 
     total_prompt = u_in + c_in
     csr_pct = (
-        (c_in / total_prompt) * (1.0 - cached_weight) * 100.0 if total_prompt > 0 else 0.0
+        (c_in / total_prompt) * (1.0 - _KPI_CACHED_WEIGHT) * 100.0 if total_prompt > 0 else 0.0
     )
 
     weekly_reserved_capacity = max(1.0, float(hourly_reserved_burndown_capacity) * 168.0)

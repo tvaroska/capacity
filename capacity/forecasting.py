@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
@@ -59,15 +59,11 @@ class LocalTraceAdapter:
         proj_list = [project] if isinstance(project, str) else list(project)
         first_proj = proj_list[0] if proj_list else "local-project"
         folder_prefix = (
-            f"{folder_map[first_proj]}/"
-            if folder_map and first_proj in folder_map
-            else ""
+            f"{folder_map[first_proj]}/" if folder_map and first_proj in folder_map else ""
         )
         if self._sparse is not None:
             raw_sparse = self._sparse
-            total_mins = (
-                self._total_minutes if self._total_minutes is not None else days * 24 * 60
-            )
+            total_mins = self._total_minutes if self._total_minutes is not None else days * 24 * 60
         else:
             raw_sparse, total_mins = build_demo_throughput(
                 days=days, by_region=by_region, mode=mode
@@ -109,6 +105,22 @@ def percentile(sorted_vals: Sequence[int | float], p: float) -> int:
     if f == c:
         return round(sorted_vals[f])
     return round(sorted_vals[f] + (k - f) * (sorted_vals[c] - sorted_vals[f]))
+
+
+def argmin_convex_int(cost: Callable[[int], float], upper: int) -> int:
+    """Smallest minimiser of a convex cost over the integers 0..upper, by bisection.
+
+    A convex cost stops falling exactly once, so the first `n` whose successor is no cheaper
+    is the optimum. That takes about log2(upper) evaluations instead of `upper`.
+    """
+    lo, hi = 0, max(0, upper)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if cost(mid + 1) < cost(mid):
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
 
 
 def holts_linear_trend(

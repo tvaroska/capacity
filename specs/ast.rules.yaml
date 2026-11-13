@@ -1,6 +1,7 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Enforces Hexagonal Driving-Port & Cloud-SDK isolation on pure sizing/FinOps math modules
-# and static security invariants across capacity Python modules.
+# Every module in capacity/ is pure sizing/FinOps maths unless it is one of the adapters ignored
+# below, so a new module is covered without editing this file. tests/test_isolation_guard.py
+# holds the same rule in Python; tests/test_repo_hygiene.py runs every example listed here.
 
 id: library-never-imports-examples
 language: Python
@@ -26,58 +27,65 @@ rule:
 id: core-math-never-imports-driving-ports
 language: Python
 severity: error
-message: "Hexagonal violation: pure sizing/FinOps/gateway/model modules must never import FastAPI or Typer driving ports."
+message: "Hexagonal violation: only api.py, cli.py and cli_formatters.py may import FastAPI, Typer or Uvicorn."
 files:
-  - "capacity/burst.py"
-  - "capacity/finops.py"
-  - "capacity/self_hosted.py"
-  - "capacity/telemetry_parsers.py"
-  - "capacity/capacity.py"
-  - "capacity/gateway.py"
-  - "capacity/forecasting.py"
-  - "capacity/model_families.py"
-  - "capacity/models.py"
+  - "capacity/**/*.py"
+ignores:
+  - "capacity/api.py"
+  - "capacity/cli.py"
+  - "capacity/cli_formatters.py"
 metadata:
   test_path: "capacity/finops.py"
   invalid_examples:
     - "import fastapi"
     - "from typer import Typer"
+    - "import uvicorn"
   valid_examples:
     - "from capacity.models import FocusChargebackReport"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+(fastapi|typer)(\\b|\\.)"
+      regex: "^import\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+(fastapi|typer)(\\b|\\.)"
+      regex: "^from\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
 ---
 id: domain-math-never-imports-gcp-adapter
 language: Python
 severity: error
-message: "Hexagonal violation: pure domain modules must import capacity.forecasting, never google.cloud or capacity.core."
+message: "Hexagonal violation: pure modules never import google.cloud or the capacity adapters (core, api, cli)."
 files:
-  - "capacity/burst.py"
-  - "capacity/finops.py"
-  - "capacity/self_hosted.py"
-  - "capacity/telemetry_parsers.py"
-  - "capacity/capacity.py"
-  - "capacity/gateway.py"
-  - "capacity/forecasting.py"
-  - "capacity/model_families.py"
-  - "capacity/models.py"
+  - "capacity/**/*.py"
+ignores:
+  - "capacity/api.py"
+  - "capacity/cli.py"
+  - "capacity/cli_formatters.py"
+  - "capacity/core.py"
 metadata:
   test_path: "capacity/capacity.py"
   invalid_examples:
     - "from google.cloud import monitoring_v3"
+    - "from google import cloud"
     - "from capacity.core import fetch_throughput"
+    - "import capacity.core"
+    - "from capacity import core"
+    - "from capacity import finops, core"
+    - "from . import core"
+    - "from .core import fetch_throughput"
+    - "from capacity import api"
   valid_examples:
     - "from capacity.forecasting import holts_linear_trend"
+    - "from capacity import finops"
+    - "from capacity.coreutils import helper"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+(google\\.cloud|capacity\\.core)(\\b|\\.)"
+      regex: "^import\\s+(google\\.cloud|capacity\\.(core|api|cli|cli_formatters))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+(google\\.cloud|capacity\\.core)(\\b|\\.)"
+      regex: "^from\\s+(google\\.cloud|(capacity)?\\.(core|api|cli|cli_formatters))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(capacity|\\.)\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_formatters)\\b"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?cloud\\b"
 ---
 id: no-subprocess-shell-true
 language: Python

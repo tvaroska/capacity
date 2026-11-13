@@ -4,8 +4,6 @@ from __future__ import annotations
 
 PORTAL_CLIENT_SCRIPT = """
   <script>
-    window.CAPACITY_SHOWCASE_DATA = __EMBEDDED_JSON__;
-
     function switchTab(panelId, btnEl) {
       document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
       document.querySelectorAll('.tab-btn').forEach(el => el.classList.remove('active'));

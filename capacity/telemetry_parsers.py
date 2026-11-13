@@ -6,14 +6,15 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from capacity.burst import compute_weighted_burndown_tokens
-from capacity.models import DictAccessModel
+from capacity.model_families import resolve_model_family
+from capacity.models import StrictModel
 
 
-class VllmTelemetrySnapshot(DictAccessModel):
+class VllmTelemetrySnapshot(StrictModel):
     """Normalized telemetry extracted from Phase 2 vLLM/SGLang Prometheus scrapes or JSONL logs."""
 
     source_format: str
@@ -40,10 +41,12 @@ _PROM_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
 _SCRAPE_TS_COMMENT_RE = re.compile(r"^#\s*scrape_timestamp_seconds\s+(\d+(?:\.\d+)?)", re.I)
 
 
+# Scrapes without timestamps are read as one minute apart, and a lone scrape as one minute.
+_ASSUMED_SCRAPE_WINDOW_MINUTES = 1.0
+
+
 def parse_inference_server_telemetry(
-    raw_content: str,
-    default_model: str = "llama-3.3-70b-fp8",
-    scrape_window_minutes: float = 1.0,
+    raw_content: str, default_model: str = "llama-3.3-70b-fp8"
 ) -> VllmTelemetrySnapshot:
     """Parse Phase 2 vLLM/SGLang Prometheus `/metrics` text or OTel/vLLM JSONL logs."""
     stripped = raw_content.strip()
@@ -74,21 +77,15 @@ def parse_inference_server_telemetry(
 
     if first_non_comment.startswith(("{", "[")):
         return _parse_jsonl_or_json_logs(stripped, default_model=default_model)
-    return _parse_prometheus_metrics(
-        stripped, default_model=default_model, scrape_window_minutes=scrape_window_minutes
-    )
+    return _parse_prometheus_metrics(stripped, default_model=default_model)
 
 
 def load_inference_server_file(
-    path: Path | str,
-    default_model: str = "llama-3.3-70b-fp8",
-    scrape_window_minutes: float = 1.0,
+    path: Path | str, default_model: str = "llama-3.3-70b-fp8"
 ) -> VllmTelemetrySnapshot:
     """Load and parse a vLLM/SGLang Prometheus `/metrics` snapshot or JSONL request log file."""
     content = Path(path).read_text(encoding="utf-8")
-    return parse_inference_server_telemetry(
-        content, default_model=default_model, scrape_window_minutes=scrape_window_minutes
-    )
+    return parse_inference_server_telemetry(content, default_model=default_model)
 
 
 def _normalize_epoch_seconds(ts_raw: float) -> float:
@@ -99,10 +96,24 @@ def _normalize_epoch_seconds(ts_raw: float) -> float:
     return ts_raw
 
 
+def _interval_burndown(prompt_tokens: int, generated_tokens: int, cached_tokens: int) -> float:
+    """Weighted burndown for counter totals accumulated over a scrape interval.
+
+    A scrape total is many requests added up, so the per-request rule that reprices prompts
+    over 200K tokens must not apply to it: a busy minute is not one long prompt.
+    """
+    spec = resolve_model_family(None)
+    prompt = max(0, prompt_tokens)
+    cached = min(max(0, cached_tokens), prompt)
+    return (
+        (prompt - cached) * spec.standard_input_weight
+        + cached * spec.standard_cached_read_weight
+        + max(0, generated_tokens) * spec.standard_output_weight
+    )
+
+
 def _parse_prometheus_metrics(
-    text: str,
-    default_model: str = "llama-3.3-70b-fp8",
-    scrape_window_minutes: float = 1.0,
+    text: str, default_model: str = "llama-3.3-70b-fp8"
 ) -> VllmTelemetrySnapshot:
     model_name = default_model
     kv_usage_pct = 0.0
@@ -192,7 +203,7 @@ def _parse_prometheus_metrics(
 
         for idx in range(1, len(scrapes)):
             prev, curr = scrapes[idx - 1], scrapes[idx]
-            dt_min = max(1e-3, scrape_window_minutes)
+            dt_min = _ASSUMED_SCRAPE_WINDOW_MINUTES
             if "_ts" in prev and "_ts" in curr and curr["_ts"] > prev["_ts"]:
                 dt_min = max(1.0 / 60.0, (curr["_ts"] - prev["_ts"]) / 60.0)
 
@@ -220,12 +231,7 @@ def _parse_prometheus_metrics(
 
             step_hit = h_d / q_d if q_d > 0 else (c_d / p_d if p_d > 0 else 0.0)
             step_cached = round(c_d if c_d > 0 else p_d * step_hit)
-            step_w = compute_weighted_burndown_tokens(
-                input_tokens=round(p_d),
-                output_tokens=round(g_d),
-                thoughts_tokens=0,
-                cached_tokens=step_cached,
-            )
+            step_w = _interval_burndown(round(p_d), round(g_d), step_cached)
             interval_tpms.append(round(step_w / dt_min, 2))
 
         hit_rate = (
@@ -238,12 +244,7 @@ def _parse_prometheus_metrics(
         effective_cached = round(
             cached_delta_total if cached_delta_total > 0 else prompt_delta_total * hit_rate
         )
-        weighted_total = compute_weighted_burndown_tokens(
-            input_tokens=prompt_int,
-            output_tokens=gen_int,
-            thoughts_tokens=0,
-            cached_tokens=effective_cached,
-        )
+        weighted_total = _interval_burndown(prompt_int, gen_int, effective_cached)
         mean_tpm = round(sum(interval_tpms) / len(interval_tpms), 2) if interval_tpms else 0.0
         return VllmTelemetrySnapshot(
             source_format="prometheus",
@@ -275,14 +276,9 @@ def _parse_prometheus_metrics(
     effective_cached = round(cached_tokens or (prompt_tokens * hit_rate))
     prompt_int = round(prompt_tokens)
     gen_int = round(generation_tokens)
-    weighted_total = compute_weighted_burndown_tokens(
-        input_tokens=prompt_int,
-        output_tokens=gen_int,
-        thoughts_tokens=0,
-        cached_tokens=effective_cached,
-    )
+    weighted_total = _interval_burndown(prompt_int, gen_int, effective_cached)
 
-    eff_window_min = max(1e-3, float(scrape_window_minutes))
+    eff_window_min = _ASSUMED_SCRAPE_WINDOW_MINUTES
     if uptime_seconds > 0.0:
         eff_window_min = max(eff_window_min, uptime_seconds / 60.0)
     elif (
@@ -334,7 +330,14 @@ def _float_from_maps(maps: Sequence[Mapping[str, object]], keys: Sequence[str]) 
     return fv if math.isfinite(fv) else 0.0
 
 
-def _bucket_utc_timestamp(rec: Mapping[str, object], fallback_idx: int) -> tuple[str, str]:
+# Bounds on what one log may expand to: the hours between its first and last record, and the
+# tenant-by-hour matrix those hours are padded into.
+_MAX_HOURLY_SPAN = 8_784
+_MAX_TENANT_HOUR_CELLS = 1_000_000
+
+
+def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
+    """Return a record's UTC time, or fail: a log without times has no rate to size from."""
     attrs = rec.get("attributes")
     attr_map = attrs if isinstance(attrs, Mapping) else {}
     raw_ts = (
@@ -346,25 +349,51 @@ def _bucket_utc_timestamp(rec: Mapping[str, object], fallback_idx: int) -> tuple
         or attr_map.get("timestamp")
     )
     if raw_ts is None:
-        h = fallback_idx // 120
-        m = (fallback_idx // 2) % 60
-        return f"synthetic-h{h:02d}:m{m:02d}", f"synthetic-h{h:02d}"
+        raise ValueError(
+            f"record {index + 1} has no timestamp (expected minute, timestamp, start_time, "
+            "timeUnixNano, startTimeUnixNano or attributes.timestamp)"
+        )
 
-    if isinstance(raw_ts, (int, float)) or (
-        isinstance(raw_ts, str) and re.fullmatch(r"\d+(?:\.\d+)?", raw_ts.strip())
-    ):
-        sec = _normalize_epoch_seconds(float(raw_ts))
-        dt = datetime.fromtimestamp(sec, tz=UTC)
-        return dt.strftime("%Y-%m-%dT%H:%M"), dt.strftime("%Y-%m-%dT%H")
-
-    ts_str = str(raw_ts).strip()
-    iso_candidate = ts_str[:-1] + "+00:00" if ts_str.endswith("Z") else ts_str
     try:
-        dt = datetime.fromisoformat(iso_candidate)
-        dt_utc = dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
-        return dt_utc.strftime("%Y-%m-%dT%H:%M"), dt_utc.strftime("%Y-%m-%dT%H")
-    except ValueError:
-        return ts_str[:16], ts_str[:13]
+        if isinstance(raw_ts, (int, float)) or (
+            isinstance(raw_ts, str) and re.fullmatch(r"\d+(?:\.\d+)?", raw_ts.strip())
+        ):
+            return datetime.fromtimestamp(_normalize_epoch_seconds(float(raw_ts)), tz=UTC)
+        ts_str = str(raw_ts).strip()
+        dt = datetime.fromisoformat(ts_str[:-1] + "+00:00" if ts_str.endswith("Z") else ts_str)
+    except (ValueError, OverflowError, OSError):
+        raise ValueError(f"record {index + 1} has an unreadable timestamp {raw_ts!r}") from None
+    return dt.replace(tzinfo=UTC) if dt.tzinfo is None else dt.astimezone(UTC)
+
+
+def _hourly_series_by_tenant(
+    tenant_hour_tokens: Mapping[str, Mapping[datetime, float]],
+) -> dict[str, list[float]]:
+    """Per-tenant hourly TPM for every hour from the first record to the last.
+
+    Hours without traffic stay in as zeros: dropping them would read two busy hours a day as
+    a fully used reservation.
+    """
+    observed = [hour for hours in tenant_hour_tokens.values() for hour in hours]
+    if not observed:
+        return {"default": [0.0]}
+    first, last = min(observed), max(observed)
+    span = int((last - first).total_seconds() // 3600) + 1
+    if span > _MAX_HOURLY_SPAN:
+        raise ValueError(
+            f"records span {span:,} hours; split the log into windows of at most "
+            f"{_MAX_HOURLY_SPAN:,} hours"
+        )
+    if span * len(tenant_hour_tokens) > _MAX_TENANT_HOUR_CELLS:
+        raise ValueError(
+            f"{len(tenant_hour_tokens):,} tenants over {span:,} hours exceeds "
+            f"{_MAX_TENANT_HOUR_CELLS:,} tenant-hours; split the log"
+        )
+    axis = [first + timedelta(hours=i) for i in range(span)]
+    return {
+        tenant: [round(hours.get(hour, 0.0) / 60.0, 2) for hour in axis]
+        for tenant, hours in tenant_hour_tokens.items()
+    }
 
 
 def _parse_jsonl_or_json_logs(
@@ -394,8 +423,8 @@ def _parse_jsonl_or_json_logs(
     weighted_total = 0.0
     kv_max = 0.0
     wait_max = 0.0
-    minute_buckets: dict[str, float] = {}
-    tenant_hour_tokens: dict[str, dict[str, float]] = {}
+    minute_buckets: dict[datetime, float] = {}
+    tenant_hour_tokens: dict[str, dict[datetime, float]] = {}
 
     for idx, rec in enumerate(records):
         usage = rec.get("usage")
@@ -409,9 +438,7 @@ def _parse_jsonl_or_json_logs(
             comp_details if isinstance(comp_details, Mapping) else {}
         )
         cache_creation = usage_map.get("cache_creation")
-        cc_map: Mapping[str, object] = (
-            cache_creation if isinstance(cache_creation, Mapping) else {}
-        )
+        cc_map: Mapping[str, object] = cache_creation if isinstance(cache_creation, Mapping) else {}
         attrs = rec.get("attributes")
         attr_map: Mapping[str, object] = attrs if isinstance(attrs, Mapping) else {}
         res_obj = rec.get("resource")
@@ -522,7 +549,8 @@ def _parse_jsonl_or_json_logs(
         kv_max = max(kv_max, kv_val * 100.0 if 0.0 < kv_val <= 1.0 else kv_val)
         wait_max = max(wait_max, wait_val)
 
-        minute_key, hour_key = _bucket_utc_timestamp(rec, idx)
+        minute_key = _record_time_utc(rec, idx).replace(second=0, microsecond=0)
+        hour_key = minute_key.replace(minute=0)
         minute_buckets[minute_key] = minute_buckets.get(minute_key, 0.0) + w_tok
 
         tenant_val = _lookup_first(
@@ -533,13 +561,7 @@ def _parse_jsonl_or_json_logs(
         t_hours = tenant_hour_tokens.setdefault(tenant or "default", {})
         t_hours[hour_key] = t_hours.get(hour_key, 0.0) + w_tok
 
-    all_hours = sorted({h for th in tenant_hour_tokens.values() for h in th})
-    tenant_series: dict[str, list[float]] = {}
-    for tenant, th in tenant_hour_tokens.items():
-        tenant_series[tenant] = [round(th.get(h, 0.0) / 60.0, 2) for h in all_hours]
-
-    if not tenant_series:
-        tenant_series = {"default": [0.0]}
+    tenant_series = _hourly_series_by_tenant(tenant_hour_tokens)
 
     hit_rate = cached_total / prompt_total if prompt_total > 0 else 0.0
     ordered_minutes = [minute_buckets[k] for k in sorted(minute_buckets)]

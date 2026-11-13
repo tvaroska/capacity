@@ -43,6 +43,8 @@ select = ["E", "W", "F", "I", "B", "C4", "UP", "S", "BLE", "ANN", "RUF"]
 [tool.ruff.lint.per-file-ignores]
 "**/tests/**/*.py" = ["S101", "ANN", "E501"]
 "**/benchmarks/**/*.py" = ["S311"]
+# LiteLLM hands its hooks untyped objects, so the generated callback takes `Any`.
+"**/capacity/litellm_burndown_callback.py" = ["ANN401"]
 
 [tool.mypy]
 python_version = "3.12"

@@ -55,7 +55,7 @@ uv run capacity recommend --demo --active-only --by-region
 uv run capacity recommend --demo --mode self-hosted --active-only --by-region
 
 # 3. Newsvendor Hybrid Commitment, 1s/10s Micro-Burst & Self-Hosted vLLM KV-Cache Audit
-uv run capacity optimize --model gemini-3.8-flash
+uv run capacity optimize --model gemini-3.8-flash --sixty-sec-tpm 150000 --peak-1s-tps 4750
 uv run capacity optimize --mode self-hosted --model llama-3.3-70b-fp8 --vllm-file examples/vllm_prometheus_multiscrape.txt
 
 # 4. Compile Production LiteLLM Proxy, Envoy AI Gateway (CEL) & GKE Inference Gateway (epp) Configs
@@ -63,7 +63,7 @@ uv run capacity gateway --target all --model gemini-3.8-flash --gsus 20 --rps 65
 
 # 5. Compute 3-Tier Overnight Residual Schedule & FOCUS 1.2 Two-Pool Chargeback
 uv run capacity schedule --model gemini-3.8-flash --gsus 20
-uv run capacity chargeback --model gemini-3.8-flash --gsus 10 --tenant-file examples/chargeback_tenants.json
+uv run capacity chargeback --model gemini-3.8-flash --gsus 10 --tenant-file examples/chargeback_tenants.json --waterfill-tpm 300000
 
 # 6. Replay or Re-Run the Open-Loop Level 3 Empirical Benchmark (10,000 Azure LLM Traces + Live SSE)
 uv run python -m benchmarks.run_l3_benchmark --offline
@@ -202,7 +202,7 @@ Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Re
 | **Monitoring & Governance** | `consumed_token_throughput` (pre-weighted) + Shared Folder `RHPT` | `token_count` (weighted client-side by token type) + project-scoped PT (central hub + gateway BU limits) |
 
 ```bash
-uv run capacity optimize --model claude-sonnet-4-6 --cache-write-5m-tokens 4000
+uv run capacity optimize --model claude-sonnet-4-6 --cache-write-5m-tokens 4000 --sixty-sec-tpm 12000 --peak-30s-tps 500
 uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 400
 ```
 
@@ -248,7 +248,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: bdbaa53e18c4...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 1b7b92189b64...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |

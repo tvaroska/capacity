@@ -24,6 +24,7 @@
   - [x] Unified apples-to-apples Disaggregated vs. Monolithic prefill scaling, unified 8-hour residual schedule defaults, upgraded Tier-1 admission to exact branch-and-bound value maximization, and enforced verbatim `README.md` stdout parity in [`tests/test_documentation_contract.py`](../tests/test_documentation_contract.py).
   - [x] Hardened `BurndownAndTrafficTypeLogger` with server-side Redis rolling minute counters (`1,024`-token pre-SSE floor + `cached_tokens` and `reasoning_tokens`), RFC-1035 K8s DNS labels, `yaml.safe_dump` serialization, multi-scrape Prometheus counter-reset rate parsing, nested OTel `gen_ai.usage.*` ingestion, and bounded finite API request validation.
   - [x] Added [`benchmarks/run_l3_benchmark.py`](../benchmarks/run_l3_benchmark.py), [`benchmarks/corpora/azure_llm_trace_10k.jsonl.gz`](../benchmarks/corpora/azure_llm_trace_10k.jsonl.gz), [`benchmarks/results/l3_receipt.json`](../benchmarks/results/l3_receipt.json), and [`tests/test_l3_receipt.py`](../tests/test_l3_receipt.py).
+- [x] **Pass F — Request Contract, Ingestion Accuracy & Invariant Tests (`v0.3.0`):** strict request models shared by the CLI and the API, whole-day live windows and zero-filled telemetry, exact commitment search at any size, default-deny package isolation, and exact-value tests for the `CRITICAL.md` and `ADR-006` rules that used to pass when inverted.
 
 ---
 

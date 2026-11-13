@@ -26,6 +26,7 @@ steps:
         uv sync --frozen --extra dev
         /workspace/.venv/bin/ast-grep scan --rule /workspace/specs/ast.rules.yaml
         /workspace/.venv/bin/ruff check capacity/ tests/ benchmarks/
+        /workspace/.venv/bin/ruff format --check capacity/ tests/ benchmarks/
         /workspace/.venv/bin/mypy capacity tests benchmarks
         /workspace/.venv/bin/pytest tests/ -v
 

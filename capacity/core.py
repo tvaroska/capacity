@@ -68,17 +68,13 @@ except ImportError:  # pragma: no cover
         class MetricServiceAsyncClient:
             def __init__(self, *_args: Any, **_kwargs: Any) -> None:  # noqa: ANN401
                 err_cls: Any = DefaultCredentialsError
-                raise err_cls(
-                    "google-cloud-monitoring is not installed or credentials missing."
-                )
+                raise err_cls("google-cloud-monitoring is not installed or credentials missing.")
 
     duration_pb2 = _DurationNamespace()
     monitoring_v3 = _MonitoringV3Fallback()  # type: ignore[assignment]
 
 PT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/consumed_token_throughput"
-PARTNER_TOKEN_METRIC = (
-    "aiplatform.googleapis.com/publisher/online_serving/token_count"  # noqa: S105
-)
+PARTNER_TOKEN_METRIC = "aiplatform.googleapis.com/publisher/online_serving/token_count"  # noqa: S105
 SELF_HOSTED_PREDICTION_METRIC = "aiplatform.googleapis.com/prediction/online/prediction_count"
 
 GROUP_BY_FIELDS = [
@@ -126,6 +122,30 @@ def _validate_identifier(field_name: str, value: str, pattern: str) -> str:
     return cleaned
 
 
+def _whole_day_window(now: datetime, days: int) -> tuple[datetime, datetime]:
+    """The last `days` complete UTC days before `now`.
+
+    A window cut mid-day hands the daily-peak forecast a partial first and last day, and the
+    forecast then moves with the hour the query happens to run.
+    """
+    end = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    return end - timedelta(days=days), end
+
+
+def _minute_start(end_time: Any) -> datetime:  # noqa: ANN401
+    """Key a 60-second point by the start of the minute it covers, not by its end.
+
+    Cloud Monitoring stamps an aligned point with the end of its interval, which would date
+    the 23:59 minute on the following day.
+    """
+    end = (
+        end_time
+        if isinstance(end_time, datetime)
+        else datetime.fromtimestamp(end_time.timestamp(), tz=UTC)
+    )
+    return end.replace(second=0, microsecond=0) - timedelta(minutes=1)
+
+
 def _build_filter(
     metric: str,
     regions: Sequence[str] | None = None,
@@ -145,18 +165,12 @@ def _build_filter(
     return " AND ".join(parts)
 
 
-def _build_aggregation(
-    group_by_fields: Sequence[str] | None = None,
-    aligner: int = monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
-    reducer: int = monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
-) -> monitoring_v3.Aggregation:
+def _build_aggregation(group_by_fields: Sequence[str]) -> monitoring_v3.Aggregation:
     return monitoring_v3.Aggregation(
         alignment_period=duration_pb2.Duration(seconds=60),
-        per_series_aligner=aligner,
-        cross_series_reducer=reducer,
-        group_by_fields=list(
-            group_by_fields if group_by_fields is not None else GROUP_BY_FIELDS
-        ),
+        per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
+        group_by_fields=list(group_by_fields),
     )
 
 
@@ -202,7 +216,6 @@ async def fetch_throughput(
     folder_map: Mapping[str, str] | None = None,
     mode: str = "gsu",
     tokens_per_prediction: int = 1_800,
-    include_partner_models: bool = False,
 ) -> tuple[dict[str, dict[datetime, int]], int]:
     """Fetch per-minute token throughput across one or more GCP projects."""
     raw_projects = [project] if isinstance(project, str) else list(project)
@@ -226,9 +239,8 @@ async def fetch_throughput(
             "or pass `--demo` / `--trace-file` for offline simulation."
         ) from exc
 
-    now = datetime.now(UTC).replace(second=0, microsecond=0)
-    start = now - timedelta(days=days)
-    interval = monitoring_v3.TimeInterval(start_time=start, end_time=now)
+    start, end = _whole_day_window(datetime.now(UTC), days)
+    interval = monitoring_v3.TimeInterval(start_time=start, end_time=end)
     total_minutes = days * 24 * 60
 
     sparse: dict[str, dict[datetime, int]] = defaultdict(lambda: defaultdict(int))
@@ -237,16 +249,11 @@ async def fetch_throughput(
     if mode == "self-hosted":
         agg = _build_aggregation(group_by_fields=SELF_HOSTED_GROUP_BY_FIELDS)
         pred_filter = _build_filter(SELF_HOSTED_PREDICTION_METRIC, regions)
-        tasks = [
-            _query_series(client, proj, pred_filter, interval, agg)
-            for proj in project_list
-        ]
+        tasks = [_query_series(client, proj, pred_filter, interval, agg) for proj in project_list]
         results = await asyncio.gather(*tasks)
         for proj_id, series_list in zip(project_list, results, strict=False):
             folder_prefix = (
-                f"{folder_map[proj_id]}/"
-                if folder_map and proj_id in folder_map
-                else ""
+                f"{folder_map[proj_id]}/" if folder_map and proj_id in folder_map else ""
             )
             for ts in series_list:
                 endpoint_id = ts.resource.labels.get("endpoint_id", "self-hosted-endpoint")
@@ -258,13 +265,7 @@ async def fetch_throughput(
                 base_key = f"{folder_prefix}{endpoint_id}"
                 key = f"{base_key}@{location}" if by_region else base_key
                 for pt in ts.points:
-                    dt = pt.interval.end_time
-                    if isinstance(dt, datetime):
-                        dt_key = dt.replace(second=0, microsecond=0)
-                    else:
-                        dt_key = datetime.fromtimestamp(dt.timestamp(), tz=UTC).replace(
-                            second=0, microsecond=0
-                        )
+                    dt_key = _minute_start(pt.interval.end_time)
                     val = int(pt.value.int64_value or round(pt.value.double_value))
                     sparse[key][dt_key] += val * max(1, tokens_per_prediction)
         return {k: dict(v) for k, v in sparse.items()}, total_minutes
@@ -272,7 +273,6 @@ async def fetch_throughput(
     has_partner_filter = bool(models_filter and any(is_partner_claude(m) for m in models_filter))
     has_1p_filter = bool(models_filter and any(not is_partner_claude(m) for m in models_filter))
     query_1p = models_filter is None or has_1p_filter
-    query_partner = include_partner_models or has_partner_filter
 
     coros = []
     coro_meta: list[tuple[str, bool]] = []
@@ -294,7 +294,7 @@ async def fetch_throughput(
             coros.append(_query_series(client, proj_id, shared_filter, interval, aggregation))
             coro_meta.append((proj_id, False))
 
-    if query_partner:
+    if has_partner_filter:
         partner_agg = _build_aggregation(group_by_fields=PARTNER_GROUP_BY_FIELDS)
         partner_filter = _build_filter(PARTNER_TOKEN_METRIC, regions)
         for proj_id in project_list:
@@ -304,19 +304,13 @@ async def fetch_throughput(
     all_series_lists = await asyncio.gather(*coros)
 
     for (proj_id, is_partner_query), series_list in zip(coro_meta, all_series_lists, strict=False):
-        folder_prefix = (
-            f"{folder_map[proj_id]}/"
-            if folder_map and proj_id in folder_map
-            else ""
-        )
+        folder_prefix = f"{folder_map[proj_id]}/" if folder_map and proj_id in folder_map else ""
         for ts in series_list:
             model_id = ts.resource.labels.get("model_id", "unknown")
             location = ts.resource.labels.get("location", "global")
             if is_partner_query and not is_partner_claude(model_id):
                 continue
-            if models_filter and not any(
-                model_id.lower().startswith(m) for m in models_filter
-            ):
+            if models_filter and not any(model_id.lower().startswith(m) for m in models_filter):
                 continue
             token_weight = (
                 _partner_token_weight(model_id, str(ts.metric.labels.get("type", "input")))
@@ -326,13 +320,7 @@ async def fetch_throughput(
             base_key = f"{folder_prefix}{model_id}"
             key = f"{base_key}@{location}" if by_region else base_key
             for pt in ts.points:
-                dt = pt.interval.end_time
-                if isinstance(dt, datetime):
-                    dt_key = dt.replace(second=0, microsecond=0)
-                else:
-                    dt_key = datetime.fromtimestamp(dt.timestamp(), tz=UTC).replace(
-                        second=0, microsecond=0
-                    )
+                dt_key = _minute_start(pt.interval.end_time)
                 val = int(pt.value.int64_value or round(pt.value.double_value))
                 sparse[key][dt_key] += round(val * token_weight) if is_partner_query else val
 

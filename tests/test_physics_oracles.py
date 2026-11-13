@@ -61,11 +61,20 @@ def _brute_force_deadline_oracle(
 def test_l2_knapsack_oracle_parity_and_no_literal_unset_header() -> None:
     # Classic greedy-density failure case: Job A ($520 / 61M = $8.52/1M) blocks B+C ($1,000 / 120M)
     jobs = [
-        DeadlineJobSpec(job_id="job-a", value_usd=520.0, burndown_tokens=61_000_000.0, deadline_hour=1),
-        DeadlineJobSpec(job_id="job-b", value_usd=500.0, burndown_tokens=60_000_000.0, deadline_hour=1),
-        DeadlineJobSpec(job_id="job-c", value_usd=500.0, burndown_tokens=60_000_000.0, deadline_hour=1),
         DeadlineJobSpec(
-            job_id="beyond-horizon", value_usd=9_000.0, burndown_tokens=10_000_000.0, deadline_hour=5
+            job_id="job-a", value_usd=520.0, burndown_tokens=61_000_000.0, deadline_hour=1
+        ),
+        DeadlineJobSpec(
+            job_id="job-b", value_usd=500.0, burndown_tokens=60_000_000.0, deadline_hour=1
+        ),
+        DeadlineJobSpec(
+            job_id="job-c", value_usd=500.0, burndown_tokens=60_000_000.0, deadline_hour=1
+        ),
+        DeadlineJobSpec(
+            job_id="beyond-horizon",
+            value_usd=9_000.0,
+            burndown_tokens=10_000_000.0,
+            deadline_hour=5,
         ),
     ]
     # 20 GSUs * 120,900 * 60 * 0.85 = 123,318,000 tokens in 1h; subtract 3,318,000 -> 120,000,000
@@ -118,8 +127,8 @@ def test_prefix_cache_dilution_scales_with_rps_and_zero_traffic_is_clean(tmp_pat
     assert res.exit_code == 0
     payload = json.loads(res.stdout)
     assert payload["commitment"]["optimal_gsus"] == 0
-    assert payload["micro_burst"]["illusion_detected"] is False
-    assert payload["micro_burst"]["gsus_required_for_zero_spillover"] == 0
+    assert payload["micro_burst"] is None
+    assert payload["prefix_cache"]["round_robin_gsus"] == 0
 
     sh_zero = evaluate_self_hosted_endpoint([0.0, 0.0, 0.0])
     assert sh_zero.p99_peak_replicas == 0
@@ -142,13 +151,17 @@ def test_active_duty_cycle_newsvendor_matches_zero_padded_week() -> None:
 
 
 def test_disaggregated_vs_monolithic_crossover_honesty() -> None:
-    low_qps = size_disaggregated_prefill_decode(peak_qps=0.1, avg_input_tokens=2_000, avg_output_tokens=200)
+    low_qps = size_disaggregated_prefill_decode(
+        peak_qps=0.1, avg_input_tokens=2_000, avg_output_tokens=200
+    )
     assert low_qps.monolithic_replicas == 1
     assert low_qps.total_disaggregated_replicas == 2
     assert low_qps.replica_delta == -1
     assert "Keep 1 monolithic" in low_qps.recommendation
 
-    high_qps = size_disaggregated_prefill_decode(peak_qps=18.0, avg_input_tokens=6_400, avg_output_tokens=450)
+    high_qps = size_disaggregated_prefill_decode(
+        peak_qps=18.0, avg_input_tokens=6_400, avg_output_tokens=450
+    )
     assert high_qps.prefill_replicas == 8
     assert high_qps.decode_replicas == 11
     assert high_qps.monolithic_replicas == 24
@@ -222,7 +235,9 @@ async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> No
         0.0,
         1.0,
     )
-    assert call1["litellm_params"]["metadata"]["weighted_burndown_tokens"] == pytest.approx(230_000.0)
+    assert call1["litellm_params"]["metadata"]["weighted_burndown_tokens"] == pytest.approx(
+        230_000.0
+    )
     assert len(redis.increments) == 2
 
     # Next call in same minute exceeds 200,000 funded ceiling -> flips to shared/priority!

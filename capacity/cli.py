@@ -9,18 +9,13 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from dotenv import load_dotenv
+from pydantic import ValidationError
 
-from capacity.capacity import (
-    build_response,
-    evaluate_gsu_optimization,
-    load_gsu_config,
-    normalize_model_id,
-    require_capacity,
-)
+from capacity.capacity import evaluate_gsu_optimization, recommend_capacity, require_capacity
 from capacity.cli_formatters import (
     load_sparse_from_trace_file,
     parse_folder_map,
@@ -29,26 +24,27 @@ from capacity.cli_formatters import (
     print_recommendations_table,
     print_self_hosted_audit,
 )
-from capacity.core import (
-    DEFAULT_DAYS,
-    DEFAULT_PERCENTILES,
-    GCPQueryError,
-    build_demo_throughput,
-    fetch_throughput,
-)
+from capacity.core import CloudMonitoringAdapter, GCPQueryError
 from capacity.finops import (
     DEFAULT_TENANT_RAW_TOKEN_WEIGHTS,
-    compute_finops_kpis,
     compute_focus_chargeback,
-    evaluate_batch_scavenger_economics,
-    evaluate_folder_pooling,
     schedule_residual_capacity,
 )
+from capacity.forecasting import (
+    DEFAULT_DAYS,
+    DEFAULT_PERCENTILES,
+    LocalTraceAdapter,
+    TelemetryPort,
+)
 from capacity.gateway import generate_gateway_bundle
+from capacity.model_families import normalize_model_id
 from capacity.models import (
-    DeadlineJobSpec,
+    ChargebackRequest,
+    GatewayConfigRequest,
     OptimizeRequest,
-    make_default_deadline_jobs,
+    ResidualScheduleRequest,
+    SelfHostedAuditRequest,
+    fields_of,
 )
 from capacity.portal import build_showcase_summary_payload, render_showcase_portal_html
 from capacity.self_hosted import (
@@ -56,7 +52,6 @@ from capacity.self_hosted import (
     evaluate_self_hosted_endpoint,
     load_inference_server_file,
     resolve_self_hosted_profile,
-    size_disaggregated_prefill_decode,
 )
 
 load_dotenv()
@@ -87,20 +82,13 @@ class GatewayTarget(StrEnum):
     all = "all"
 
 
-DEFAULT_SYNTHETIC_TPM_SERIES: list[float] = [
-    420_000.0,
-    390_000.0,
-    360_000.0,
-    310_000.0,
-    280_000.0,
-    250_000.0,
-    240_000.0,
-    220_000.0,
-    190_000.0,
-    160_000.0,
-    90_000.0,
-    40_000.0,
-]
+# Option defaults are read from the request models the API validates with, so the two ports
+# cannot drift apart. Every command then builds that request before it computes anything.
+_OPTIMIZE = OptimizeRequest.model_fields
+_SELF_HOSTED = SelfHostedAuditRequest.model_fields
+_GATEWAY = GatewayConfigRequest.model_fields
+_SCHEDULE = ResidualScheduleRequest.model_fields
+_CHARGEBACK = ChargebackRequest.model_fields
 
 DEFAULT_SYNTHETIC_TENANT_TPM: dict[str, list[float]] = {
     "claims-triage": [350_000.0] * 8 + [40_000.0] * 16,
@@ -110,12 +98,36 @@ DEFAULT_SYNTHETIC_TENANT_TPM: dict[str, list[float]] = {
 
 
 def _or_exit[T](fn: Callable[[], T]) -> T:
-    """Turn bad model/profile/config inputs into a one-line CLI error instead of a traceback."""
+    """Turn bad values, bad files and unknown models into a one-line error, not a traceback."""
     try:
         return fn()
-    except ValueError as exc:
+    except ValidationError as exc:
+        details = "; ".join(
+            f"{'.'.join(str(part) for part in err['loc']) or 'input'}: {err['msg']}"
+            for err in exc.errors()
+        )
+        typer.echo(f"Error: {details}", err=True)
+        raise typer.Exit(code=1) from exc
+    except (ValueError, TypeError, OSError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+
+def _fail(message: str) -> typer.Exit:
+    typer.echo(f"Error: {message}", err=True)
+    return typer.Exit(code=1)
+
+
+def _write_html(path: Path, html: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(html, encoding="utf-8")
+
+
+def _load_tpm_list(path: Path) -> list[float]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, list):
+        raise ValueError("--trace-file must contain a JSON array of numbers")
+    return [float(x) for x in raw]
 
 
 @app.command()
@@ -133,53 +145,45 @@ def demo(
 ) -> None:
     """Run the end-to-end Showcase demo across all 4 planes (zero cloud credentials needed)."""
     if html_out is not None:
-        html_out.parent.mkdir(parents=True, exist_ok=True)
-        html_out.write_text(
-            render_showcase_portal_html(static_export=True), encoding="utf-8"
-        )
+        _write_html(html_out, render_showcase_portal_html(static_export=True))
 
     payload = build_showcase_summary_payload()
     if output_format == OutputFormat.json:
         typer.echo(json.dumps(payload, indent=2))
         return
 
-    kpis = compute_finops_kpis()
-    scav = evaluate_batch_scavenger_economics()
-    fpool = evaluate_folder_pooling(
-        hourly_tpm_by_project={
-            "emea-wealth-spoke": [480_000.0, 520_000.0, 410_000.0, 90_000.0, 40_000.0, 30_000.0],
-            "amer-retail-spoke": [60_000.0, 80_000.0, 490_000.0, 560_000.0, 510_000.0, 90_000.0],
-            "apac-markets-spoke": [510_000.0, 110_000.0, 50_000.0, 40_000.0, 460_000.0, 530_000.0],
-        }
-    )
-    disagg = size_disaggregated_prefill_decode()
-    gw = generate_gateway_bundle()
+    kpis = payload["finops_kpis"]
+    fpool = payload["folder_pooling"]
+    scav = payload["scavenger"]
+    disagg = payload["disaggregated_sizing"]
+    audit = payload["gateway"]["litellm_audit"]
 
     typer.echo("=== Capacity v0.3.0 — End-to-End Executive Showcase Scorecard ===")
     typer.echo(
-        f"1. FinOps for AI KPIs:    CPVO=${kpis.cpvo_usd:.4f}/outcome | "
-        f"CPWT_1M=${kpis.cpwt_1m_usd:.4f} | TER={kpis.ter_pct:.1f}% | "
-        f"CSR={kpis.csr_pct:.1f}% | ECUR_168h={kpis.ecur_168h_pct:.1f}%"
+        f"1. FinOps for AI KPIs:    CPVO=${kpis['cpvo_usd']:.4f}/outcome | "
+        f"CPWT_1M=${kpis['cpwt_1m_usd']:.4f} | TER={kpis['ter_pct']:.1f}% | "
+        f"CSR={kpis['csr_pct']:.1f}% | ECUR_168h={kpis['ecur_168h_pct']:.1f}%"
     )
     typer.echo(
-        f"2. Folder RHPT Pooling:   Siloed={fpool.siloed_total_gsus} GSUs -> "
-        f"Pooled={fpool.pooled_folder_gsus} GSUs "
-        f"(Saved={fpool.stranded_gsus_saved} GSUs / ${fpool.monthly_savings_usd:,.0f}/mo)"
+        f"2. Folder RHPT Pooling:   Siloed={fpool['siloed_total_gsus']} GSUs -> "
+        f"Pooled={fpool['pooled_folder_gsus']} GSUs "
+        f"(Saved={fpool['stranded_gsus_saved']} GSUs / ${fpool['monthly_savings_usd']:,.0f}/mo)"
     )
     typer.echo(
-        f"3. Batch 0.5x Trap Saved: ${scav.double_payment_waste_avoided_usd:,.2f}/mo "
-        f"(Lifts PT utilization {scav.daytime_active_utilization_pct:.0f}% -> "
-        f"{scav.effective_utilization_after_scavenging_pct:.1f}%)"
+        f"3. Batch 0.5x Trap Saved: ${scav['double_payment_waste_avoided_usd']:,.2f}/mo "
+        f"(Lifts PT utilization {scav['daytime_active_utilization_pct']:.0f}% -> "
+        f"{scav['effective_utilization_after_scavenging_pct']:.1f}%)"
     )
     typer.echo(
-        f"4. Disaggregated P/D:     {disagg.prefill_replicas} Prefill + "
-        f"{disagg.decode_replicas} Decode Replicas "
-        f"(vs {disagg.monolithic_replicas} Monolithic, saves {disagg.replica_delta} replica[s])"
+        f"4. Disaggregated P/D:     {disagg['prefill_replicas']} Prefill + "
+        f"{disagg['decode_replicas']} Decode Replicas "
+        f"(vs {disagg['monolithic_replicas']} Monolithic, "
+        f"saves {disagg['replica_delta']} replica[s])"
     )
     typer.echo(
-        f"5. Multi-Gateway Audit:   LiteLLM ({gw.litellm_audit.total_prisma_rust_engines} "
-        f"Prisma engines, cooldown={gw.litellm_audit.anti_blackhole_cooldown_seconds}s, "
-        f"status={gw.litellm_audit.scale_status}) + Envoy CEL + GKE epp"
+        f"5. Multi-Gateway Audit:   LiteLLM ({audit['total_prisma_rust_engines']} "
+        f"Prisma engines, cooldown={audit['anti_blackhole_cooldown_seconds']}s, "
+        f"status={audit['scale_status']}) + Envoy CEL + GKE epp"
     )
     if html_out is not None:
         typer.echo(f"6. HTML Scorecard Saved:  {html_out}")
@@ -195,15 +199,9 @@ def recommend(
         ),
     ] = None,
     days: Annotated[int, typer.Option(help="Days of history")] = DEFAULT_DAYS,
-    percentile: Annotated[
-        list[int] | None, typer.Option(help="Percentile (repeatable)")
-    ] = None,
-    model: Annotated[
-        list[str] | None, typer.Option(help="Filter by model (repeatable)")
-    ] = None,
-    region: Annotated[
-        list[str] | None, typer.Option(help="Filter by region (repeatable)")
-    ] = None,
+    percentile: Annotated[list[int] | None, typer.Option(help="Percentile (repeatable)")] = None,
+    model: Annotated[list[str] | None, typer.Option(help="Filter by model (repeatable)")] = None,
+    region: Annotated[list[str] | None, typer.Option(help="Filter by region (repeatable)")] = None,
     active_only: Annotated[
         bool,
         typer.Option(
@@ -249,7 +247,9 @@ def recommend(
     ] = None,
     forecast_hours: Annotated[
         int,
-        typer.Option("--forecast-hours", help="Holt double-exponential smoothing horizon"),
+        typer.Option(
+            "--forecast-hours", min=0, max=168, help="Holt double-exponential smoothing horizon"
+        ),
     ] = 24,
     html_out: Annotated[
         Path | None,
@@ -266,83 +266,68 @@ def recommend(
     pcts = sorted(percentile) if percentile else DEFAULT_PERCENTILES
     for p in pcts:
         if not 0 <= p <= 100:
-            typer.echo(f"Error: percentile must be between 0 and 100, got {p}", err=True)
-            raise typer.Exit(code=1)
-
+            raise _fail(f"percentile must be between 0 and 100, got {p}")
     if days < 1:
-        typer.echo("Error: days must be >= 1", err=True)
-        raise typer.Exit(code=1)
+        raise _fail("days must be >= 1")
 
     env_proj = os.environ.get("GOOGLE_CLOUD_PROJECT")
     proj_list = project or ([env_proj] if env_proj else [])
-    proj_label = ",".join(proj_list) if proj_list else "demo-project"
     default_trace_model = (
         model[0]
         if model
         else ("llama-3.3-70b-fp8" if mode == CapacityMode.self_hosted else "gemini-3.8-flash")
     )
 
+    # With a trace or telemetry file, `--model` names the series; it is a filter otherwise.
+    model_filter = model
+    source: TelemetryPort
     if vllm_file is not None:
-        snap = load_inference_server_file(vllm_file, default_model=default_trace_model)
+        snap = _or_exit(
+            lambda: load_inference_server_file(vllm_file, default_model=default_trace_model)
+        )
         base_dt = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
-        sparse = {
-            snap.model: {
-                base_dt + timedelta(minutes=i): round(v)
-                for i, v in enumerate(snap.tpm_series)
-            }
-        }
-        total_minutes = max(days * 24 * 60, len(snap.tpm_series))
+        minutes = {base_dt + timedelta(minutes=i): round(v) for i, v in enumerate(snap.tpm_series)}
+        source = LocalTraceAdapter({snap.model: minutes}, max(days * 24 * 60, len(snap.tpm_series)))
+        model_filter = None
     elif trace_file is not None:
         sparse, total_minutes = _or_exit(
             lambda: load_sparse_from_trace_file(
                 trace_file, days, by_region, default_model=default_trace_model
             )
         )
+        source = LocalTraceAdapter(sparse, total_minutes)
+        model_filter = None
     elif demo:
-        sparse, total_minutes = build_demo_throughput(
-            days=days, by_region=by_region, mode=mode.value
-        )
+        source = LocalTraceAdapter()
+    elif proj_list:
+        source = CloudMonitoringAdapter()
     else:
-        if not proj_list:
-            typer.echo(
-                "Error: provide `--project <id>` or pass `--demo` / `--trace-file` "
-                "for offline mode.",
-                err=True,
-            )
-            raise typer.Exit(code=1)
-        try:
-            sparse, total_minutes = asyncio.run(
-                fetch_throughput(
-                    proj_list,
-                    days,
-                    model,
-                    region,
-                    by_region=by_region,
-                    folder_map=parse_folder_map(folder_map),
-                    mode=mode.value,
-                )
-            )
-        except (GCPQueryError, ValueError) as exc:
-            typer.echo(f"Error: {exc}", err=True)
-            raise typer.Exit(code=1) from exc
+        raise _fail("provide `--project <id>` or pass `--demo` / `--trace-file` for offline mode.")
 
-    resp = build_response(
-        proj_label,
-        days,
-        sparse,
-        total_minutes,
-        pcts,
-        active_only=active_only,
-        by_region=by_region,
-        forecast_steps=forecast_hours,
-        mode=mode.value,
-    )
+    folders = _or_exit(lambda: parse_folder_map(folder_map))
+    try:
+        resp = asyncio.run(
+            recommend_capacity(
+                source,
+                project=proj_list or ["demo-project"],
+                days=days,
+                percentiles=pcts,
+                models=model_filter,
+                regions=region,
+                active_only=active_only,
+                by_region=by_region,
+                folder_map=folders,
+                forecast_steps=forecast_hours,
+                mode=mode.value,
+            )
+        )
+    except (GCPQueryError, ValueError) as exc:
+        raise _fail(str(exc)) from exc
 
     if html_out is not None:
-        html_out.parent.mkdir(parents=True, exist_ok=True)
-        html_out.write_text(
+        _write_html(
+            html_out,
             render_showcase_portal_html(static_export=True, custom_recommendations=resp),
-            encoding="utf-8",
         )
 
     if output_format == OutputFormat.json:
@@ -353,9 +338,9 @@ def recommend(
 
 @app.command()
 def optimize(
-    model: Annotated[
-        str, typer.Option(help="Model or self-hosted profile ID")
-    ] = "gemini-3.8-flash",
+    model: Annotated[str, typer.Option(help="Model or self-hosted profile ID")] = _OPTIMIZE[
+        "model"
+    ].default,
     mode: Annotated[
         CapacityMode, typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'")
     ] = CapacityMode.gsu,
@@ -367,25 +352,28 @@ def optimize(
         Path | None,
         typer.Option("--vllm-file", help="Phase 2 vLLM/SGLang Prometheus or JSONL log file"),
     ] = None,
-    gsu_price: Annotated[float, typer.Option(help="Monthly price per 1 GSU in USD")] = 2_000.0,
+    gsu_price: Annotated[float, typer.Option(help="Monthly price per 1 GSU in USD")] = _OPTIMIZE[
+        "gsu_monthly_price_usd"
+    ].default,
     paygo_per_1m: Annotated[
         float, typer.Option(help="Base Standard PayGo price per 1M burndown tokens in USD")
-    ] = 0.50,
+    ] = _OPTIMIZE["paygo_per_1m_burndown_tokens_usd"].default,
     spillover_tier: Annotated[
         str, typer.Option(help="Spillover tier: priority (1.8x), standard (1.0x), flex (0.5x)")
-    ] = "priority",
+    ] = _OPTIMIZE["spillover_tier"].default,
     fsp_discount_pct: Annotated[
         float, typer.Option(help="Flexible Savings Plan (FSP) discount percentage (0-50)")
-    ] = 0.0,
+    ] = _OPTIMIZE["fsp_discount_pct"].default,
     active_duty_pct: Annotated[
         float,
         typer.Option(
             "--active-duty-pct",
             help="Percentage of week represented by active-only trace (100 for 24x7 trace)",
         ),
-    ] = 100.0,
+    ] = _OPTIMIZE["active_duty_cycle_pct"].default,
     sixty_sec_tpm: Annotated[
-        float | None, typer.Option(help="60-second average TPM for micro-burst window audit")
+        float | None,
+        typer.Option(help="Measured 60-second TPM; the micro-burst audit needs it or a peak"),
     ] = None,
     peak_1s_tps: Annotated[
         float | None, typer.Option(help="Peak 1-second TPS burst for micro-burst window audit")
@@ -398,101 +386,102 @@ def optimize(
     ] = None,
     input_tokens: Annotated[
         int, typer.Option(help="Input tokens per concurrency wave / request")
-    ] = 20_000,
+    ] = _OPTIMIZE["total_input_tokens"].default,
     output_tokens: Annotated[
         int, typer.Option(help="Output completion tokens per request")
-    ] = 1_000,
+    ] = _OPTIMIZE["output_tokens"].default,
     thoughts_tokens: Annotated[
         int, typer.Option(help="Reasoning / thought tokens per request")
-    ] = 500,
-    cached_tokens: Annotated[int, typer.Option(help="Cached prefix tokens per request")] = 16_000,
+    ] = _OPTIMIZE["thoughts_tokens"].default,
+    cached_tokens: Annotated[
+        int, typer.Option(help="Cached prefix tokens per request")
+    ] = _OPTIMIZE["cached_tokens"].default,
     cache_write_5m_tokens: Annotated[
         int, typer.Option(help="3P Claude 5m ephemeral cache-write tokens per request (1.25x)")
-    ] = 0,
+    ] = _OPTIMIZE["cache_write_5m_tokens"].default,
     cache_write_1h_tokens: Annotated[
         int, typer.Option(help="3P Claude 1-hour ephemeral cache-write tokens per request (2.0x)")
-    ] = 0,
+    ] = _OPTIMIZE["cache_write_1h_tokens"].default,
     shared_prefix_ratio: Annotated[
         float, typer.Option(help="Fraction of input prompt that is shared static prefix (0-1)")
-    ] = 0.80,
+    ] = _OPTIMIZE["shared_prefix_ratio"].default,
     baseline_cache_hit_rate: Annotated[
         float, typer.Option(help="Sticky-routed prefix cache hit rate (0-1)")
-    ] = 0.80,
+    ] = _OPTIMIZE["baseline_cache_hit_rate"].default,
     endpoints: Annotated[
         int, typer.Option(help="Number of round-robin load-balanced endpoints/replicas")
-    ] = 8,
-    min_replicas: Annotated[int, typer.Option(help="Self-hosted min_replica_count")] = 2,
-    max_replicas: Annotated[int, typer.Option(help="Self-hosted max_replica_count")] = 8,
+    ] = _OPTIMIZE["num_round_robin_endpoints"].default,
+    requests_per_second: Annotated[
+        float | None,
+        typer.Option(help="Request rate for prefix-cache GSU counts (default: from the trace)"),
+    ] = None,
+    min_replicas: Annotated[int, typer.Option(help="Self-hosted min_replica_count")] = _SELF_HOSTED[
+        "min_replica_count"
+    ].default,
+    max_replicas: Annotated[int, typer.Option(help="Self-hosted max_replica_count")] = _SELF_HOSTED[
+        "max_replica_count"
+    ].default,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
 ) -> None:
     """Run Newsvendor hybrid commitment sizing, micro-burst/KV audit, and prefix-cache dilution."""
     snap: VllmTelemetrySnapshot | None = None
+    series: list[float] | None = None
     if vllm_file is not None:
-        snap = load_inference_server_file(vllm_file, default_model=model)
+        snap = _or_exit(lambda: load_inference_server_file(vllm_file, default_model=model))
         series = snap.tpm_series
     elif trace_file is not None:
-        raw = json.loads(trace_file.read_text(encoding="utf-8"))
-        if not isinstance(raw, list):
-            typer.echo("Error: --trace-file must contain a JSON array of numbers", err=True)
-            raise typer.Exit(code=1)
-        series = [float(x) for x in raw]
-    else:
-        series = list(DEFAULT_SYNTHETIC_TPM_SERIES)
+        series = _or_exit(lambda: _load_tpm_list(trace_file))
+
+    # Without a file the request model's own sample series applies, as it does on the API.
+    fields: dict[str, Any] = {} if series is None else {"tpm_series": series}
 
     if mode == CapacityMode.self_hosted:
-        prof = _or_exit(lambda: resolve_self_hosted_profile(snap.model if snap else model))
-        kv_pct = snap.observed_kv_cache_usage_pct if snap is not None else 91.5
-        wait_q = snap.observed_requests_waiting if snap is not None else 14.0
-        eff_hit = (
-            snap.observed_cache_hit_rate
-            if (snap is not None and snap.observed_cache_hit_rate > 0.0)
-            else baseline_cache_hit_rate
-        )
-        audit = _or_exit(
-            lambda: evaluate_self_hosted_endpoint(
-                tpm_series=series,
-                profile=prof,
-                min_replica_count=min_replicas,
-                max_replica_count=max_replicas,
-                observed_vllm_kv_cache_usage_pct=kv_pct,
-                observed_vllm_requests_waiting=wait_q,
-                total_input_tokens=input_tokens,
-                shared_prefix_ratio=shared_prefix_ratio,
-                baseline_cache_hit_rate=eff_hit,
-            )
-        )
+        fields |= {
+            "profile": snap.model if snap is not None else model,
+            "min_replica_count": min_replicas,
+            "max_replica_count": max_replicas,
+            "total_input_tokens": input_tokens,
+            "shared_prefix_ratio": shared_prefix_ratio,
+            "baseline_cache_hit_rate": baseline_cache_hit_rate,
+        }
+        if snap is not None:
+            fields["observed_vllm_kv_cache_usage_pct"] = snap.observed_kv_cache_usage_pct
+            fields["observed_vllm_requests_waiting"] = snap.observed_requests_waiting
+            if snap.observed_cache_hit_rate > 0.0:
+                fields["baseline_cache_hit_rate"] = snap.observed_cache_hit_rate
+        sh_req = _or_exit(lambda: SelfHostedAuditRequest(**fields))
+        audit = _or_exit(lambda: evaluate_self_hosted_endpoint(**fields_of(sh_req)))
         if output_format == OutputFormat.json:
             typer.echo(audit.model_dump_json(indent=2))
-            return
-        print_self_hosted_audit(audit)
+        else:
+            print_self_hosted_audit(audit)
         return
 
-    req = _or_exit(
-        lambda: OptimizeRequest(
-            model=model,
-            tpm_series=series,
-            gsu_monthly_price_usd=gsu_price,
-            paygo_per_1m_burndown_tokens_usd=paygo_per_1m,
-            spillover_tier=spillover_tier,
-            fsp_discount_pct=fsp_discount_pct,
-            active_duty_cycle_pct=active_duty_pct,
-            sixty_sec_tpm=sixty_sec_tpm,
-            peak_1s_tps=peak_1s_tps,
-            peak_10s_tps=peak_10s_tps,
-            peak_30s_tps=peak_30s_tps,
-            total_input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            thoughts_tokens=thoughts_tokens,
-            cached_tokens=cached_tokens,
-            cache_write_5m_tokens=cache_write_5m_tokens,
-            cache_write_1h_tokens=cache_write_1h_tokens,
-            shared_prefix_ratio=shared_prefix_ratio,
-            baseline_cache_hit_rate=baseline_cache_hit_rate,
-            num_round_robin_endpoints=endpoints,
-        )
-    )
+    fields |= {
+        "model": model,
+        "gsu_monthly_price_usd": gsu_price,
+        "paygo_per_1m_burndown_tokens_usd": paygo_per_1m,
+        "spillover_tier": spillover_tier,
+        "fsp_discount_pct": fsp_discount_pct,
+        "active_duty_cycle_pct": active_duty_pct,
+        "sixty_sec_tpm": sixty_sec_tpm,
+        "peak_1s_tps": peak_1s_tps,
+        "peak_10s_tps": peak_10s_tps,
+        "peak_30s_tps": peak_30s_tps,
+        "total_input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "thoughts_tokens": thoughts_tokens,
+        "cached_tokens": cached_tokens,
+        "cache_write_5m_tokens": cache_write_5m_tokens,
+        "cache_write_1h_tokens": cache_write_1h_tokens,
+        "shared_prefix_ratio": shared_prefix_ratio,
+        "baseline_cache_hit_rate": baseline_cache_hit_rate,
+        "num_round_robin_endpoints": endpoints,
+        "requests_per_second": requests_per_second,
+    }
+    req = _or_exit(lambda: OptimizeRequest(**fields))
     resp = _or_exit(lambda: evaluate_gsu_optimization(req))
 
     if output_format == OutputFormat.json:
@@ -508,24 +497,37 @@ def gateway(
         GatewayTarget,
         typer.Option("--target", "-t", help="Gateway target: litellm, envoy, epp, or all"),
     ] = GatewayTarget.all,
-    model: Annotated[str, typer.Option(help="Managed model ID")] = "gemini-3.8-flash",
-    project_id: Annotated[str, typer.Option(help="GCP host project ID")] = "prod-genai-pt-host",
-    location: Annotated[str, typer.Option(help="Vertex AI location")] = "global",
-    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = 20,
-    rps: Annotated[int, typer.Option(help="Target gateway RPS")] = 650,
-    sse_streams: Annotated[int, typer.Option(help="Concurrent SSE streams")] = 400,
-    pods: Annotated[int, typer.Option(help="LiteLLM pod replicas")] = 12,
-    workers: Annotated[int, typer.Option(help="Uvicorn workers per pod")] = 4,
+    model: Annotated[str, typer.Option(help="Managed model ID")] = _GATEWAY["model"].default,
+    project_id: Annotated[str, typer.Option(help="GCP host project ID")] = _GATEWAY[
+        "project_id"
+    ].default,
+    location: Annotated[str, typer.Option(help="Vertex AI location")] = _GATEWAY[
+        "location"
+    ].default,
+    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = _GATEWAY[
+        "provisioned_gsus"
+    ].default,
+    rps: Annotated[int, typer.Option(help="Target gateway RPS")] = _GATEWAY["target_rps"].default,
+    sse_streams: Annotated[int, typer.Option(help="Concurrent SSE streams")] = _GATEWAY[
+        "concurrent_sse_streams"
+    ].default,
+    pods: Annotated[int, typer.Option(help="LiteLLM pod replicas")] = _GATEWAY["pods"].default,
+    workers: Annotated[int, typer.Option(help="Uvicorn workers per pod")] = _GATEWAY[
+        "uvicorn_workers_per_pod"
+    ].default,
     self_hosted_model: Annotated[
         str, typer.Option(help="Self-hosted model for GKE epp")
-    ] = "llama-3.3-70b-fp8",
+    ] = _GATEWAY["self_hosted_model"].default,
+    bu_shares: Annotated[
+        int, typer.Option(help="Business units sharing the committed pool equally")
+    ] = _GATEWAY["business_unit_shares"].default,
     output_format: Annotated[
         OutputFormat, typer.Option("--format", "-f", help="Output format")
     ] = OutputFormat.table,
 ) -> None:
     """Generate LiteLLM, Envoy AI Gateway (CEL), and GKE Inference Gateway (epp) configs."""
-    bundle = _or_exit(
-        lambda: generate_gateway_bundle(
+    req = _or_exit(
+        lambda: GatewayConfigRequest(
             model=model,
             project_id=project_id,
             location=location,
@@ -535,8 +537,10 @@ def gateway(
             pods=pods,
             uvicorn_workers_per_pod=workers,
             self_hosted_model=self_hosted_model,
+            business_unit_shares=bu_shares,
         )
     )
+    bundle = _or_exit(lambda: generate_gateway_bundle(**fields_of(req)))
     if output_format == OutputFormat.json:
         typer.echo(bundle.model_dump_json(indent=2))
         return
@@ -569,11 +573,13 @@ def gateway(
 
 @app.command()
 def schedule(
-    model: Annotated[str, typer.Option(help="Model ID")] = "gemini-3.8-flash",
-    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = 20,
+    model: Annotated[str, typer.Option(help="Model ID")] = _SCHEDULE["model"].default,
+    gsus: Annotated[int, typer.Option(help="Provisioned GSUs")] = _SCHEDULE[
+        "provisioned_gsus"
+    ].default,
     evergreen_tokens: Annotated[
         float, typer.Option(help="Evergreen water-fill token backlog")
-    ] = 250_000_000.0,
+    ] = _SCHEDULE["evergreen_backfill_tokens"].default,
     jobs_file: Annotated[
         Path | None,
         typer.Option("--jobs-file", help="Optional JSON array of DeadlineJobSpec items"),
@@ -583,31 +589,29 @@ def schedule(
     ] = OutputFormat.table,
 ) -> None:
     """Run the 3-Tier Residual Capacity Scheduler (Revenue > Hard-Deadline EDF > Evergreen)."""
-    norm_model = normalize_model_id(model)
-    cfg = load_gsu_config()
-    tpm_per_gsu = _or_exit(lambda: require_capacity(norm_model, cfg))
-
+    tpm_per_gsu = _or_exit(lambda: require_capacity(model))
+    fields: dict[str, Any] = {
+        "model": model,
+        "provisioned_gsus": gsus,
+        "evergreen_backfill_tokens": evergreen_tokens,
+    }
     if jobs_file is not None:
-        raw_jobs = json.loads(jobs_file.read_text(encoding="utf-8"))
+        raw_jobs = _or_exit(lambda: json.loads(jobs_file.read_text(encoding="utf-8")))
         if not isinstance(raw_jobs, list):
-            typer.echo("Error: --jobs-file must contain a JSON array of job specs", err=True)
-            raise typer.Exit(code=1)
-        jobs = _or_exit(lambda: [DeadlineJobSpec.model_validate(item) for item in raw_jobs])
-    else:
-        jobs = make_default_deadline_jobs()
+            raise _fail("--jobs-file must contain a JSON array of job specs")
+        fields["deadline_jobs"] = raw_jobs
+    req = _or_exit(lambda: ResidualScheduleRequest(**fields))
 
     report = schedule_residual_capacity(
-        provisioned_gsus=gsus,
-        tpm_per_gsu=tpm_per_gsu,
-        deadline_jobs=jobs,
-        evergreen_backfill_tokens=evergreen_tokens,
+        tpm_per_gsu=tpm_per_gsu, **fields_of(req, without=("model",))
     )
     if output_format == OutputFormat.json:
         typer.echo(report.model_dump_json(indent=2))
         return
 
     typer.echo(
-        f"=== 3-Tier Residual Capacity Schedule ({norm_model}, {report.provisioned_gsus} GSUs) ==="
+        f"=== 3-Tier Residual Capacity Schedule "
+        f"({normalize_model_id(model)}, {report.provisioned_gsus} GSUs) ==="
     )
     typer.echo(
         f"Residual PT Budget ({report.horizon_hours}h): "
@@ -632,21 +636,27 @@ def schedule(
 
 @app.command()
 def chargeback(
-    model: Annotated[
-        str, typer.Option(help="Model or self-hosted profile ID")
-    ] = "gemini-3.8-flash",
+    model: Annotated[str, typer.Option(help="Model or self-hosted profile ID")] = _CHARGEBACK[
+        "model"
+    ].default,
     mode: Annotated[
         CapacityMode, typer.Option("--mode", help="Capacity mode: 'gsu' or 'self-hosted'")
     ] = CapacityMode.gsu,
     gsus: Annotated[
         int, typer.Option(help="Provisioned GSUs (or reserved GPU replicas in self-hosted mode)")
-    ] = 10,
+    ] = _CHARGEBACK["provisioned_gsus"].default,
     gsu_price: Annotated[
-        float, typer.Option(help="Monthly price per 1 GSU (or 1 GPU replica) in USD")
-    ] = 2_000.0,
+        float | None,
+        typer.Option(
+            help=(
+                "Monthly price per 1 GSU or GPU replica in USD "
+                "(default: 2,000 per GSU, or the profile's reserved replica price)"
+            )
+        ),
+    ] = None,
     waterfill_tpm: Annotated[
         float, typer.Option(help="Off-peak async batch water-filling demand in burndown TPM")
-    ] = 300_000.0,
+    ] = _CHARGEBACK["async_batch_waterfill_tpm"].default,
     tenant_file: Annotated[
         Path | None,
         typer.Option(
@@ -666,46 +676,42 @@ def chargeback(
     if mode == CapacityMode.self_hosted:
         prof = _or_exit(lambda: resolve_self_hosted_profile(model))
         tpm_per_unit = prof.tpm_per_replica
-        unit_price = prof.reserved_replica_monthly_usd if gsu_price == 2_000.0 else gsu_price
+        default_price = prof.reserved_replica_monthly_usd
         unit_name = "GPU Replicas"
     else:
-        norm_model = normalize_model_id(model)
-        cfg = load_gsu_config()
-        tpm_per_unit = _or_exit(lambda: require_capacity(norm_model, cfg))
-        unit_price = gsu_price
+        tpm_per_unit = _or_exit(lambda: require_capacity(model))
+        default_price = _CHARGEBACK["gsu_monthly_price_usd"].default
         unit_name = "GSUs"
+    unit_price = gsu_price if gsu_price is not None else default_price
 
-    raw_weights: dict[str, float] = dict(DEFAULT_TENANT_RAW_TOKEN_WEIGHTS)
+    tenants: Any = DEFAULT_SYNTHETIC_TENANT_TPM
+    raw_weights: dict[str, Any] | None = None
     if vllm_file is not None:
-        snap = load_inference_server_file(vllm_file, default_model=model)
-        tenants: dict[str, list[float] | float] = dict(snap.hourly_consumed_tpm_by_tenant)
+        snap = _or_exit(lambda: load_inference_server_file(vllm_file, default_model=model))
+        tenants = snap.hourly_consumed_tpm_by_tenant
     elif tenant_file is not None:
-        raw = json.loads(tenant_file.read_text(encoding="utf-8"))
+        raw = _or_exit(lambda: json.loads(tenant_file.read_text(encoding="utf-8")))
         if not isinstance(raw, dict):
-            typer.echo("Error: --tenant-file must contain a JSON object", err=True)
-            raise typer.Exit(code=1)
-        if "tenants" in raw and isinstance(raw["tenants"], dict):
-            tenant_map = raw["tenants"]
+            raise _fail("--tenant-file must contain a JSON object")
+        if isinstance(raw.get("tenants"), dict):
+            tenants = raw["tenants"]
             if isinstance(raw.get("raw_token_weights"), dict):
-                raw_weights.update({str(k): float(v) for k, v in raw["raw_token_weights"].items()})
+                raw_weights = {**DEFAULT_TENANT_RAW_TOKEN_WEIGHTS, **raw["raw_token_weights"]}
         else:
-            tenant_map = raw
-        tenants = {
-            str(k): [float(x) for x in v] if isinstance(v, list) else float(v)
-            for k, v in tenant_map.items()
-        }
-    else:
-        tenants = dict(DEFAULT_SYNTHETIC_TENANT_TPM)
+            tenants = raw
 
-    report = _or_exit(
-        lambda: compute_focus_chargeback(
-            hourly_consumed_tpm_by_tenant=tenants,
+    req = _or_exit(
+        lambda: ChargebackRequest(
+            model=model,
             provisioned_gsus=gsus,
-            tpm_per_gsu=tpm_per_unit,
             gsu_monthly_price_usd=unit_price,
-            async_batch_waterfill_tpm=waterfill_tpm,
+            hourly_consumed_tpm_by_tenant=tenants,
             tenant_raw_token_weights=raw_weights,
+            async_batch_waterfill_tpm=waterfill_tpm,
         )
+    )
+    report = compute_focus_chargeback(
+        tpm_per_gsu=tpm_per_unit, **fields_of(req, without=("model",))
     )
 
     if output_format == OutputFormat.json:
@@ -717,7 +723,9 @@ def chargeback(
 
 @app.command()
 def serve(
-    host: Annotated[str, typer.Option(help="Bind host")] = "0.0.0.0",  # noqa: S104
+    host: Annotated[
+        str, typer.Option(help="Bind host (use 0.0.0.0 to listen on every interface)")
+    ] = "127.0.0.1",
     port: Annotated[int, typer.Option(help="Bind port")] = 8080,
 ) -> None:
     """Start the FastAPI web server and interactive GM3 Light capacity calculator."""

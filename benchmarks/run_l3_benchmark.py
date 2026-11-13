@@ -16,7 +16,6 @@ import argparse
 import asyncio
 import hashlib
 import json
-import platform
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -64,10 +63,9 @@ def run_benchmark(mode: str = "offline") -> dict[str, Any]:
         receipt: dict[str, Any] = {
             "schema_version": "capacity.l3_receipt.v1",
             "generated_at_utc": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "environment": {
-                "python": sys.version.split()[0],
-                "platform": platform.platform(),
-            },
+            # Interpreter version only: a platform string would publish the kernel build of
+            # whichever machine regenerated the receipt.
+            "environment": {"python": sys.version.split()[0]},
             "engine_code_sha256": compute_engine_code_sha256(),
             "corpus_file": "benchmarks/corpora/azure_llm_trace_10k.jsonl.gz",
             "corpus_gzip_sha256": track_a["corpus_gzip_sha256"],

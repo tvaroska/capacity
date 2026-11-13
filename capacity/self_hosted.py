@@ -8,9 +8,9 @@ from collections.abc import Sequence
 from pydantic import Field
 
 from capacity.burst import evaluate_prefix_cache_dilution
-from capacity.finops import MINUTES_PER_MONTH
-from capacity.forecasting import UnknownModelError, percentile
-from capacity.models import DictAccessModel, DisaggregatedPoolSizing, PrefixCacheAudit
+from capacity.finops import MINUTES_PER_MONTH, clean_finite_series
+from capacity.forecasting import UnknownModelError, argmin_convex_int, percentile
+from capacity.models import DisaggregatedPoolSizing, PrefixCacheAudit, StrictModel
 from capacity.telemetry_parsers import (
     VllmTelemetrySnapshot,
     load_inference_server_file,
@@ -18,9 +18,11 @@ from capacity.telemetry_parsers import (
 )
 
 HOURS_PER_MONTH = 720.0
+# Scale-to-zero savings assume a non-production endpoint is idle this many of a week's 168 hours.
+NONPROD_IDLE_HOURS_PER_WEEK = 108.0
 
 
-class SelfHostedProfile(DictAccessModel):
+class SelfHostedProfile(StrictModel):
     """Hardware and serving throughput profile for a self-hosted open-weight model replica."""
 
     profile_id: str
@@ -94,7 +96,7 @@ DEFAULT_SELF_HOSTED_PROFILES: dict[str, SelfHostedProfile] = {
 }
 
 
-class SelfHostedEndpointAudit(DictAccessModel):
+class SelfHostedEndpointAudit(StrictModel):
     """Comprehensive capacity, KV-cache, quota-lock, and Newsvendor audit for GPU replicas."""
 
     profile_id: str
@@ -150,16 +152,13 @@ def evaluate_self_hosted_endpoint(
     observed_accelerator_duty_cycle_pct: float = 52.0,
     observed_vllm_kv_cache_usage_pct: float = 91.5,
     observed_vllm_requests_waiting: float = 14.0,
-    nonprod_idle_hours_per_week: float = 108.0,
     total_input_tokens: int = 20_000,
     shared_prefix_ratio: float = 0.80,
     baseline_cache_hit_rate: float = 0.80,
 ) -> SelfHostedEndpointAudit:
     """Audit a self-hosted GPU/TPU endpoint for quota locks, KV saturation, and Newsvendor."""
     prof = (
-        profile
-        if isinstance(profile, SelfHostedProfile)
-        else resolve_self_hosted_profile(profile)
+        profile if isinstance(profile, SelfHostedProfile) else resolve_self_hosted_profile(profile)
     )
     min_reps = max(0, int(min_replica_count))
     max_reps = max(max(1, min_reps), int(max_replica_count))
@@ -168,16 +167,7 @@ def evaluate_self_hosted_endpoint(
     baseline_accels = min_reps * prof.accelerators_per_replica
     stranded_accels = max(0, locked_accels - baseline_accels)
 
-    if tpm_series:
-        cleaned_vals: list[float] = []
-        for raw_val in tpm_series:
-            fv = float(raw_val)
-            if not math.isfinite(fv):
-                raise ValueError(f"tpm_series values must be finite numbers, got {raw_val!r}")
-            cleaned_vals.append(max(0.0, fv))
-        cleaned = sorted(cleaned_vals)
-    else:
-        cleaned = [0.0]
+    cleaned = clean_finite_series(tpm_series)
 
     has_traffic = cleaned[-1] > 0.0
     kv_preemption_risk = has_traffic and (
@@ -188,16 +178,12 @@ def evaluate_self_hosted_endpoint(
     )
 
     rep_tpm = float(prof.tpm_per_replica)
-    p50_tpm = float(percentile(cleaned, 50))
-    p90_tpm = float(percentile(cleaned, 90))
     p99_tpm = float(percentile(cleaned, 99))
     p99_replicas = math.ceil(p99_tpm / rep_tpm) if p99_tpm > 0 else 0
     max_series_replicas = math.ceil(cleaned[-1] / rep_tpm) if cleaned[-1] > 0 else 0
 
     on_demand_monthly_equiv = prof.on_demand_replica_hourly_usd * HOURS_PER_MONTH
     breakeven_util = min(1.0, prof.reserved_replica_monthly_usd / on_demand_monthly_equiv)
-    critical_q = max(0.0, min(1.0, 1.0 - breakeven_util))
-    seed_reps = math.floor(percentile(cleaned, critical_q * 100.0) / rep_tpm)
 
     n_points = len(cleaned)
 
@@ -210,43 +196,20 @@ def evaluate_self_hosted_endpoint(
         burst_cost = mean_burst_replicas * on_demand_monthly_equiv
         return base_cost + burst_cost, base_cost, burst_cost
 
-    candidates = sorted(
-        {
-            r
-            for r in [
-                *range(min(max_series_replicas + 1, 501)),
-                seed_reps - 1,
-                seed_reps,
-                seed_reps + 1,
-                math.ceil(p50_tpm / rep_tpm) if p50_tpm > 0 else 0,
-                math.ceil(p90_tpm / rep_tpm) if p90_tpm > 0 else 0,
-                p99_replicas,
-                max_series_replicas,
-            ]
-            if 0 <= r <= max_series_replicas
-        }
-    )
-    if max_series_replicas > 500:
-        for r in range(max(0, seed_reps - 100), min(max_series_replicas + 1, seed_reps + 101)):
-            candidates.append(r)
-        candidates = sorted(set(candidates))
-
-    best_reps = 0
-    best_total, best_base, best_burst = _monthly_cost(0)
-    for r in candidates:
-        tot, b_cost, s_cost = _monthly_cost(r)
-        if tot < best_total:
-            best_reps = r
-            best_total, best_base, best_burst = tot, b_cost, s_cost
+    # Reserved-plus-burst cost is convex in the reserved count, so bisection is exact.
+    best_reps = argmin_convex_int(lambda r: _monthly_cost(r)[0], max_series_replicas)
+    best_total, best_base, best_burst = _monthly_cost(best_reps)
 
     all_on_demand_cost = (
         sum(math.ceil(x / rep_tpm) for x in cleaned) / n_points
     ) * on_demand_monthly_equiv
     p99_static_reserved_cost = p99_replicas * prof.reserved_replica_monthly_usd
 
-    idle_fraction = min(1.0, max(0.0, nonprod_idle_hours_per_week / 168.0))
+    idle_fraction = NONPROD_IDLE_HOURS_PER_WEEK / 168.0
     scale_to_zero_savings = max(1, min_reps) * on_demand_monthly_equiv * idle_fraction
 
+    # The trace carries no request size, so no request rate can be derived from it: the
+    # replica counts below stay at the function's nominal rate, which the audit reports.
     prefix_audit = evaluate_prefix_cache_dilution(
         total_input_tokens=total_input_tokens,
         shared_prefix_ratio=shared_prefix_ratio,
@@ -299,9 +262,7 @@ def size_disaggregated_prefill_decode(
 ) -> DisaggregatedPoolSizing:
     """Size separate Prefill (compute-bound) and Decode (KV/bandwidth-bound) worker pools."""
     prof = (
-        profile
-        if isinstance(profile, SelfHostedProfile)
-        else resolve_self_hosted_profile(profile)
+        profile if isinstance(profile, SelfHostedProfile) else resolve_self_hosted_profile(profile)
     )
     qps = max(0.01, float(peak_qps))
     in_tok = max(1, int(avg_input_tokens))

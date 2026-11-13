@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import html
-import json
+import re
 from typing import Any
 
 from capacity.burst import (
@@ -194,11 +194,11 @@ def build_showcase_summary_payload(
 
 
 def _pct_cell(pct_map: dict[str, Any], key: str, unit: str) -> str:
-    if key in pct_map:
-        entry = pct_map[key]
-        return f"{entry['tpm']:,} ({entry['recommended_gsus']} {unit})"
-    first = next(iter(pct_map.values()), {"tpm": 0, "recommended_gsus": 0})
-    return f"{first['tpm']:,} ({first['recommended_gsus']} {unit})"
+    entry = pct_map.get(key)
+    if entry is None:
+        # The table's columns are fixed; a percentile the caller did not request has no value.
+        return "n/a"
+    return f"{entry['tpm']:,} ({entry['recommended_gsus']} {unit})"
 
 
 def render_showcase_portal_html(
@@ -208,7 +208,6 @@ def render_showcase_portal_html(
 ) -> str:
     """Render the self-contained GM3 Light 4-Tab Interactive Web Calculator & Scorecard."""
     data = build_showcase_summary_payload(custom_recommendations=custom_recommendations)
-    embedded_json = json.dumps(data)
 
     unit_lbl = "Rep" if data["gsu_recommendations"].get("mode") == "self-hosted" else "GSU"
     gsu_rows_html = ""
@@ -328,10 +327,8 @@ def render_showcase_portal_html(
         "__KPI_ECUR__": f"{kpis['ecur_168h_pct']:.1f}",
         "__SCHED_ROWS__": sched_rows_html,
         "__CB_ROWS__": cb_rows_html,
-        "__EMBEDDED_JSON__": embedded_json,
     }
 
-    rendered = PORTAL_TEMPLATE
-    for key, val in replacements.items():
-        rendered = rendered.replace(key, val)
-    return rendered
+    # One pass: a value that happens to contain a placeholder name is never expanded again.
+    placeholder = re.compile("|".join(re.escape(key) for key in replacements))
+    return placeholder.sub(lambda m: replacements[m.group(0)], PORTAL_TEMPLATE)

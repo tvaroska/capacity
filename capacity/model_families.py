@@ -9,8 +9,11 @@ from typing import Literal
 PublisherName = Literal["google", "anthropic"]
 ModelFamilyName = Literal["gemini_1p", "claude_3p"]
 
-_SUFFIX_RE = re.compile(
-    r"(?:-(?:00\d|preview(?:-\d{2}-\d{2})?|exp(?:-\d{4})?|rc\d*|ga|qcd|latest|v\d+))+$",
+# Version and release-channel suffixes that name the same model and so the same capacity:
+# -001, -preview, -preview-05-06, -preview-09-2025, -exp-0827, -exp-03-25, -rc1, -ga, -v2.
+_VERSION_SUFFIX_RE = re.compile(
+    r"(?:-(?:00\d|preview(?:-\d{2}-\d{2,4})?|exp(?:-\d{4}|-\d{2}-\d{2})?"
+    r"|rc\d*|ga|qcd|latest|v\d+))+$",
     re.IGNORECASE,
 )
 
@@ -46,14 +49,14 @@ class ModelFamilySpec:
 # Verified public Google Cloud Vertex AI Provisioned Throughput TPM/GSU (TPS_per_GSU * 60).
 # Claude keys omit -v2 suffix because normalize_model_id strips trailing -v\d+.
 CLAUDE_GSU_CONFIG: dict[str, int] = {
-    "claude-3-5-sonnet": 21_000,   # 350 TPS/GSU (claude-3-5-sonnet-v2)
-    "claude-3-7-sonnet": 21_000,   # 350 TPS/GSU
-    "claude-sonnet-4-6": 21_000,   # 350 TPS/GSU
-    "claude-opus-4-5": 12_600,     # 210 TPS/GSU
-    "claude-opus-4-6": 12_600,     # 210 TPS/GSU
-    "claude-sonnet-5-5": 31_500,   # 525 TPS/GSU
-    "claude-opus-5-5": 15_660,     # 261 TPS/GSU
-    "claude-haiku-5-5": 625_020,   # 10,417 TPS/GSU
+    "claude-3-5-sonnet": 21_000,  # 350 TPS/GSU (claude-3-5-sonnet-v2)
+    "claude-3-7-sonnet": 21_000,  # 350 TPS/GSU
+    "claude-sonnet-4-6": 21_000,  # 350 TPS/GSU
+    "claude-opus-4-5": 12_600,  # 210 TPS/GSU
+    "claude-opus-4-6": 12_600,  # 210 TPS/GSU
+    "claude-sonnet-5-5": 31_500,  # 525 TPS/GSU
+    "claude-opus-5-5": 15_660,  # 261 TPS/GSU
+    "claude-haiku-5-5": 625_020,  # 10,417 TPS/GSU
 }
 
 GEMINI_1P_FLASH_SPEC = ModelFamilySpec(
@@ -139,27 +142,28 @@ CLAUDE_3P_OPUS_4_SPEC = _claude_spec(min_prefix_floor_tokens=4_096)
 CLAUDE_3P_V55_SPEC = _claude_spec(min_prefix_floor_tokens=512)
 
 
-def _clean_model(model_id: str) -> str:
+def normalize_model_id(model_id: str) -> str:
+    """Strip publisher prefixes, folders, `@region` and version suffixes from a model ID."""
     cleaned = model_id.strip().lower()
     if "@" in cleaned:
         cleaned = cleaned.split("@", 1)[0]
     if "/" in cleaned:
         cleaned = cleaned.rsplit("/", 1)[-1]
-    return _SUFFIX_RE.sub("", cleaned)
+    return _VERSION_SUFFIX_RE.sub("", cleaned)
 
 
 def is_partner_claude(model_id: str | None) -> bool:
     """Return True when the model ID belongs to the 3P Anthropic Claude family."""
     if not model_id:
         return False
-    return _clean_model(model_id).startswith("claude-")
+    return normalize_model_id(model_id).startswith("claude-")
 
 
 def resolve_model_family(model_id: str | None) -> ModelFamilySpec:
     """Return the Provisioned Throughput physics specification for a model ID."""
     if not model_id:
         return GEMINI_1P_FLASH_SPEC
-    norm = _clean_model(model_id)
+    norm = normalize_model_id(model_id)
     if norm.startswith("claude-"):
         if norm.endswith("-5-5"):
             return CLAUDE_3P_V55_SPEC

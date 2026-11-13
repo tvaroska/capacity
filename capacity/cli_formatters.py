@@ -38,17 +38,14 @@ def load_sparse_from_trace_file(
     total_minutes = days * 24 * 60
     if isinstance(raw_data, list):
         key = f"{default_model}@us-central1" if by_region else default_model
-        series_map = {
-            base_dt + timedelta(minutes=i): int(float(v)) for i, v in enumerate(raw_data)
-        }
+        series_map = {base_dt + timedelta(minutes=i): int(float(v)) for i, v in enumerate(raw_data)}
         return {key: series_map}, max(total_minutes, len(raw_data))
     if isinstance(raw_data, dict):
         sparse: dict[str, dict[datetime, int]] = {}
         for k, vals in raw_data.items():
             if isinstance(vals, list):
                 sparse[str(k)] = {
-                    base_dt + timedelta(minutes=i): int(float(v))
-                    for i, v in enumerate(vals)
+                    base_dt + timedelta(minutes=i): int(float(v)) for i, v in enumerate(vals)
                 }
         return sparse, total_minutes
     raise ValueError(f"Unsupported trace file structure in {trace_file}")
@@ -131,6 +128,7 @@ def print_self_hosted_audit(audit: SelfHostedEndpointAudit) -> None:
     typer.echo(
         f"Replica KV Dilution:    Sticky={pc.sticky_gsus} Reps vs "
         f"Round-Robin({pc.num_round_robin_endpoints})={pc.round_robin_gsus} Reps "
+        f"at an assumed {pc.requests_per_second:g} request/s "
         f"(Effective Hit={pc.effective_cache_hit_rate * 100:.1f}%, "
         f"Savings={pc.gsu_savings_pct:.1f}%)"
     )
@@ -166,18 +164,23 @@ def print_gsu_optimize_report(
         f"(in={input_tokens:,}, cached={cached_tokens:,}, "
         f"out={output_tokens:,}, thoughts={thoughts_tokens:,})"
     )
-    window_desc = (
-        f"{mb.refill_window_seconds}s/{mb.long_window_seconds}s dual bucket"
-        if mb.long_window_seconds is not None
-        else f"{mb.refill_window_seconds}s window"
-    )
-    typer.echo(
-        f"Micro-Burst:     {window_desc} | "
-        f"60s Util={mb.apparent_60s_utilization_pct:.1f}% | "
-        f"Peak Window Util={mb.peak_window_utilization_pct:.1f}% | "
-        f"Spillover={mb.triggers_429_or_spillover} | "
-        f"Illusion={mb.illusion_detected}"
-    )
+    if mb is None:
+        typer.echo(
+            "Micro-Burst:     not evaluated (pass --sixty-sec-tpm or a measured --peak-*-tps)"
+        )
+    else:
+        window_desc = (
+            f"{mb.refill_window_seconds}s/{mb.long_window_seconds}s dual bucket"
+            if mb.long_window_seconds is not None
+            else f"{mb.refill_window_seconds}s window"
+        )
+        typer.echo(
+            f"Micro-Burst:     {window_desc} | "
+            f"60s Util={mb.apparent_60s_utilization_pct:.1f}% | "
+            f"Peak Window Util={mb.peak_window_utilization_pct:.1f}% | "
+            f"Spillover={mb.triggers_429_or_spillover} | "
+            f"Illusion={mb.illusion_detected}"
+        )
     typer.echo(
         f"Prefix Cache:    Sticky={pc.sticky_gsus} GSUs vs "
         f"Round-Robin({pc.num_round_robin_endpoints})={pc.round_robin_gsus} GSUs "
