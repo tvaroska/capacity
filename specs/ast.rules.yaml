@@ -37,6 +37,7 @@ files:
 ignores:
   - "capacity/api.py"
   - "capacity/cli.py"
+  - "capacity/cli_collect.py"
   - "capacity/cli_formatters.py"
   - "capacity/cli/**"
 metadata:
@@ -66,6 +67,7 @@ files:
 ignores:
   - "capacity/api.py"
   - "capacity/cli.py"
+  - "capacity/cli_collect.py"
   - "capacity/cli_formatters.py"
   - "capacity/core.py"
   - "capacity/cli/**"
@@ -109,11 +111,11 @@ metadata:
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_formatters|telemetry\\.cloud_monitoring))(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_collect|cli_formatters|telemetry\\.cloud_monitoring))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_formatters|(telemetry\\.)?cloud_monitoring))(\\b|\\.)"
+      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_collect|cli_formatters|(telemetry\\.)?cloud_monitoring))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_formatters)\\b"
+      regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_collect|cli_formatters)\\b"
     - kind: import_from_statement
       regex: "(?s)^from\\s+((capacity\\.|\\.+\\s*)telemetry|\\.+)+\\s+import\\s+(.*[\\s,(])?cloud_monitoring\\b"
     - kind: import_from_statement

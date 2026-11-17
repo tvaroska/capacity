@@ -19,17 +19,26 @@ from capacity.burst import (
     evaluate_micro_burst_window,
     evaluate_model_tier_prefix_cache,
 )
-from capacity.capacity import DEFAULT_GSU_CONFIG, require_capacity
+from capacity.capacity import require_capacity
 from capacity.cli import app as cli_app
 from capacity.core import PARTNER_TOKEN_METRIC, PT_METRIC, fetch_throughput
 from capacity.finops import evaluate_folder_pooling
-from capacity.forecasting import UnknownModelError
 from capacity.gateway import generate_gateway_bundle
 from capacity.model_families import (
     CLAUDE_GSU_CONFIG,
+    DEFAULT_GSU_CONFIG,
     is_partner_claude,
     normalize_model_id,
     resolve_model_family,
+)
+from capacity.models import (
+    FolderPoolingRequest,
+    GatewayConfigRequest,
+    MicroBurstRequest,
+    ModelTierPrefixCacheRequest,
+    SeriesKey,
+    UnknownModelError,
+    VllmParseRequest,
 )
 from capacity.telemetry_parsers import parse_inference_server_telemetry
 from tests.conftest import (
@@ -62,11 +71,11 @@ def test_claude_gsu_capacities_and_unknown_guard() -> None:
     assert set(CLAUDE_GSU_CONFIG).issubset(set(DEFAULT_GSU_CONFIG))
     with pytest.raises(UnknownModelError):
         require_capacity("claude-sonnet-9", DEFAULT_GSU_CONFIG)
+    with pytest.raises(UnknownModelError):
+        resolve_model_family("custom-pro-v1")
 
 
 def test_claude_burndown_weights_flat_across_200k_with_cache_writes() -> None:
-    # 10,000 total input = 5,000 uncached (1.0x) + 2,000 read (0.1x) + 2,000 5m write (1.25x)
-    # + 1,000 1h write (2.0x); 1,000 output + 500 thoughts (5.0x)
     burndown = compute_weighted_burndown_tokens(
         input_tokens=10_000,
         output_tokens=1_000,
@@ -78,7 +87,6 @@ def test_claude_burndown_weights_flat_across_200k_with_cache_writes() -> None:
     )
     assert burndown == pytest.approx(5_000.0 + 200.0 + 2_500.0 + 2_000.0 + 7_500.0)
 
-    # Confirm 3P Claude stays flat above 200K tokens (no 1P 2.0x/7.5x cliff)
     long_burndown = compute_weighted_burndown_tokens(
         input_tokens=250_000,
         output_tokens=2_000,
@@ -87,7 +95,6 @@ def test_claude_burndown_weights_flat_across_200k_with_cache_writes() -> None:
     )
     assert long_burndown == pytest.approx(50_000.0 + 20_000.0 + 10_000.0)
 
-    # 1P Gemini default retains >200K cliff when model is None or gemini-*
     gemini_long = compute_weighted_burndown_tokens(
         input_tokens=250_000,
         output_tokens=2_000,
@@ -103,15 +110,14 @@ def test_claude_dual_bucket_30s_60s_and_zero_burst_credit() -> None:
     assert spec.bucket_long_seconds == 60
     assert spec.burst_credit_pct == 0.0
 
-    # 10 GSUs * 350 TPS/GSU = 3,500 committed TPS (210,000 TPM).
-    # 140,000 TPM average (~66.7% 60s util) concentrated in a 30s burst = 4,666.7 TPS (> 3,500).
     audit = evaluate_micro_burst_window(
-        sixty_sec_tpm=140_000.0,
-        peak_1s_tps=0.0,
-        provisioned_gsus=10,
-        tps_per_gsu=350.0,
-        peak_30s_tps=4_600.0,
-        model="claude-sonnet-4-6",
+        MicroBurstRequest(
+            model="claude-sonnet-4-6",
+            provisioned_gsus=10,
+            sixty_sec_tpm=140_000.0,
+            peak_1s_tps=0.0,
+            peak_30s_tps=4_600.0,
+        )
     )
     assert audit.refill_window_seconds == 30
     assert audit.long_window_seconds == 60
@@ -121,37 +127,42 @@ def test_claude_dual_bucket_30s_60s_and_zero_burst_credit() -> None:
     assert audit.peak_window_utilization_pct > 100.0
     assert audit.triggers_429_or_spillover is True
     assert audit.illusion_detected is True
-    # Conservation holds: active 30s tokens <= 60s TPM
     assert audit.peak_window_tps * 30 <= 140_000.0 + 1e-6
 
 
 def test_claude_prefix_cache_tiers_and_explicit_cache_control() -> None:
     sonnet = evaluate_model_tier_prefix_cache(
-        model="claude-sonnet-4-6",
-        total_input_tokens=8_000,
-        static_prefix_tokens=6_000,
-        output_tokens=500,
-        thoughts_tokens=0,
-        dynamic_header_offset_tokens=6_000,
+        ModelTierPrefixCacheRequest(
+            model="claude-sonnet-4-6",
+            total_input_tokens=8_000,
+            static_prefix_tokens=6_000,
+            output_tokens=500,
+            thoughts_tokens=0,
+            dynamic_header_offset_tokens=6_000,
+        )
     )
     assert sonnet.checkpoint_granularity == "token_boundary"
     assert sonnet.min_prefix_floor_tokens == 1_024
     assert any("cache_control" in r for r in sonnet.remediation_steps)
 
     opus4 = evaluate_model_tier_prefix_cache(
-        model="claude-opus-4-6",
-        total_input_tokens=8_000,
-        static_prefix_tokens=2_000,
-        dynamic_header_offset_tokens=2_000,
+        ModelTierPrefixCacheRequest(
+            model="claude-opus-4-6",
+            total_input_tokens=8_000,
+            static_prefix_tokens=2_000,
+            dynamic_header_offset_tokens=2_000,
+        )
     )
     assert opus4.min_prefix_floor_tokens == 4_096
     assert opus4.effective_cache_hit_rate == 0.0
 
     v55 = evaluate_model_tier_prefix_cache(
-        model="claude-sonnet-5-5",
-        total_input_tokens=2_000,
-        static_prefix_tokens=800,
-        dynamic_header_offset_tokens=800,
+        ModelTierPrefixCacheRequest(
+            model="claude-sonnet-5-5",
+            total_input_tokens=2_000,
+            static_prefix_tokens=800,
+            dynamic_header_offset_tokens=800,
+        )
     )
     assert v55.min_prefix_floor_tokens == 512
     assert v55.effective_cache_hit_rate > 0.0
@@ -202,9 +213,8 @@ async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models(
     fake = patch_monitoring_client(_route)
     sparse_claude, _ = await fetch_throughput("demo-proj", days=1, models=["claude-sonnet-4-6"])
 
-    # Expected: 10000*1.0 + 5000*0.1 + 4000*1.25 + 1000*2.0 + 2000*5.0 = 27,500
     minute = t0 - timedelta(minutes=1)
-    assert sparse_claude == {"claude-sonnet-4-6": {minute: 27_500}}
+    assert sparse_claude == {SeriesKey("claude-sonnet-4-6"): {minute: 27_500}}
     assert len(fake.requests) == 1
     assert PARTNER_TOKEN_METRIC in fake.requests[0]["filter"]
 
@@ -213,8 +223,8 @@ async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models(
         "demo-proj", days=1, models=["gemini-3.8-flash", "claude-sonnet-4-6"]
     )
 
-    assert sparse_mixed["gemini-3.8-flash"][minute] == 120_900
-    assert sparse_mixed["claude-sonnet-4-6"][minute] == 27_500
+    assert sparse_mixed[SeriesKey("gemini-3.8-flash")][minute] == 120_900
+    assert sparse_mixed[SeriesKey("claude-sonnet-4-6")][minute] == 27_500
     filters = [r["filter"] for r in fake.requests]
     assert any(PT_METRIC in f for f in filters)
     assert any(PARTNER_TOKEN_METRIC in f for f in filters)
@@ -240,26 +250,26 @@ def test_parse_anthropic_messages_jsonl_additive_usage_and_cache_writes() -> Non
             }
         )
     ]
-    snap = parse_inference_server_telemetry("\n".join(lines))
+    snap = parse_inference_server_telemetry(VllmParseRequest(raw_content="\n".join(lines)))
     assert snap.model == "claude-sonnet-4-6"
-    # Additive Anthropic input: 2000 + 8000 + 3000 = 13,000 total prompt tokens
     assert snap.prompt_tokens_total == 13_000
     assert snap.cached_tokens_total == 8_000
     assert snap.cache_write_5m_tokens_total == 2_000
     assert snap.cache_write_1h_tokens_total == 1_000
     assert snap.completion_tokens_total == 1_000
-    # 2000*1.0 + 8000*0.1 + 2000*1.25 + 1000*2.0 + 1000*5.0 = 12,300
     assert snap.weighted_burndown_tokens_total == pytest.approx(12_300.0)
 
 
 @pytest.mark.asyncio
 async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
     bundle = generate_gateway_bundle(
-        model="claude-sonnet-4-6",
-        project_id="hub-genai-prod",
-        location="us-east5",
-        provisioned_gsus=25,
-        target_rps=400,
+        GatewayConfigRequest(
+            model="claude-sonnet-4-6",
+            project_id="hub-genai-prod",
+            location="us-east5",
+            provisioned_gsus=25,
+            target_rps=400,
+        )
     )
     assert bundle.refill_window_seconds == 30
     assert bundle.committed_burndown_tpm == 25 * 21_000
@@ -304,7 +314,6 @@ async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
             "output_tokens": 1_000,
         }
     )
-    # Expected burndown: 1000*1.0 + 2000*0.1 + 1000*1.25 + 1000*5.0 = 7,450
     data1: dict[str, Any] = {}
     await cb.async_pre_call_hook(
         user_api_key_dict=api_key, cache=cache, data=data1, call_type="completion"
@@ -318,7 +327,6 @@ async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
     )
     assert sum(cache.store.values()) == pytest.approx(7_450.0)
 
-    # Next request sees team over 5,000 TPM limit and flips to shared/standard spillover
     data2: dict[str, Any] = {}
     await cb.async_pre_call_hook(
         user_api_key_dict=api_key, cache=cache, data=data2, call_type="completion"
@@ -329,12 +337,13 @@ async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
 
 def test_claude_folder_pooling_surfaces_1p_only_warning() -> None:
     report = evaluate_folder_pooling(
-        hourly_tpm_by_project={
-            "spoke-a": [200_000.0, 40_000.0],
-            "spoke-b": [40_000.0, 200_000.0],
-        },
-        model="claude-sonnet-4-6",
-        tpm_per_gsu=21_000,
+        FolderPoolingRequest(
+            model="claude-sonnet-4-6",
+            hourly_tpm_by_project={
+                "spoke-a": [200_000.0, 40_000.0],
+                "spoke-b": [40_000.0, 200_000.0],
+            },
+        )
     )
     joined = " ".join(report.governance_notes)
     assert "Folder-Level RHPT" in joined
@@ -345,6 +354,7 @@ def test_claude_cli_and_api_endpoints_plus_portal() -> None:
     for cmd in (
         [
             "optimize",
+            "--demo",
             "--model",
             "claude-sonnet-4-6",
             "--cache-write-5m-tokens",
@@ -353,8 +363,8 @@ def test_claude_cli_and_api_endpoints_plus_portal() -> None:
             "4200",
         ],
         ["gateway", "--target", "all", "--model", "claude-sonnet-4-6", "--gsus", "25"],
-        ["schedule", "--model", "claude-sonnet-4-6", "--gsus", "25"],
-        ["chargeback", "--model", "claude-sonnet-4-6", "--gsus", "25"],
+        ["schedule", "--demo", "--model", "claude-sonnet-4-6", "--gsus", "25"],
+        ["chargeback", "--demo", "--model", "claude-sonnet-4-6", "--gsus", "25"],
     ):
         res = runner.invoke(cli_app, cmd)
         assert res.exit_code == 0, f"CLI command {cmd} failed: {res.output}"

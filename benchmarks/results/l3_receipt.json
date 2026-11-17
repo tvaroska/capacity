@@ -1,11 +1,11 @@
 {
   "schema_version": "capacity.l3_receipt.v1",
-  "generated_at_utc": "2026-11-17T22:26:57Z",
+  "generated_at_utc": "2026-11-17T23:46:41Z",
   "environment": {
     "python": "3.13.15"
   },
-  "git_commit": "e7bca21a11ed85cb9fdf4055098cea8cf4db20fd",
-  "engine_code_sha256": "9cb7bc407e33a4d02cdaaa82c5a932f6295f70ca35d305526394a8a8a9655d04",
+  "git_commit": "dcaeebbc974af37b8fc6605a0bbd4d83cad518e2",
+  "engine_code_sha256": "f3ade6b4e8fbd9825482b1472c0abcebd46d24e234f07c86aa37c6ca42b6234f",
   "corpus_file": "benchmarks/corpora/azure_llm_trace_10k.jsonl.gz",
   "corpus_gzip_sha256": "471ea3916fd27b98c3b38de5b4044d54ff4ace95b0e030354b6e3644bea325a7",
   "track_a_empirical_trace_backtest": {
@@ -77,18 +77,18 @@
         "http_200_streams": 454,
         "router_blackhole_drop_rate_pct": 9.2,
         "burndown_accounting_drift_pct": 40.3101,
-        "peer_pt_starvation_events": 61,
+        "peer_pt_starvation_events": 62,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 395.98
+        "p95_sse_stream_latency_ms": 390.99
       },
       "stateless_rr_stripped": {
         "requests_sent": 500,
         "http_200_streams": 500,
         "router_blackhole_drop_rate_pct": 0.0,
-        "burndown_accounting_drift_pct": 51.3089,
+        "burndown_accounting_drift_pct": 51.3082,
         "peer_pt_starvation_events": 144,
         "effective_prefix_cache_hit_pct": 0.25,
-        "p95_sse_stream_latency_ms": 460.92
+        "p95_sse_stream_latency_ms": 447.53
       },
       "capacity_two_phase_gateway": {
         "requests_sent": 500,
@@ -97,9 +97,9 @@
         "burndown_accounting_drift_pct": 0.0,
         "peer_pt_starvation_events": 0,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 465.63
+        "p95_sse_stream_latency_ms": 473.68
       }
     }
   },
-  "receipt_sha256": "d61332d7d30e378b4340c4b3e2ac7f5d93bee0f557ba12171ea306d326897b56"
+  "receipt_sha256": "491e80c7efc1c197e139233654af408cefcc23a337e518a2e35b2634e9706d5b"
 }

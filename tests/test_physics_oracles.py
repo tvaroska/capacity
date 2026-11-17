@@ -18,14 +18,19 @@ from capacity.burst import evaluate_micro_burst_window, evaluate_prefix_cache_di
 from capacity.cli import app as cli_app
 from capacity.finops import optimize_hybrid_commitment, schedule_residual_capacity
 from capacity.gateway import generate_gateway_bundle
-from capacity.models import DeadlineJobSpec
-from capacity.portal import render_showcase_portal_html
-from capacity.self_hosted import (
-    evaluate_self_hosted_endpoint,
-    load_inference_server_file,
-    parse_inference_server_telemetry,
-    size_disaggregated_prefill_decode,
+from capacity.models import (
+    DeadlineJobSpec,
+    DisaggregatedPoolRequest,
+    GatewayConfigRequest,
+    MicroBurstRequest,
+    OptimizeRequest,
+    ResidualScheduleRequest,
+    SelfHostedAuditRequest,
+    VllmParseRequest,
 )
+from capacity.portal import render_showcase_portal_html
+from capacity.self_hosted import evaluate_self_hosted_endpoint, size_disaggregated_prefill_decode
+from capacity.telemetry_parsers import load_inference_server_file, parse_inference_server_telemetry
 from tests.conftest import FakeAsyncCache, load_generated_burndown_logger
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -60,7 +65,6 @@ def _brute_force_deadline_oracle(
 
 
 def test_l2_knapsack_oracle_parity_and_no_literal_unset_header() -> None:
-    # Classic greedy-density failure case: Job A ($520 / 61M = $8.52/1M) blocks B+C ($1,000 / 120M)
     jobs = [
         DeadlineJobSpec(
             job_id="job-a", value_usd=520.0, burndown_tokens=61_000_000.0, deadline_hour=1
@@ -78,13 +82,14 @@ def test_l2_knapsack_oracle_parity_and_no_literal_unset_header() -> None:
             deadline_hour=5,
         ),
     ]
-    # 20 GSUs * 120,900 * 60 * 0.85 = 123,318,000 tokens in 1h; subtract 3,318,000 -> 120,000,000
     rev_tpm = [(123_318_000.0 - 120_000_000.0) / 60.0]
     report = schedule_residual_capacity(
-        provisioned_gsus=20,
-        tpm_per_gsu=120_900,
-        revenue_tpm_by_hour=rev_tpm,
-        deadline_jobs=jobs,
+        ResidualScheduleRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=20,
+            revenue_tpm_by_hour=rev_tpm,
+            deadline_jobs=jobs,
+        )
     )
     admitted = {j.job_id for j in report.jobs if j.status == "admitted_edf_pt"}
     assert admitted == {"job-b", "job-c"}
@@ -109,17 +114,33 @@ def test_micro_burst_enforces_60s_token_conservation(
     sixty_sec_tpm: float, peak_1s_tps: float, gsus: int
 ) -> None:
     audit = evaluate_micro_burst_window(
-        sixty_sec_tpm=sixty_sec_tpm,
-        peak_1s_tps=peak_1s_tps,
-        provisioned_gsus=gsus,
+        MicroBurstRequest(
+            sixty_sec_tpm=sixty_sec_tpm,
+            peak_1s_tps=peak_1s_tps,
+            provisioned_gsus=gsus,
+        )
     )
     window_tokens = audit.peak_window_tps * audit.refill_window_seconds
     assert window_tokens <= sixty_sec_tpm + 1e-3
 
 
 def test_prefix_cache_dilution_scales_with_rps_and_zero_traffic_is_clean(tmp_path: Path) -> None:
-    at_1_rps = evaluate_prefix_cache_dilution(total_input_tokens=20_000, requests_per_second=1.0)
-    at_4_rps = evaluate_prefix_cache_dilution(total_input_tokens=20_000, requests_per_second=4.0)
+    at_1_rps = evaluate_prefix_cache_dilution(
+        total_input_tokens=20_000,
+        shared_prefix_ratio=0.80,
+        baseline_cache_hit_rate=0.80,
+        num_round_robin_endpoints=8,
+        tps_per_gsu=2015.0,
+        requests_per_second=1.0,
+    )
+    at_4_rps = evaluate_prefix_cache_dilution(
+        total_input_tokens=20_000,
+        shared_prefix_ratio=0.80,
+        baseline_cache_hit_rate=0.80,
+        num_round_robin_endpoints=8,
+        tps_per_gsu=2015.0,
+        requests_per_second=4.0,
+    )
     assert at_4_rps.sticky_gsus >= at_1_rps.sticky_gsus * 3
 
     zero_trace = tmp_path / "zero.json"
@@ -131,7 +152,7 @@ def test_prefix_cache_dilution_scales_with_rps_and_zero_traffic_is_clean(tmp_pat
     assert payload["micro_burst"] is None
     assert payload["prefix_cache"]["round_robin_gsus"] == 0
 
-    sh_zero = evaluate_self_hosted_endpoint([0.0, 0.0, 0.0])
+    sh_zero = evaluate_self_hosted_endpoint(SelfHostedAuditRequest(tpm_series=[0.0, 0.0, 0.0]))
     assert sh_zero.p99_peak_replicas == 0
     assert sh_zero.duty_cycle_illusion_detected is False
 
@@ -139,11 +160,12 @@ def test_prefix_cache_dilution_scales_with_rps_and_zero_traffic_is_clean(tmp_pat
 def test_active_duty_cycle_newsvendor_matches_zero_padded_week() -> None:
     active_slice = [241_800.0] * 40
     zero_padded_168h = active_slice + [0.0] * 128
-    opt_full = optimize_hybrid_commitment(tpm_series=zero_padded_168h, tpm_per_gsu=120_900)
+    opt_full = optimize_hybrid_commitment(OptimizeRequest(tpm_series=zero_padded_168h))
     opt_duty = optimize_hybrid_commitment(
-        tpm_series=active_slice,
-        tpm_per_gsu=120_900,
-        active_duty_cycle_pct=(40.0 / 168.0) * 100.0,
+        OptimizeRequest(
+            tpm_series=active_slice,
+            active_duty_cycle_pct=(40.0 / 168.0) * 100.0,
+        )
     )
     assert opt_duty.optimal_gsus == opt_full.optimal_gsus == 0
     assert opt_duty.total_hybrid_monthly_cost_usd == pytest.approx(
@@ -153,7 +175,7 @@ def test_active_duty_cycle_newsvendor_matches_zero_padded_week() -> None:
 
 def test_disaggregated_vs_monolithic_crossover_honesty() -> None:
     low_qps = size_disaggregated_prefill_decode(
-        peak_qps=0.1, avg_input_tokens=2_000, avg_output_tokens=200
+        DisaggregatedPoolRequest(peak_qps=0.1, avg_input_tokens=2_000, avg_output_tokens=200)
     )
     assert low_qps.monolithic_replicas == 1
     assert low_qps.total_disaggregated_replicas == 2
@@ -161,7 +183,7 @@ def test_disaggregated_vs_monolithic_crossover_honesty() -> None:
     assert "Keep 1 monolithic" in low_qps.recommendation
 
     high_qps = size_disaggregated_prefill_decode(
-        peak_qps=18.0, avg_input_tokens=6_400, avg_output_tokens=450
+        DisaggregatedPoolRequest(peak_qps=18.0, avg_input_tokens=6_400, avg_output_tokens=450)
     )
     assert high_qps.prefill_replicas == 8
     assert high_qps.decode_replicas == 11
@@ -173,10 +195,12 @@ def test_disaggregated_vs_monolithic_crossover_honesty() -> None:
 async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> None:
     long_sh = "llama-3-3-70b-instruct-enterprise-fp8-quantized-deployment-v2"
     bundle = generate_gateway_bundle(
-        model="gemini-3.8-flash",
-        provisioned_gsus=4,
-        self_hosted_model=long_sh,
-        business_unit_shares=2,
+        GatewayConfigRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=4,
+            self_hosted_model=long_sh,
+            business_unit_shares=2,
+        )
     )
     envoy_docs = list(yaml.safe_load_all(bundle.envoy_ai_gateway_yaml))
     route_doc, rl_doc = envoy_docs[0], envoy_docs[1]
@@ -199,12 +223,10 @@ async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> No
     redis = FakeAsyncCache()
     key_obj = SimpleNamespace(team_id="claims", max_budget_tpm=200_000.0)
 
-    # Client spoofs metadata=0.0; callback must ignore client metadata and use Redis!
     call1: dict[str, Any] = {"metadata": {"team_current_burndown_tpm": 0.0}}
     await logger.async_pre_call_hook(key_obj, redis, call1, "acompletion")
     assert "extra_headers" not in call1
 
-    # 250K prompt, 200K cached, 2K output, 10K reasoning -> 50K*2 + 200K*0.2 + 12K*7.5 = 230,000.0
     resp = SimpleNamespace(
         usage=SimpleNamespace(
             prompt_tokens=250_000,
@@ -225,7 +247,6 @@ async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> No
     )
     assert len(redis.increments) == 2
 
-    # Next call in same minute exceeds 200,000 funded ceiling -> flips to shared/priority!
     call2: dict[str, Any] = {"metadata": {"team_current_burndown_tpm": 0.0}}
     await logger.async_pre_call_hook(key_obj, redis, call2, "acompletion")
     assert call2["extra_headers"]["X-Vertex-AI-LLM-Request-Type"] == "shared"
@@ -238,10 +259,8 @@ def test_byo_otel_prometheus_cli_gauges_and_60x_chargeback_fix(tmp_path: Path) -
     assert otel_snap.cached_tokens_total == 192_000
     assert otel_snap.thoughts_tokens_total == 3_600
     assert otel_snap.observed_kv_cache_usage_pct == pytest.approx(72.0)
-    # 13:00+02:00 normalizes to 11:00 UTC alongside epoch 1762600805 (2025-11-08T11:20:05Z)
     assert len(otel_snap.hourly_consumed_tpm_by_tenant["claims-triage"]) == 2
 
-    # Steady 60,000 burndown tokens/min for 60 mins = 3.6M tokens/hr -> must equal 60,000 TPM (not 3.6M!)
     steady_lines = "\n".join(
         json.dumps(
             {
@@ -253,7 +272,7 @@ def test_byo_otel_prometheus_cli_gauges_and_60x_chargeback_fix(tmp_path: Path) -
         )
         for m in range(60)
     )
-    steady_snap = parse_inference_server_telemetry(steady_lines)
+    steady_snap = parse_inference_server_telemetry(VllmParseRequest(raw_content=steady_lines))
     assert steady_snap.hourly_consumed_tpm_by_tenant["claims-triage"] == [60_000.0]
 
     prom_multi = load_inference_server_file(
@@ -281,7 +300,7 @@ def test_byo_otel_prometheus_cli_gauges_and_60x_chargeback_fix(tmp_path: Path) -
 
 def test_security_dos_nan_filter_injection_and_static_html() -> None:
     t0 = time.perf_counter()
-    audit_huge = evaluate_self_hosted_endpoint([1e10, 5e9])
+    audit_huge = evaluate_self_hosted_endpoint(SelfHostedAuditRequest(tpm_series=[1e10, 5e9]))
     elapsed_ms = (time.perf_counter() - t0) * 1_000.0
     assert elapsed_ms < 100.0
     assert audit_huge.optimal_reserved_replicas >= 0

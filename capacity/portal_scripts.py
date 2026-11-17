@@ -130,9 +130,10 @@ PORTAL_CLIENT_SCRIPT = """
       }
       const blockSize = isTokenBoundary ? 1 : 4096;
       const effSpan = dynOffset < staticIn ? dynOffset : staticIn;
-      const block0 = !isTokenBoundary && dynOffset < 4096;
+      const block0 = !isTokenBoundary && dynOffset < staticIn && dynOffset < 4096;
+      const tokenBoundaryContam = isTokenBoundary && dynOffset < staticIn && dynOffset < minFloor;
       let aligned = 0;
-      if (effSpan >= minFloor && !block0) {
+      if (effSpan >= minFloor && !block0 && !tokenBoundaryContam) {
         aligned = isTokenBoundary ? effSpan : Math.floor(effSpan / blockSize) * blockSize;
       }
       let affinity = 0.90;
@@ -149,15 +150,29 @@ PORTAL_CLIENT_SCRIPT = """
         curHit.toFixed(1) + '% \\u2192 ' + optHit.toFixed(1) + '%';
       const cBadge = document.getElementById('cache-block0-badge');
       const remBox = document.getElementById('sim-remediation-box');
-      if (block0) {
+      if (block0 || tokenBoundaryContam) {
+        const limitTok = block0 ? 4096 : minFloor;
         cBadge.className = 'badge badge-danger';
-        cBadge.textContent = 'Block-0 Contaminated (Offset ' + dynOffset + ' < 4,096)';
+        cBadge.textContent =
+          'Dynamic Token @ Offset ' + dynOffset + ' (<' + limitTok.toLocaleString() + ')';
         remBox.style.background = 'var(--danger-bg)';
         remBox.style.color = 'var(--danger)';
         remBox.textContent =
-          'Block 0 Contamination Active: Dynamic token at offset ' + dynOffset +
-          ' (<4,096) invalidates all 4,096-token blocks (0% cache hit). ' +
+          'Dynamic token injected at offset ' + dynOffset +
+          ' (<' + limitTok.toLocaleString() + ') prevents prefix caching (0% cache hit). ' +
           'Move dynamic headers/UUIDs to the end of the prompt.';
+      } else if (effSpan < minFloor) {
+        cBadge.className = 'badge badge-warn';
+        cBadge.textContent = 'Below Cache Floor (<' + minFloor.toLocaleString() + ' tok)';
+        remBox.style.background = 'var(--warning-bg)';
+        remBox.style.color = 'var(--warning)';
+        remBox.textContent = isClaude
+          ? '3P Claude prompt caching requires an explicit cache_control breakpoint at >=' +
+            minFloor.toLocaleString() + ' tokens (1.25x 5m / 2.0x 1h write vs 0.1x read; ' +
+            '30s/60s dual bucket with 0% burst credit).'
+          : 'Static prefix (' + staticIn.toLocaleString() +
+            ' tokens) is below the ' + minFloor.toLocaleString() +
+            '-token minimum checkpoint floor (0% cache hit).';
       } else if (mode !== 'none') {
         cBadge.className = 'badge badge-warn';
         cBadge.textContent = mode === 'strip_sig'
@@ -170,24 +185,6 @@ PORTAL_CLIENT_SCRIPT = """
             'to 0.77%. Preserve full modelContent across turns.'
           : 'Single-turn request misses prefix router affinity. Prepend a ' +
             '2-token static dummy (user + model) turn pair.';
-      } else if (isCarbon) {
-        cBadge.className = 'badge badge-warn';
-        cBadge.textContent = 'Short-Term GA (Eval / Pilot Only)';
-        remBox.style.background = 'var(--warning-bg)';
-        remBox.style.color = 'var(--warning)';
-        remBox.textContent =
-          'gemini-4-carbon is a Short-Term GA endpoint: keep off 12-month fixed PT ' +
-          'commitments (use Priority PayGo for pilots; anchor production PT on Long-Term ' +
-          'GA gemini-4-argon, gemini-3.8-flash, or gemini-3.5-flash-lite).';
-      } else if (isClaude && effSpan < minFloor) {
-        cBadge.className = 'badge badge-warn';
-        cBadge.textContent = 'Below Cache Floor (<' + minFloor.toLocaleString() + ' tok)';
-        remBox.style.background = 'var(--warning-bg)';
-        remBox.style.color = 'var(--warning)';
-        remBox.textContent =
-          '3P Claude prompt caching requires an explicit cache_control breakpoint at >=' +
-          minFloor.toLocaleString() + ' tokens (1.25x 5m / 2.0x 1h write vs 0.1x read; ' +
-          '30s/60s dual bucket with 0% burst credit).';
       } else {
         cBadge.className = 'badge badge-green';
         cBadge.textContent = 'Prefix Cache Healthy (' + curHit.toFixed(1) + '% Hit)';

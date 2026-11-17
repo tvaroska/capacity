@@ -1,38 +1,23 @@
-"""The request contract the CLI and the API share: bad input fails, it is never answered."""
+"""The request contract the CLI and the API share: bad input fails, and both ports match."""
 
 from __future__ import annotations
 
-import inspect
 import json
-from collections.abc import Callable
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
-from pydantic import BaseModel
-from pydantic_core import PydanticUndefined
 from typer.testing import CliRunner
 
 from capacity import models
 from capacity.api import app as api_app
-from capacity.burst import evaluate_model_tier_prefix_cache
 from capacity.cli import app as cli_app
-from capacity.finops import (
-    compute_finops_kpis,
-    compute_focus_chargeback,
-    evaluate_batch_scavenger_economics,
-    evaluate_folder_pooling,
-    schedule_residual_capacity,
-)
-from capacity.gateway import generate_gateway_bundle
-from capacity.self_hosted import (
-    evaluate_self_hosted_endpoint,
-    parse_inference_server_telemetry,
-    size_disaggregated_prefill_decode,
-)
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
 client = TestClient(api_app)
 runner = CliRunner()
 
@@ -41,37 +26,39 @@ POST_ROUTES = sorted(
     for route in api_app.routes
     if isinstance(route, APIRoute) and "POST" in route.methods
 )
-# The only body fields without a default.
 REQUIRED_BODY: dict[str, dict[str, Any]] = {
+    "/api/v1/optimize": {"tpm_series": [241_800.0]},
+    "/api/v1/self-hosted/audit": {"tpm_series": [384_000.0]},
     "/api/v1/vllm/parse": {"raw_content": ""},
     "/api/v1/chargeback": {"hourly_consumed_tpm_by_tenant": {"a": [1.0]}},
+    "/api/v1/finops/schedule": {
+        "deadline_jobs": [
+            {"job_id": "j1", "value_usd": 100.0, "burndown_tokens": 1_000.0, "deadline_hour": 1}
+        ]
+    },
+    "/api/v1/finops/folder-pooling": {"hourly_tpm_by_project": {"spoke-a": [120_900.0]}},
+    "/api/v1/scenario/evaluate": {
+        "gsu_sizing": {"minute_tpm_series": {"gemini-3.8-flash@global": [120_900.0]}}
+    },
 }
 DUPLICATE_JOBS = [
     {"job_id": "same", "value_usd": 100.0, "burndown_tokens": 6_000_000.0, "deadline_hour": 1},
     {"job_id": "same", "value_usd": 100.0, "burndown_tokens": 6_000_000.0, "deadline_hour": 1},
 ]
-# Request model, the domain function it feeds, and the fields the port resolves itself.
-OPERATIONS: list[tuple[type[BaseModel], Callable[..., Any], set[str]]] = [
-    (models.ModelTierPrefixCacheRequest, evaluate_model_tier_prefix_cache, set()),
-    (models.SelfHostedAuditRequest, evaluate_self_hosted_endpoint, set()),
-    (models.DisaggregatedPoolRequest, size_disaggregated_prefill_decode, set()),
-    (models.VllmParseRequest, parse_inference_server_telemetry, set()),
-    (models.GatewayConfigRequest, generate_gateway_bundle, set()),
-    (models.ChargebackRequest, compute_focus_chargeback, {"model"}),
-    (models.BatchScavengerRequest, evaluate_batch_scavenger_economics, set()),
-    (models.ResidualScheduleRequest, schedule_residual_capacity, {"model"}),
-    (models.FolderPoolingRequest, evaluate_folder_pooling, set()),
-    (models.FinOpsKpiRequest, compute_finops_kpis, set()),
-]
 
 
-def test_all_eleven_post_routes_are_under_test() -> None:
-    assert len(POST_ROUTES) == 11
+def test_all_twelve_post_routes_are_under_test() -> None:
+    assert len(POST_ROUTES) == 12
 
 
 @pytest.mark.parametrize("path", POST_ROUTES)
 def test_minimal_body_is_accepted(path: str) -> None:
     assert client.post(path, json=REQUIRED_BODY.get(path, {})).status_code == 200
+
+
+@pytest.mark.parametrize("path", sorted(REQUIRED_BODY))
+def test_empty_body_is_rejected_on_data_routes(path: str) -> None:
+    assert client.post(path, json={}).status_code == 422
 
 
 @pytest.mark.parametrize("path", POST_ROUTES)
@@ -105,7 +92,7 @@ def test_repeated_job_id_is_rejected_on_api_and_cli(tmp_path: Path) -> None:
     [
         ("/api/v1/vllm/parse", {"raw_content": "{"}),
         ("/api/v1/vllm/parse", {"raw_content": '{"prompt_tokens": 5}'}),
-        ("/api/v1/optimize", {"spillover_tier": "gold"}),
+        ("/api/v1/optimize", {"tpm_series": [100_000.0], "spillover_tier": "gold"}),
         ("/api/v1/prefix-cache/model-tier", {"model": "gpt-4o"}),
     ],
 )
@@ -140,7 +127,12 @@ def test_requests_that_expand_to_a_huge_matrix_are_rejected() -> None:
     assert ok.status_code == 200
 
 
-def test_cli_rejects_what_the_api_rejects() -> None:
+def test_cli_rejects_missing_data_without_demo_and_matches_api_rejections() -> None:
+    for cmd in (["optimize"], ["schedule"], ["chargeback"]):
+        missing = runner.invoke(cli_app, cmd)
+        assert missing.exit_code == 1
+        assert missing.output.startswith("Error: ")
+
     res = runner.invoke(cli_app, ["gateway", "--gsus", "-5", "--pods", "0"])
     assert res.exit_code == 1
     assert "provisioned_gsus" in res.output and "pods" in res.output
@@ -148,33 +140,102 @@ def test_cli_rejects_what_the_api_rejects() -> None:
     assert resp.status_code == 422
 
 
-def test_self_hosted_chargeback_uses_the_price_it_was_given() -> None:
-    def total(*price: str) -> float:
+def test_self_hosted_chargeback_matches_between_cli_and_api(tmp_path: Path) -> None:
+    tenants = {"a": [192_000.0, 96_000.0], "b": [96_000.0, 0.0]}
+    tenant_file = tmp_path / "sh_tenants.json"
+    tenant_file.write_text(json.dumps(tenants), encoding="utf-8")
+
+    def cli_report(*extra: str) -> dict[str, Any]:
         res = runner.invoke(
             cli_app,
             [
-                *("chargeback", "--mode", "self-hosted", "--model", "llama-3.3-70b-fp8"),
-                *("--gsus", "4", *price, "--format", "json"),
+                "chargeback",
+                "--mode",
+                "self-hosted",
+                "--model",
+                "llama-3.3-70b-fp8",
+                "--gsus",
+                "4",
+                "--tenant-file",
+                str(tenant_file),
+                *extra,
+                "--format",
+                "json",
             ],
         )
         assert res.exit_code == 0, res.output
-        return float(json.loads(res.stdout)["total_commitment_cost_usd"])
+        out: dict[str, Any] = json.loads(res.stdout)
+        return out
 
-    assert total("--gsu-price", "2000") == pytest.approx(8_000.0)
-    assert total("--gsu-price", "2000.01") == pytest.approx(8_000.04)
-    assert total() == pytest.approx(4 * 18_500.0)
+    default_cli = cli_report()
+    assert default_cli["total_commitment_cost_usd"] == pytest.approx(4 * 18_500.0)
+    api_default = client.post(
+        "/api/v1/chargeback",
+        json={
+            "mode": "self-hosted",
+            "model": "llama-3.3-70b-fp8",
+            "provisioned_gsus": 4,
+            "hourly_consumed_tpm_by_tenant": tenants,
+        },
+    )
+    assert api_default.status_code == 200
+    assert default_cli == api_default.json()
+
+    priced_cli = cli_report("--gsu-price", "2000.01")
+    assert priced_cli["total_commitment_cost_usd"] == pytest.approx(8_000.04)
+    api_priced = client.post(
+        "/api/v1/chargeback",
+        json={
+            "mode": "self-hosted",
+            "model": "llama-3.3-70b-fp8",
+            "provisioned_gsus": 4,
+            "gsu_monthly_price_usd": 2000.01,
+            "hourly_consumed_tpm_by_tenant": tenants,
+        },
+    )
+    assert priced_cli == api_priced.json()
 
 
-def test_chargeback_with_no_options_is_the_same_on_both_ports(tmp_path: Path) -> None:
+def test_cli_and_api_return_identical_results_across_operations(tmp_path: Path) -> None:
     tenants = {"a": [90_000.0, 30_000.0], "b": [10_000.0, 0.0]}
     tenant_file = tmp_path / "tenants.json"
     tenant_file.write_text(json.dumps(tenants), encoding="utf-8")
-    res = runner.invoke(
+    cb_cli = runner.invoke(
         cli_app, ["chargeback", "--tenant-file", str(tenant_file), "--format", "json"]
     )
-    assert res.exit_code == 0, res.output
-    resp = client.post("/api/v1/chargeback", json={"hourly_consumed_tpm_by_tenant": tenants})
-    assert json.loads(res.stdout) == resp.json()
+    cb_api = client.post("/api/v1/chargeback", json={"hourly_consumed_tpm_by_tenant": tenants})
+    assert json.loads(cb_cli.stdout) == cb_api.json()
+
+    trace = [362_700.0, 241_800.0, 120_900.0]
+    trace_file = tmp_path / "trace.json"
+    trace_file.write_text(json.dumps(trace), encoding="utf-8")
+    opt_cli = runner.invoke(
+        cli_app, ["optimize", "--trace-file", str(trace_file), "--format", "json"]
+    )
+    opt_api = client.post("/api/v1/optimize", json={"tpm_series": trace})
+    assert json.loads(opt_cli.stdout) == opt_api.json()
+
+    sh_cli = runner.invoke(
+        cli_app,
+        ["optimize", "--mode", "self-hosted", "--trace-file", str(trace_file), "--format", "json"],
+    )
+    sh_api = client.post("/api/v1/self-hosted/audit", json={"tpm_series": trace})
+    assert json.loads(sh_cli.stdout) == sh_api.json()
+
+    jobs = [
+        {"job_id": "j1", "value_usd": 500.0, "burndown_tokens": 5_000_000.0, "deadline_hour": 2}
+    ]
+    jobs_file = tmp_path / "jobs.json"
+    jobs_file.write_text(json.dumps(jobs), encoding="utf-8")
+    sched_cli = runner.invoke(
+        cli_app, ["schedule", "--jobs-file", str(jobs_file), "--format", "json"]
+    )
+    sched_api = client.post("/api/v1/finops/schedule", json={"deadline_jobs": jobs})
+    assert json.loads(sched_cli.stdout) == sched_api.json()
+
+    gw_cli = runner.invoke(cli_app, ["gateway", "--gsus", "12", "--format", "json"])
+    gw_api = client.post("/api/v1/gateway/config", json={"provisioned_gsus": 12})
+    assert json.loads(gw_cli.stdout) == gw_api.json()
 
 
 @pytest.mark.parametrize(
@@ -224,26 +285,22 @@ def test_serve_listens_on_loopback_unless_told_otherwise() -> None:
     assert "127.0.0.1" in res.output
 
 
-@pytest.mark.parametrize(("request_model", "function", "resolved_by_port"), OPERATIONS)
-def test_request_fields_are_the_parameters_of_their_function(
-    request_model: type[BaseModel], function: Callable[..., Any], resolved_by_port: set[str]
-) -> None:
-    params = inspect.signature(function).parameters
-    for name in set(request_model.model_fields) - resolved_by_port:
-        assert name in params, f"{request_model.__name__}.{name} is not a parameter"
-        model_default = request_model.model_fields[name].default
-        if model_default is PydanticUndefined or params[name].default is inspect.Parameter.empty:
-            continue
-        assert model_default == params[name].default, (
-            f"{request_model.__name__}.{name} defaults to {model_default!r}, "
-            f"{function.__name__} to {params[name].default!r}"
-        )
-
-
-@pytest.mark.parametrize(("request_model", "function"), [(m, f) for m, f, _ in OPERATIONS])
-def test_function_takes_nothing_the_cli_and_api_cannot_set(
-    request_model: type[BaseModel], function: Callable[..., Any]
-) -> None:
-    """Only the capacity a port looks up from the model may sit outside the request."""
-    outside = set(inspect.signature(function).parameters) - set(request_model.model_fields)
-    assert outside <= {"tpm_per_gsu"}, f"{function.__name__}: {sorted(outside)}"
+def test_importing_cli_and_api_neither_loads_cloud_sdk_nor_reads_dotenv(tmp_path: Path) -> None:
+    (tmp_path / ".env").write_text("GSU_CAPACITY_SYNTHETIC_DOTENV_PROBE=999999\n", encoding="utf-8")
+    probe = (
+        "import json, os, sys\n"
+        f"sys.path.insert(0, {str(REPO_ROOT)!r})\n"
+        "import capacity.cli, capacity.api\n"
+        "sdk_mods = sorted(m for m in sys.modules if m.startswith(('google.cloud', 'grpc')))\n"
+        "print(json.dumps({'sdk': sdk_mods, 'env': 'GSU_CAPACITY_SYNTHETIC_DOTENV_PROBE' in os.environ}))\n"
+    )
+    proc = subprocess.run(  # noqa: S603
+        [sys.executable, "-B", "-c", probe],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    data = json.loads(proc.stdout.strip())
+    assert data["sdk"] == []
+    assert data["env"] is False

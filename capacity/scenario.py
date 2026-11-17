@@ -1,4 +1,4 @@
-"""Typed multi-profile scenario contract (`--scenario-file`) and telemetry-to-scenario compiler."""
+"""Scenario contract (`--scenario-file`), sample datasets, and typed scenario evaluator."""
 
 from __future__ import annotations
 
@@ -13,37 +13,157 @@ from typing import Annotated, Literal, Self
 import yaml
 from pydantic import Field, model_validator
 
-from capacity.capacity import find_capacity
-from capacity.model_families import is_partner_claude, normalize_model_id
+from capacity.burst import (
+    evaluate_micro_burst_window,
+    evaluate_model_tier_prefix_cache,
+    evaluate_prefix_cache_dilution,
+)
+from capacity.capacity import ASSUMED_PEAK_TO_MEAN_RATIO, build_response
+from capacity.finops import (
+    compute_finops_kpis,
+    compute_focus_chargeback,
+    evaluate_batch_scavenger_economics,
+    evaluate_folder_pooling,
+    optimize_hybrid_commitment,
+    schedule_residual_capacity,
+)
+from capacity.forecasting import (
+    DEFAULT_TRACE_EPOCH_UTC,
+    SparseSeriesMap,
+    build_demo_throughput,
+    minute_list_to_sparse,
+)
+from capacity.gateway import generate_gateway_bundle
+from capacity.model_families import (
+    LifecycleTrack,
+    ModelCatalog,
+    build_model_catalog,
+    infer_lifecycle_track,
+    is_partner_claude,
+    normalize_model_id,
+)
 from capacity.models import (
     MAX_SERIES_CELLS,
     MAX_SERIES_KEYS,
+    MAX_SERIES_POINTS,
     MODEL_ID_PATTERN,
+    PACKAGE_VERSION,
+    BatchScavengerAudit,
     BatchScavengerRequest,
     BoundedTpmFloat,
     ChargebackRequest,
+    DeadlineJobSpec,
     DisaggregatedPoolRequest,
+    DisaggregatedPoolSizing,
     FinOpsKpiRequest,
+    FinOpsKpiScorecard,
+    FocusChargebackReport,
+    FolderPoolingReport,
     FolderPoolingRequest,
+    GatewayConfigBundle,
     GatewayConfigRequest,
+    HybridCommitmentRecommendation,
+    MicroBurstAudit,
+    MicroBurstRequest,
+    ModelTierPrefixCacheAudit,
     ModelTierPrefixCacheRequest,
     OptimizeRequest,
+    PrefixCacheAudit,
+    RecommendationResponse,
+    ResidualScheduleReport,
     ResidualScheduleRequest,
     SelfHostedAuditRequest,
+    SeriesKey,
     StrictModel,
+)
+from capacity.self_hosted import (
+    SelfHostedEndpointAudit,
+    evaluate_self_hosted_endpoint,
+    size_disaggregated_prefill_decode,
 )
 from capacity.telemetry_parsers import VllmTelemetrySnapshot
 
 PlatformBrand = Literal["Gemini Platform", "Vertex AI"]
-LifecycleTrack = Literal["long_term_ga", "short_term_ga", "preview", "legacy_sunset"]
 RenewalMode = Literal["fixed_term", "auto_renew", "mixed", "none"]
 GatewayPresentationMode = Literal["oss_stack", "central_proxy"]
-FinOpsPoolingMode = Literal["folder_rhpt", "1p_vs_3p_hub", "silo_stranding_audit"]
+FinOpsPoolingMode = Literal["folder_rhpt", "1p_vs_3p_hub"]
 
-MAX_MINUTE_POINTS = 60_480  # up to 42 days of 1-minute buckets per series
+MAX_MINUTE_POINTS = MAX_SERIES_POINTS
 MinuteTpmSeries = Annotated[
     list[BoundedTpmFloat], Field(min_length=1, max_length=MAX_MINUTE_POINTS)
 ]
+
+# Canonical sample datasets kept in one place for `capacity demo` and `--demo` CLI switches.
+DEMO_OPTIMIZE_SERIES: tuple[float, ...] = (
+    420_000.0,
+    390_000.0,
+    360_000.0,
+    310_000.0,
+    280_000.0,
+    250_000.0,
+    240_000.0,
+    220_000.0,
+    190_000.0,
+    160_000.0,
+    90_000.0,
+    40_000.0,
+)
+DEMO_SELF_HOSTED_SERIES: tuple[float, ...] = (
+    520_000.0,
+    480_000.0,
+    410_000.0,
+    340_000.0,
+    290_000.0,
+    180_000.0,
+)
+
+
+DEFAULT_TENANT_RAW_TOKEN_WEIGHTS: dict[str, float] = {
+    "claims-triage": 1.85,
+    "underwriting-copilot": 1.10,
+    "policy-audit": 0.45,
+}
+
+
+def make_default_chargeback_tenants() -> dict[str, list[float] | float]:
+    return {
+        "claims-triage": [403_000.0] * 8 + [80_600.0] * 16,
+        "underwriting-copilot": [302_250.0] * 8 + [60_450.0] * 16,
+        "policy-audit": [201_500.0] * 8 + [40_300.0] * 16,
+    }
+
+
+def make_default_folder_pooling_projects() -> dict[str, list[float]]:
+    return {
+        "emea-wealth-spoke": [480_000.0, 520_000.0, 410_000.0, 90_000.0, 40_000.0, 30_000.0],
+        "amer-retail-spoke": [60_000.0, 80_000.0, 490_000.0, 560_000.0, 510_000.0, 90_000.0],
+        "apac-markets-spoke": [510_000.0, 110_000.0, 50_000.0, 40_000.0, 460_000.0, 530_000.0],
+    }
+
+
+def make_default_deadline_jobs() -> list[DeadlineJobSpec]:
+    """Return the canonical 3-job overnight residual scheduling portfolio."""
+    return [
+        DeadlineJobSpec(
+            job_id="premarket-portfolio-briefings",
+            value_usd=18_000.0,
+            burndown_tokens=240_000_000.0,
+            deadline_hour=6,
+        ),
+        DeadlineJobSpec(
+            job_id="regulatory-risk-digest",
+            value_usd=12_000.0,
+            burndown_tokens=180_000_000.0,
+            deadline_hour=5,
+        ),
+        DeadlineJobSpec(
+            job_id="low-density-archive-sweep",
+            value_usd=900.0,
+            burndown_tokens=320_000_000.0,
+            deadline_hour=6,
+        ),
+    ]
+
 
 _PUBLIC_SAFETY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("10-14 digit cloud project or order identifier", re.compile(r"\b\d{10,14}\b")),
@@ -58,29 +178,9 @@ _PUBLIC_SAFETY_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
-def _default_chargeback_tenants() -> dict[str, list[float] | float]:
-    return {
-        "claims-triage": [403_000.0] * 8 + [80_600.0] * 16,
-        "underwriting-copilot": [302_250.0] * 8 + [60_450.0] * 16,
-        "policy-audit": [201_500.0] * 8 + [40_300.0] * 16,
-    }
-
-
-def infer_lifecycle_track(model_id: str) -> LifecycleTrack:
-    """Classify a normalized model ID into its enterprise GA lifecycle track."""
-    norm = normalize_model_id(model_id)
-    if "preview" in model_id.lower() or "exp" in model_id.lower():
-        return "preview"
-    if "carbon" in norm:
-        return "short_term_ga"
-    if norm.startswith(("gemini-2.0-", "gemini-2.5-", "claude-3-")):
-        return "legacy_sunset"
-    return "long_term_ga"
-
-
 class ScenarioPresentation(StrictModel):
     title: str = Field(
-        default="Capacity Showcase Workbench (v0.3.0)",
+        default_factory=lambda: f"Capacity Showcase Workbench (v{PACKAGE_VERSION})",
         min_length=3,
         max_length=140,
     )
@@ -107,11 +207,10 @@ class ModelInventoryAnnotation(StrictModel):
     renewal_mode: RenewalMode | None = None
     expiry_date: str | None = Field(default=None, pattern=r"^\d{4}-\d{2}-\d{2}$")
     expiring_fixed_gsus: int | None = Field(default=None, ge=0, le=100_000)
-    note: str | None = Field(default=None, max_length=240)
 
 
 class ScenarioGsuSizing(StrictModel):
-    project_label: str = Field(default="enterprise-ai-hub", min_length=1, max_length=80)
+    project_label: str = Field(default="demo-enterprise-ai", min_length=1, max_length=80)
     days: int = Field(default=7, ge=1, le=365)
     by_region: bool = True
     active_only: bool = True
@@ -138,7 +237,9 @@ class ScenarioGsuSizing(StrictModel):
 
 class ScenarioSelfHosted(StrictModel):
     enabled: bool = True
-    audit: SelfHostedAuditRequest = Field(default_factory=SelfHostedAuditRequest)
+    audit: SelfHostedAuditRequest = Field(
+        default_factory=lambda: SelfHostedAuditRequest(tpm_series=list(DEMO_SELF_HOSTED_SERIES))
+    )
     disaggregated: DisaggregatedPoolRequest = Field(default_factory=DisaggregatedPoolRequest)
 
 
@@ -149,7 +250,9 @@ class ScenarioBurstAndCache(StrictModel):
     peak_1s_tps: BoundedTpmFloat = 25_000.0
     peak_10s_tps: BoundedTpmFloat | None = None
     peak_30s_tps: BoundedTpmFloat | None = None
-    prefix_dilution: OptimizeRequest = Field(default_factory=OptimizeRequest)
+    prefix_dilution: OptimizeRequest = Field(
+        default_factory=lambda: OptimizeRequest(tpm_series=list(DEMO_OPTIMIZE_SERIES))
+    )
     flash_tier_audit: ModelTierPrefixCacheRequest = Field(
         default_factory=lambda: ModelTierPrefixCacheRequest(
             model="gemini-3.8-flash", single_turn_request=True
@@ -174,17 +277,26 @@ class ScenarioGateway(StrictModel):
 class ScenarioFinOps(StrictModel):
     pooling_mode: FinOpsPoolingMode = "folder_rhpt"
     commitment: OptimizeRequest = Field(
-        default_factory=lambda: OptimizeRequest(fsp_discount_pct=15.0)
+        default_factory=lambda: OptimizeRequest(
+            tpm_series=list(DEMO_OPTIMIZE_SERIES), fsp_discount_pct=15.0
+        )
     )
     chargeback: ChargebackRequest = Field(
         default_factory=lambda: ChargebackRequest(
-            hourly_consumed_tpm_by_tenant=_default_chargeback_tenants(),
+            hourly_consumed_tpm_by_tenant=make_default_chargeback_tenants(),
+            tenant_raw_token_weights=dict(DEFAULT_TENANT_RAW_TOKEN_WEIGHTS),
             async_batch_waterfill_tpm=362_700.0,
         )
     )
     scavenger: BatchScavengerRequest = Field(default_factory=BatchScavengerRequest)
-    residual_schedule: ResidualScheduleRequest = Field(default_factory=ResidualScheduleRequest)
-    folder_pooling: FolderPoolingRequest = Field(default_factory=FolderPoolingRequest)
+    residual_schedule: ResidualScheduleRequest = Field(
+        default_factory=lambda: ResidualScheduleRequest(deadline_jobs=make_default_deadline_jobs())
+    )
+    folder_pooling: FolderPoolingRequest = Field(
+        default_factory=lambda: FolderPoolingRequest(
+            hourly_tpm_by_project=make_default_folder_pooling_projects()
+        )
+    )
     kpis: FinOpsKpiRequest = Field(default_factory=FinOpsKpiRequest)
 
 
@@ -196,6 +308,146 @@ class ShowcaseScenario(StrictModel):
     burst_and_cache: ScenarioBurstAndCache = Field(default_factory=ScenarioBurstAndCache)
     gateway: ScenarioGateway = Field(default_factory=ScenarioGateway)
     finops: ScenarioFinOps = Field(default_factory=ScenarioFinOps)
+
+
+class ShowcaseReport(StrictModel):
+    """Typed whole-scenario evaluation result shared by CLI, API, and HTML workbench."""
+
+    version: str = PACKAGE_VERSION
+    scenario_mode: bool = False
+    scenario: ShowcaseScenario
+    gsu_recommendations: RecommendationResponse
+    self_hosted_audit: SelfHostedEndpointAudit | None = None
+    disaggregated_sizing: DisaggregatedPoolSizing | None = None
+    micro_burst: MicroBurstAudit
+    prefix_cache_rr: PrefixCacheAudit
+    prefix_cache_flash: ModelTierPrefixCacheAudit
+    prefix_cache_argon: ModelTierPrefixCacheAudit
+    gateway: GatewayConfigBundle
+    commitment: HybridCommitmentRecommendation
+    chargeback: FocusChargebackReport
+    scavenger: BatchScavengerAudit
+    residual_schedule: ResidualScheduleReport
+    folder_pooling: FolderPoolingReport
+    finops_kpis: FinOpsKpiScorecard
+
+
+def build_default_showcase_scenario() -> ShowcaseScenario:
+    """Build the canonical default `ShowcaseScenario` used by `capacity demo`."""
+    sparse, total_minutes = build_demo_throughput(days=7, by_region=True, mode="gsu")
+    minute_series: dict[str, list[float]] = {}
+    for skey in sorted(sparse):
+        arr = [0.0] * total_minutes
+        for ts, val in sparse[skey].items():
+            idx = int((ts - DEFAULT_TRACE_EPOCH_UTC).total_seconds() // 60)
+            if 0 <= idx < total_minutes:
+                arr[idx] = float(val)
+        minute_series[skey.format(by_region=True)] = arr
+    return ShowcaseScenario(
+        gsu_sizing=ScenarioGsuSizing(
+            project_label="demo-enterprise-ai",
+            days=7,
+            by_region=True,
+            active_only=True,
+            forecast_hours=24,
+            minute_tpm_series=minute_series,
+        )
+    )
+
+
+def evaluate_showcase_scenario(scenario: ShowcaseScenario | None = None) -> ShowcaseReport:
+    """Evaluate a `ShowcaseScenario` (or the default demo) into a typed `ShowcaseReport`."""
+    is_custom_scenario = scenario is not None
+    eff = scenario if scenario is not None else build_default_showcase_scenario()
+    gs = eff.gsu_sizing
+    catalog: ModelCatalog = build_model_catalog(overrides=gs.gsu_capacity_overrides or None)
+
+    sparse: dict[SeriesKey, dict[datetime, int]] = {}
+    max_len = 0
+    for raw_key, arr in gs.minute_tpm_series.items():
+        max_len = max(max_len, len(arr))
+        skey = SeriesKey.parse(raw_key, by_region=gs.by_region and "@" in raw_key)
+        sparse[skey] = minute_list_to_sparse(arr)
+    total_mins = max(gs.days * 24 * 60, max_len)
+
+    gsu_recs = build_response(
+        project=gs.project_label,
+        days=gs.days,
+        sparse_series=sparse,
+        total_minutes=total_mins,
+        percentiles=[50, 75, 90, 95],
+        active_only=gs.active_only,
+        by_region=gs.by_region,
+        forecast_steps=gs.forecast_hours,
+        mode="gsu",
+        catalog=catalog,
+    )
+
+    sh_audit = (
+        evaluate_self_hosted_endpoint(eff.self_hosted.audit) if eff.self_hosted.enabled else None
+    )
+    disagg = (
+        size_disaggregated_prefill_decode(eff.self_hosted.disaggregated)
+        if eff.self_hosted.enabled
+        else None
+    )
+
+    bc = eff.burst_and_cache
+    b_rec = catalog.require(bc.default_model)
+    b_spec = b_rec.family_spec
+    burst = evaluate_micro_burst_window(
+        MicroBurstRequest(
+            model=bc.default_model,
+            provisioned_gsus=bc.provisioned_gsus,
+            sixty_sec_tpm=bc.sixty_sec_tpm,
+            peak_1s_tps=bc.peak_1s_tps,
+            peak_10s_tps=bc.peak_10s_tps,
+            peak_30s_tps=bc.peak_30s_tps,
+        ),
+        catalog=catalog,
+    )
+    pd_req = bc.prefix_dilution
+    prefix_rr = evaluate_prefix_cache_dilution(
+        total_input_tokens=pd_req.total_input_tokens,
+        shared_prefix_ratio=pd_req.shared_prefix_ratio,
+        baseline_cache_hit_rate=pd_req.baseline_cache_hit_rate,
+        num_round_robin_endpoints=pd_req.num_round_robin_endpoints,
+        tps_per_gsu=b_rec.gsu_capacity_tpm / 60.0,
+        cached_token_weight=b_spec.standard_cached_read_weight,
+        uncached_token_weight=b_spec.standard_input_weight,
+        requests_per_second=pd_req.requests_per_second or 1.0,
+    )
+    prefix_flash = evaluate_model_tier_prefix_cache(bc.flash_tier_audit, catalog=catalog)
+    prefix_argon = evaluate_model_tier_prefix_cache(bc.pro_tier_audit, catalog=catalog)
+    gateway = generate_gateway_bundle(eff.gateway.config, catalog=catalog)
+
+    fo = eff.finops
+    commitment = optimize_hybrid_commitment(fo.commitment, catalog=catalog)
+    chargeback = compute_focus_chargeback(fo.chargeback, catalog=catalog)
+    scavenger = evaluate_batch_scavenger_economics(fo.scavenger, catalog=catalog)
+    schedule = schedule_residual_capacity(fo.residual_schedule, catalog=catalog)
+    folder_pooling = evaluate_folder_pooling(fo.folder_pooling, catalog=catalog)
+    kpis = compute_finops_kpis(fo.kpis)
+
+    return ShowcaseReport(
+        version=PACKAGE_VERSION,
+        scenario_mode=is_custom_scenario,
+        scenario=eff,
+        gsu_recommendations=gsu_recs,
+        self_hosted_audit=sh_audit,
+        disaggregated_sizing=disagg,
+        micro_burst=burst,
+        prefix_cache_rr=prefix_rr,
+        prefix_cache_flash=prefix_flash,
+        prefix_cache_argon=prefix_argon,
+        gateway=gateway,
+        commitment=commitment,
+        chargeback=chargeback,
+        scavenger=scavenger,
+        residual_schedule=schedule,
+        folder_pooling=folder_pooling,
+        finops_kpis=kpis,
+    )
 
 
 def _walk_strings(node: object, path: str = "scenario") -> list[tuple[str, str]]:
@@ -228,7 +480,7 @@ def audit_scenario_public_safety(scenario: ShowcaseScenario) -> list[str]:
 def _load_structured_file(path: Path | str) -> object:
     raw = Path(path).read_text(encoding="utf-8")
     stripped = raw.lstrip()
-    if stripped.startswith("{") or stripped.startswith("["):
+    if stripped.startswith(("{", "[")):
         return json.loads(raw)
     return yaml.safe_load(raw)
 
@@ -265,14 +517,58 @@ def load_orders_overlay(path: Path | str) -> dict[str, ModelInventoryAnnotation]
     }
 
 
+type InventoryMap = Mapping[SeriesKey, Mapping[str, int]] | Mapping[str, Mapping[str, int]]
+
+
+def _normalize_sparse_map(
+    sparse_series: SparseSeriesMap | None,
+    *,
+    by_region: bool,
+) -> dict[str, dict[datetime, int]]:
+    if not sparse_series:
+        return {}
+    out: dict[str, dict[datetime, int]] = {}
+    for raw_k, pts in sparse_series.items():
+        if isinstance(raw_k, SeriesKey):
+            k_str = raw_k.format(by_region=by_region)
+        else:
+            k_str = SeriesKey.parse(raw_k, by_region=by_region and "@" in raw_k).format(
+                by_region=by_region
+            )
+        bucket = out.setdefault(k_str, {})
+        for ts, val in pts.items():
+            bucket[ts] = bucket.get(ts, 0) + int(val)
+    return out
+
+
+def _normalize_inventory_map(
+    inventory_telemetry: InventoryMap | None,
+    *,
+    by_region: bool,
+) -> dict[str, Mapping[str, int]]:
+    if not inventory_telemetry:
+        return {}
+    out: dict[str, Mapping[str, int]] = {}
+    for raw_k, inv in inventory_telemetry.items():
+        k_str = (
+            raw_k.format(by_region=by_region)
+            if isinstance(raw_k, SeriesKey)
+            else SeriesKey.parse(raw_k, by_region=by_region and "@" in raw_k).format(
+                by_region=by_region
+            )
+        )
+        out[k_str] = inv
+    return out
+
+
 def compile_scenario_from_telemetry(
     *,
     project_label: str,
     days: int = 7,
     by_region: bool = True,
-    sparse_series: Mapping[str, Mapping[datetime, int]] | None = None,
+    sparse_series: SparseSeriesMap | None = None,
     total_minutes: int | None = None,
-    inventory_telemetry: Mapping[str, Mapping[str, int]] | None = None,
+    inventory_telemetry: InventoryMap | None = None,
     log_snapshot: VllmTelemetrySnapshot | None = None,
     orders_overlay: Mapping[str, ModelInventoryAnnotation] | None = None,
     gateway_mode: GatewayPresentationMode = "oss_stack",
@@ -281,16 +577,20 @@ def compile_scenario_from_telemetry(
     self_hosted_enabled: bool = True,
 ) -> ShowcaseScenario:
     """Compile customer Cloud Monitoring series, inference logs, and order metadata."""
+    catalog = build_model_catalog()
     minute_series: dict[str, list[float]] = {}
     eff_minutes = total_minutes or (days * 24 * 60)
 
-    if sparse_series:
-        all_ts = sorted({ts for m in sparse_series.values() for ts in m})
+    norm_sparse = _normalize_sparse_map(sparse_series, by_region=by_region)
+    norm_inventory = _normalize_inventory_map(inventory_telemetry, by_region=by_region)
+
+    if norm_sparse:
+        all_ts = sorted({ts for m in norm_sparse.values() for ts in m})
         if all_ts:
             first_ts = all_ts[0].astimezone(UTC).replace(second=0, microsecond=0)
             span = max(eff_minutes, int((all_ts[-1] - first_ts).total_seconds() // 60) + 1)
             span = min(span, MAX_MINUTE_POINTS)
-            for raw_key, ts_map in sorted(sparse_series.items()):
+            for raw_key, ts_map in sorted(norm_sparse.items()):
                 arr = [0.0] * span
                 for ts, val in ts_map.items():
                     idx = int((ts.astimezone(UTC) - first_ts).total_seconds() // 60)
@@ -317,14 +617,14 @@ def compile_scenario_from_telemetry(
 
     series_len = max((len(v) for v in minute_series.values()), default=min(eff_minutes, 1_440))
     annotations: dict[str, ModelInventoryAnnotation] = {}
-    all_keys = sorted(
-        set(minute_series) | set(inventory_telemetry or {}) | set(orders_overlay or {})
-    )
+    all_keys = sorted(set(minute_series) | set(norm_inventory) | set(orders_overlay or {}))
     for key in all_keys:
         if key not in minute_series:
             minute_series[key] = [0.0] * series_len
         model_part = key.split("@", 1)[0]
-        inv = (inventory_telemetry or {}).get(key, {})
+        # Fail closed on unknown models instead of guessing capacities or lifecycles.
+        catalog.require(model_part)
+        inv = norm_inventory.get(key, {})
         ov = (orders_overlay or {}).get(key) or (orders_overlay or {}).get(model_part)
         log_spill = (
             log_snapshot.spillover_by_model_region.get(key) if log_snapshot is not None else None
@@ -350,7 +650,7 @@ def compile_scenario_from_telemetry(
         track = (
             ov.lifecycle_track
             if ov and ov.lifecycle_track is not None
-            else infer_lifecycle_track(model_part)
+            else infer_lifecycle_track(model_part, catalog=catalog)
         )
         annotations[key] = ModelInventoryAnnotation(
             contracted_gsus=contracted,
@@ -361,16 +661,13 @@ def compile_scenario_from_telemetry(
             renewal_mode=ov.renewal_mode if ov else ("auto_renew" if contracted else "none"),
             expiry_date=ov.expiry_date if ov else None,
             expiring_fixed_gsus=ov.expiring_fixed_gsus if ov else None,
-            note=ov.note if ov else None,
         )
 
     primary_key = max(minute_series, key=lambda k: sum(minute_series[k]))
     primary_model = normalize_model_id(primary_key.split("@", 1)[0])
-    if find_capacity(primary_model) is None:
-        primary_model = "gemini-3.8-flash"
+    cap_tpm = catalog.require_capacity(primary_model)
     primary_series = minute_series[primary_key]
-    peak_tpm = max(primary_series, default=120_900.0)
-    cap_tpm = find_capacity(primary_model) or 120_900
+    peak_tpm = max(primary_series, default=float(cap_tpm))
     primary_contracted = annotations[primary_key].contracted_gsus
     prov_gsus = max(
         1,
@@ -382,7 +679,7 @@ def compile_scenario_from_telemetry(
     peak_1s = (
         log_snapshot.peak_1s_burndown_tps
         if log_snapshot is not None and log_snapshot.peak_1s_burndown_tps > 0.0
-        else round((peak_tpm / 60.0) * 1.9, 2)
+        else round((peak_tpm / 60.0) * ASSUMED_PEAK_TO_MEAN_RATIO, 2)
     )
     peak_10s = (
         log_snapshot.peak_10s_burndown_tps
@@ -395,13 +692,15 @@ def compile_scenario_from_telemetry(
         else None
     )
 
+    has_log_tenants = bool(log_snapshot is not None and log_snapshot.hourly_consumed_tpm_by_tenant)
     tenants: dict[str, list[float] | float] = (
         {k: list(v) for k, v in log_snapshot.hourly_consumed_tpm_by_tenant.items()}
-        if log_snapshot is not None and log_snapshot.hourly_consumed_tpm_by_tenant
-        else _default_chargeback_tenants()
+        if log_snapshot is not None and has_log_tenants
+        else make_default_chargeback_tenants()
     )
+    tenant_weights = None if has_log_tenants else dict(DEFAULT_TENANT_RAW_TOKEN_WEIGHTS)
     spill_tier: Literal["priority", "standard", "flex"] = (
-        "standard" if is_partner_claude(primary_model) else "priority"
+        "standard" if is_partner_claude(primary_model, catalog=catalog) else "priority"
     )
 
     return ShowcaseScenario(
@@ -438,17 +737,20 @@ def compile_scenario_from_telemetry(
             pooling_mode=pooling_mode,
             commitment=OptimizeRequest(
                 model=primary_model,
-                tpm_series=primary_series[:50_000],
+                tpm_series=primary_series[:MAX_MINUTE_POINTS],
                 spillover_tier=spill_tier,
             ),
             chargeback=ChargebackRequest(
                 model=primary_model,
                 provisioned_gsus=prov_gsus,
                 hourly_consumed_tpm_by_tenant=tenants,
+                tenant_raw_token_weights=tenant_weights,
             ),
             scavenger=BatchScavengerRequest(model=primary_model, provisioned_gsus=prov_gsus),
             residual_schedule=ResidualScheduleRequest(
-                model=primary_model, provisioned_gsus=prov_gsus
+                model=primary_model,
+                provisioned_gsus=prov_gsus,
+                deadline_jobs=make_default_deadline_jobs(),
             ),
         ),
     )

@@ -1,4 +1,4 @@
-"""HTML/CSS/JS template for the GM3 Light 4-Tab Web Workbench (`portal_template.py`)."""
+"""HTML/CSS/JS templates for the GM3 Light 4-Tab Web Workbench (`portal_template.py`)."""
 
 from __future__ import annotations
 
@@ -12,14 +12,7 @@ FAVICON_DATA_URI = (
     "%3Ccircle cx='46' cy='16' r='5' fill='%23fbbc04'/%3E%3C/svg%3E"
 )
 
-PORTAL_TEMPLATE = """<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>__PAGE_TITLE__</title>
-  <link rel="icon" type="image/svg+xml" href="__FAVICON_URI__" />
-  <style>
+_SHARED_STYLES = """  <style>
     :root {
       --surface: #ffffff;
       --surface-container: #f8f9fa;
@@ -41,8 +34,7 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: 'Google Sans', 'Inter', -apple-system, BlinkMacSystemFont,
-        'Segoe UI', Roboto, sans-serif;
+      font-family: 'Google Sans', 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
       background: var(--surface-container);
       color: var(--on-surface);
       line-height: 1.5;
@@ -215,7 +207,59 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
       text-decoration: none;
       font-weight: 600;
     }
-  </style>
+  </style>"""
+
+RECOMMENDATIONS_ONLY_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__PAGE_TITLE__</title>
+  <link rel="icon" type="image/svg+xml" href="__FAVICON_URI__" />
+__SHARED_STYLES__
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <div>
+        <h1>__BRAND_HEADING__</h1>
+        <p>__BRAND_SUBTITLE__</p>
+      </div>
+    </div>
+    <div>
+      <span class="badge badge-blue">__BADGE_PRIMARY__</span>
+      __DOCS_HEADER_RIGHT__
+    </div>
+  </header>
+  <main>
+    __SIZING_KPIS__
+    <div class="card">
+      <h2>__SIZING_CARD_TITLE__</h2>
+      <p class="sub">__SIZING_CARD_SUB__</p>
+      <table>
+        <thead>
+          <tr>
+            __GSU_TABLE_HEADERS__
+          </tr>
+        </thead>
+        <tbody>
+          __GSU_ROWS__
+        </tbody>
+      </table>
+    </div>
+  </main>
+</body>
+</html>
+""".replace("__SHARED_STYLES__", _SHARED_STYLES)
+
+PORTAL_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>__PAGE_TITLE__</title>
+  <link rel="icon" type="image/svg+xml" href="__FAVICON_URI__" />
+__SHARED_STYLES__
 </head>
 <body>
   <header>
@@ -286,10 +330,10 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
           <div class="kpi-value" id="cache-hit-val">
             __FLASH_CACHE_CUR__% &rarr; __FLASH_CACHE_OPT__%
           </div>
-          <span class="badge badge-danger" id="cache-block0-badge">
-            Dynamic Token @ Offset 120 (&lt;4,096)
+          <span class="badge __FLASH_CACHE_BADGE_CLASS__" id="cache-block0-badge">
+            __FLASH_CACHE_BADGE_TEXT__
           </span>
-          <div class="kpi-caption">gemini-3.8-flash uses 4,096-token blocks (6,144 floor)</div>
+          <div class="kpi-caption">__FLASH_CACHE_CAPTION__</div>
         </div>
         <div class="kpi-card">
           <div class="kpi-label">Argon/Pro Token Checkpointing</div>
@@ -345,41 +389,33 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
           <div class="field">
             <label for="sim-total-in">Total Prompt Tokens</label>
             <input
-              id="sim-total-in" type="number" value="18000" min="512" step="1024"
+              id="sim-total-in" type="number" value="__SIM_TOTAL_IN_DEFAULT__" min="512" step="1024"
               oninput="recalcBurstAndCache()"
             />
           </div>
           <div class="field">
             <label for="sim-static-in">Static Prefix Tokens</label>
             <input
-              id="sim-static-in" type="number" value="14000" min="0" step="1024"
+              id="sim-static-in" type="number" value="__SIM_STATIC_IN_DEFAULT__" min="0" step="1024"
               oninput="recalcBurstAndCache()"
             />
           </div>
           <div class="field">
             <label for="sim-dyn-offset">Dynamic Token Offset (&lt;Static)</label>
             <input
-              id="sim-dyn-offset" type="number" value="120" min="0" step="100"
-              oninput="recalcBurstAndCache()"
+              id="sim-dyn-offset" type="number" value="__SIM_DYN_OFFSET_DEFAULT__" min="0"
+              step="100" oninput="recalcBurstAndCache()"
             />
           </div>
           <div class="field">
             <label for="sim-strip-sig">Multi-Turn Failure Mode</label>
             <select id="sim-strip-sig" onchange="recalcBurstAndCache()">
-              <option value="none">Healthy Multi-Turn / Dummy Anchor</option>
-              <option value="single_unanchored">
-                Single-Turn Without Dummy Anchor (1/N hash)
-              </option>
-              <option value="strip_sig">
-                Strip thought_signature (0.77% hit collapse)
-              </option>
+              __SIM_FAILURE_OPTIONS__
             </select>
           </div>
         </div>
-        <div id="sim-remediation-box" class="danger-banner">
-          Block 0 Contamination Active: Dynamic token at offset 120 (&lt;4,096)
-          invalidates all three 4,096-token static blocks (0% cache hit). Move
-          dynamic metadata to the tail of the prompt to cut weighted burndown by 44.3%.
+        <div id="sim-remediation-box" class="__SIM_BANNER_CLASS__">
+          __SIM_BANNER_TEXT__
         </div>
       </div>
     </section>
@@ -498,4 +534,5 @@ PORTAL_TEMPLATE = """<!DOCTYPE html>
   </main>
 __CLIENT_SCRIPT__
 </body>
-</html>""".replace("__CLIENT_SCRIPT__", PORTAL_CLIENT_SCRIPT)
+</html>
+""".replace("__SHARED_STYLES__", _SHARED_STYLES).replace("__CLIENT_SCRIPT__", PORTAL_CLIENT_SCRIPT)

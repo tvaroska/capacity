@@ -17,20 +17,13 @@ from capacity.burst import (
     evaluate_prefix_cache_dilution,
 )
 from capacity.capacity import (
-    DEFAULT_GSU_CONFIG,
     build_response,
     compute_recommendations,
     find_capacity,
     load_gsu_config,
 )
 from capacity.cli import app as cli_app
-from capacity.core import (
-    GROUP_BY_FIELDS,
-    build_demo_throughput,
-    fetch_throughput,
-    holts_linear_trend,
-    percentile,
-)
+from capacity.core import GROUP_BY_FIELDS, fetch_throughput
 from capacity.finops import (
     compute_finops_kpis,
     compute_focus_chargeback,
@@ -39,16 +32,31 @@ from capacity.finops import (
     optimize_hybrid_commitment,
     schedule_residual_capacity,
 )
+from capacity.forecasting import build_demo_throughput, holts_linear_trend, percentile
 from capacity.gateway import audit_litellm_scaling, generate_gateway_bundle
-from capacity.model_families import normalize_model_id
-from capacity.models import DeadlineJobSpec
+from capacity.model_families import DEFAULT_GSU_CONFIG, normalize_model_id
+from capacity.models import (
+    BatchScavengerRequest,
+    ChargebackRequest,
+    DeadlineJobSpec,
+    DisaggregatedPoolRequest,
+    FinOpsKpiRequest,
+    FolderPoolingRequest,
+    GatewayConfigRequest,
+    MicroBurstRequest,
+    ModelTierPrefixCacheRequest,
+    OptimizeRequest,
+    ResidualScheduleRequest,
+    SelfHostedAuditRequest,
+    SeriesKey,
+    VllmParseRequest,
+)
 from capacity.self_hosted import (
     DEFAULT_SELF_HOSTED_PROFILES,
     evaluate_self_hosted_endpoint,
-    load_inference_server_file,
-    parse_inference_server_telemetry,
     size_disaggregated_prefill_decode,
 )
+from capacity.telemetry_parsers import load_inference_server_file, parse_inference_server_telemetry
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 runner = CliRunner()
@@ -156,8 +164,12 @@ async def test_fetch_throughput_regional_bucketing_and_folder_map(
 
     assert total_mins == 1440
     minute = t0 - timedelta(minutes=1)
-    assert sparse_reg["retail-banking/gemini-3.8-flash@us-central1"][minute] == 120_900
-    assert sparse_reg["retail-banking/gemini-3.8-flash@europe-west4"][minute] == 50_000
+    assert sparse_reg[SeriesKey("gemini-3.8-flash", "us-central1", "retail-banking")][minute] == (
+        120_900
+    )
+    assert sparse_reg[SeriesKey("gemini-3.8-flash", "europe-west4", "retail-banking")][minute] == (
+        50_000
+    )
     assert len(fake.requests) == 2
     agg = fake.requests[0]["aggregation"]
     assert list(agg.group_by_fields) == GROUP_BY_FIELDS
@@ -201,7 +213,9 @@ async def test_fetch_throughput_self_hosted_mode(
     )
 
     assert total_mins == 1440
-    assert sparse["llama-3.3-70b-fp8@us-central1"][t0 - timedelta(minutes=1)] == 400_000
+    assert sparse[SeriesKey("llama-3.3-70b-fp8", "us-central1")][t0 - timedelta(minutes=1)] == (
+        400_000
+    )
 
 
 def test_weighted_burndown_tokens_standard_and_long_context_cliff() -> None:
@@ -224,10 +238,11 @@ def test_weighted_burndown_tokens_standard_and_long_context_cliff() -> None:
 
 def test_micro_burst_window_1s_vs_10s_and_60s_illusion() -> None:
     burst_small = evaluate_micro_burst_window(
-        sixty_sec_tpm=750_000,
-        peak_1s_tps=25_000,
-        provisioned_gsus=10,
-        tps_per_gsu=2015.0,
+        MicroBurstRequest(
+            sixty_sec_tpm=750_000,
+            peak_1s_tps=25_000,
+            provisioned_gsus=10,
+        )
     )
     assert burst_small.refill_window_seconds == 10
     assert burst_small.apparent_60s_utilization_pct < 70.0
@@ -236,10 +251,11 @@ def test_micro_burst_window_1s_vs_10s_and_60s_illusion() -> None:
     assert burst_small.gsus_required_for_zero_spillover == 12
 
     burst_large = evaluate_micro_burst_window(
-        sixty_sec_tpm=5_000_000,
-        peak_1s_tps=95_000,
-        provisioned_gsus=50,
-        tps_per_gsu=2015.0,
+        MicroBurstRequest(
+            sixty_sec_tpm=5_000_000,
+            peak_1s_tps=95_000,
+            provisioned_gsus=50,
+        )
     )
     assert burst_large.refill_window_seconds == 1
     assert burst_large.triggers_429_or_spillover is False
@@ -263,13 +279,15 @@ def test_prefix_cache_dilution_round_robin_vs_sticky() -> None:
 def test_self_hosted_endpoint_audit_and_phase2_parsers() -> None:
     assert "llama-3.3-70b-fp8" in DEFAULT_SELF_HOSTED_PROFILES
     audit = evaluate_self_hosted_endpoint(
-        tpm_series=[520_000, 480_000, 380_000, 290_000, 180_000],
-        profile="llama-3.3-70b-fp8",
-        min_replica_count=2,
-        max_replica_count=8,
-        observed_accelerator_duty_cycle_pct=52.0,
-        observed_vllm_kv_cache_usage_pct=91.5,
-        observed_vllm_requests_waiting=14.0,
+        SelfHostedAuditRequest(
+            tpm_series=[520_000, 480_000, 380_000, 290_000, 180_000],
+            profile="llama-3.3-70b-fp8",
+            min_replica_count=2,
+            max_replica_count=8,
+            observed_accelerator_duty_cycle_pct=52.0,
+            observed_vllm_kv_cache_usage_pct=91.5,
+            observed_vllm_requests_waiting=14.0,
+        )
     )
     assert audit.locked_regional_accelerators == 64
     assert audit.active_baseline_accelerators == 16
@@ -298,19 +316,21 @@ def test_self_hosted_endpoint_audit_and_phase2_parsers() -> None:
     assert jsonl_snap.cached_tokens_total == 59_000
     assert "claims-triage" in jsonl_snap.hourly_consumed_tpm_by_tenant
 
-    empty_snap = parse_inference_server_telemetry("")
+    empty_snap = parse_inference_server_telemetry(VllmParseRequest(raw_content=""))
     assert empty_snap.source_format == "empty"
 
 
 def test_optimize_hybrid_commitment_newsvendor() -> None:
     series = [362_700.0] * 50 + [120_900.0] * 50
     res = optimize_hybrid_commitment(
-        tpm_series=series,
-        tpm_per_gsu=120_900,
-        gsu_monthly_price_usd=2000.0,
-        paygo_per_1m_burndown_tokens_usd=0.50,
-        spillover_tier="priority",
-        fsp_discount_pct=10.0,
+        OptimizeRequest(
+            model="gemini-3.8-flash",
+            tpm_series=series,
+            gsu_monthly_price_usd=2000.0,
+            paygo_per_1m_burndown_tokens_usd=0.50,
+            spillover_tier="priority",
+            fsp_discount_pct=10.0,
+        )
     )
     assert res.optimal_gsus >= 1
     assert res.p99_gsus == 3
@@ -320,16 +340,19 @@ def test_optimize_hybrid_commitment_newsvendor() -> None:
 
 
 def test_compute_focus_chargeback_and_raw_vs_weighted_tokens() -> None:
-    tenants = {
+    tenants: dict[str, list[float] | float] = {
         "claims-triage": [403_000.0] * 8 + [80_600.0] * 16,
         "policy-audit": [201_500.0] * 8 + [40_300.0] * 16,
     }
     report = compute_focus_chargeback(
-        hourly_consumed_tpm_by_tenant=tenants,
-        provisioned_gsus=10,
-        tpm_per_gsu=120_900,
-        gsu_monthly_price_usd=2000.0,
-        async_batch_waterfill_tpm=362_700.0,
+        ChargebackRequest(
+            model="gemini-3.8-flash",
+            hourly_consumed_tpm_by_tenant=tenants,
+            tenant_raw_token_weights={"claims-triage": 1.85, "policy-audit": 0.45},
+            provisioned_gsus=10,
+            gsu_monthly_price_usd=2000.0,
+            async_batch_waterfill_tpm=362_700.0,
+        )
     )
     assert report.total_commitment_cost_usd == pytest.approx(20_000.0)
     assert report.active_consumed_cost_usd < report.total_commitment_cost_usd
@@ -356,13 +379,13 @@ def test_cli_commands_recommend_optimize_chargeback(tmp_path: Path) -> None:
     assert res_sh_demo.exit_code == 0
     assert "llama-3.3-70b-fp8" in res_sh_demo.stdout
 
-    res_default_opt = runner.invoke(cli_app, ["optimize"])
+    res_default_opt = runner.invoke(cli_app, ["optimize", "--demo"])
     assert res_default_opt.exit_code == 0
     assert "Micro-Burst:     not evaluated" in res_default_opt.stdout
     assert "Round-Robin(8)" in res_default_opt.stdout
 
     res_burst_opt = runner.invoke(
-        cli_app, ["optimize", "--sixty-sec-tpm", "150000", "--peak-1s-tps", "4750"]
+        cli_app, ["optimize", "--demo", "--sixty-sec-tpm", "150000", "--peak-1s-tps", "4750"]
     )
     assert res_burst_opt.exit_code == 0
     assert "60s Util=62.0%" in res_burst_opt.stdout
@@ -370,10 +393,10 @@ def test_cli_commands_recommend_optimize_chargeback(tmp_path: Path) -> None:
 
     res_sh_opt = runner.invoke(
         cli_app,
-        ["optimize", "--mode", "self-hosted", "--model", "llama-3.3-70b-fp8"],
+        ["optimize", "--demo", "--mode", "self-hosted"],
     )
     assert res_sh_opt.exit_code == 0
-    assert "Self-Hosted GPU Endpoint Audit" in res_sh_opt.stdout
+    assert "Self-Hosted GPU Endpoint Audit (llama-3.3-70b-fp8" in res_sh_opt.stdout
     assert "Upfront GPU Quota Lock" in res_sh_opt.stdout
     assert "Reps at an assumed 1 request/s (" in res_sh_opt.stdout
 
@@ -399,7 +422,7 @@ def test_cli_commands_recommend_optimize_chargeback(tmp_path: Path) -> None:
 
     res_cb = runner.invoke(
         cli_app,
-        ["chargeback", "--model", "gemini-3.8-flash", "--gsus", "10"],
+        ["chargeback", "--demo", "--model", "gemini-3.8-flash", "--gsus", "10"],
     )
     assert res_cb.exit_code == 0
     assert "FOCUS 1.2 Two-Pool Chargeback" in res_cb.stdout
@@ -414,6 +437,10 @@ def test_fastapi_endpoints() -> None:
     r_health = client.get("/healthz")
     assert r_health.status_code == 200
     assert r_health.json() == {"status": "ok"}
+
+    r_scen = client.get("/api/v1/scenario/demo")
+    assert r_scen.status_code == 200
+    assert r_scen.json()["self_hosted_audit"]["locked_regional_accelerators"] == 48
 
     r_rec = client.get(
         "/api/v1/recommendations?project=demo-proj&demo=true&active_only=true&by_region=true"
@@ -452,7 +479,12 @@ def test_fastapi_endpoints() -> None:
 
     r_sh = client.post(
         "/api/v1/self-hosted/audit",
-        json={"profile": "llama-3.3-70b-fp8", "min_replica_count": 2, "max_replica_count": 6},
+        json={
+            "profile": "llama-3.3-70b-fp8",
+            "tpm_series": [520_000, 380_000, 180_000],
+            "min_replica_count": 2,
+            "max_replica_count": 6,
+        },
     )
     assert r_sh.status_code == 200
     sh_data = r_sh.json()
@@ -511,11 +543,33 @@ def test_fastapi_endpoints() -> None:
     assert r_scav.status_code == 200
     assert r_scav.json()["double_payment_waste_avoided_usd"] > 0.0
 
-    r_sched = client.post("/api/v1/finops/schedule", json={"provisioned_gsus": 20})
+    r_sched = client.post(
+        "/api/v1/finops/schedule",
+        json={
+            "provisioned_gsus": 20,
+            "deadline_jobs": [
+                {
+                    "job_id": "briefing",
+                    "value_usd": 5_000.0,
+                    "burndown_tokens": 100_000_000.0,
+                    "deadline_hour": 6,
+                }
+            ],
+        },
+    )
     assert r_sched.status_code == 200
     assert r_sched.json()["admitted_deadline_tokens"] > 0.0
 
-    r_fpool = client.post("/api/v1/finops/folder-pooling", json={"percentile_target": 90})
+    r_fpool = client.post(
+        "/api/v1/finops/folder-pooling",
+        json={
+            "percentile_target": 90,
+            "hourly_tpm_by_project": {
+                "emea": [480_000.0, 40_000.0],
+                "amer": [40_000.0, 480_000.0],
+            },
+        },
+    )
     assert r_fpool.status_code == 200
     assert r_fpool.json()["stranded_gsus_saved"] > 0
 
@@ -526,12 +580,14 @@ def test_fastapi_endpoints() -> None:
 
 def test_model_tier_prefix_cache_block0_and_argon_checkpointing() -> None:
     flash_bad = evaluate_model_tier_prefix_cache(
-        model="gemini-3.8-flash-rc1",
-        total_input_tokens=18_000,
-        static_prefix_tokens=14_000,
-        dynamic_header_offset_tokens=120,
-        single_turn_request=True,
-        dummy_turn_anchor_applied=False,
+        ModelTierPrefixCacheRequest(
+            model="gemini-3.8-flash-rc1",
+            total_input_tokens=18_000,
+            static_prefix_tokens=14_000,
+            dynamic_header_offset_tokens=120,
+            single_turn_request=True,
+            dummy_turn_anchor_applied=False,
+        )
     )
     assert flash_bad.normalized_model == "gemini-3.8-flash"
     assert flash_bad.checkpoint_granularity == "block_4096"
@@ -542,12 +598,14 @@ def test_model_tier_prefix_cache_block0_and_argon_checkpointing() -> None:
     assert flash_bad.burndown_waste_pct > 40.0
 
     argon_good = evaluate_model_tier_prefix_cache(
-        model="gemini-4-argon",
-        total_input_tokens=18_000,
-        static_prefix_tokens=14_000,
-        dynamic_header_offset_tokens=None,
-        single_turn_request=False,
-        strip_thought_signatures=False,
+        ModelTierPrefixCacheRequest(
+            model="gemini-4-argon",
+            total_input_tokens=18_000,
+            static_prefix_tokens=14_000,
+            dynamic_header_offset_tokens=None,
+            single_turn_request=False,
+            strip_thought_signatures=False,
+        )
     )
     assert argon_good.checkpoint_granularity == "token_boundary"
     assert argon_good.min_prefix_floor_tokens == 2_048
@@ -556,20 +614,24 @@ def test_model_tier_prefix_cache_block0_and_argon_checkpointing() -> None:
     assert argon_good.effective_cache_hit_rate == pytest.approx(0.70, abs=0.01)
 
     stripped_sig = evaluate_model_tier_prefix_cache(
-        model="gemini-4-argon",
-        total_input_tokens=18_000,
-        static_prefix_tokens=14_000,
-        dynamic_header_offset_tokens=None,
-        strip_thought_signatures=True,
+        ModelTierPrefixCacheRequest(
+            model="gemini-4-argon",
+            total_input_tokens=18_000,
+            static_prefix_tokens=14_000,
+            dynamic_header_offset_tokens=None,
+            strip_thought_signatures=True,
+        )
     )
     assert stripped_sig.routing_affinity_hit_rate == pytest.approx(0.0077)
     assert stripped_sig.burndown_waste_pct > 45.0
 
     fast_tier = evaluate_model_tier_prefix_cache(
-        model="gemini-3.8-flash-fast",
-        total_input_tokens=18_000,
-        static_prefix_tokens=12_288,
-        dynamic_header_offset_tokens=None,
+        ModelTierPrefixCacheRequest(
+            model="gemini-3.8-flash-fast",
+            total_input_tokens=18_000,
+            static_prefix_tokens=12_288,
+            dynamic_header_offset_tokens=None,
+        )
     )
     assert fast_tier.fast_decode_speedup_multiplier == pytest.approx(2.5)
     assert fast_tier.fast_decode_cost_multiplier == pytest.approx(2.0)
@@ -577,10 +639,12 @@ def test_model_tier_prefix_cache_block0_and_argon_checkpointing() -> None:
 
 def test_disaggregated_prefill_decode_and_multi_gateway_bundle() -> None:
     disagg = size_disaggregated_prefill_decode(
-        profile="llama-3.3-70b-fp8",
-        peak_qps=18.0,
-        avg_input_tokens=6_400,
-        avg_output_tokens=450,
+        DisaggregatedPoolRequest(
+            profile="llama-3.3-70b-fp8",
+            peak_qps=18.0,
+            avg_input_tokens=6_400,
+            avg_output_tokens=450,
+        )
     )
     assert disagg.prefill_replicas >= 1
     assert disagg.decode_replicas >= 1
@@ -598,9 +662,11 @@ def test_disaggregated_prefill_decode_and_multi_gateway_bundle() -> None:
     assert audit_high.scale_status == "migrate_dataplane_to_envoy"
 
     bundle = generate_gateway_bundle(
-        model="gemini-3.8-flash-001",
-        provisioned_gsus=20,
-        target_rps=650,
+        GatewayConfigRequest(
+            model="gemini-3.8-flash-001",
+            provisioned_gsus=20,
+            target_rps=650,
+        )
     )
     assert bundle.normalized_model == "gemini-3.8-flash"
     assert len(bundle.header_policies) == 8
@@ -612,50 +678,55 @@ def test_disaggregated_prefill_decode_and_multi_gateway_bundle() -> None:
 
 def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) -> None:
     scav = evaluate_batch_scavenger_economics(
-        model="gemini-3.8-flash",
-        provisioned_gsus=20,
-        tpm_per_gsu=120_900,
-        daytime_active_utilization_pct=24.0,
-        batch_monthly_burndown_tokens=45_000_000_000.0,
+        BatchScavengerRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=20,
+            daytime_active_utilization_pct=24.0,
+            batch_monthly_burndown_tokens=45_000_000_000.0,
+        )
     )
     assert scav.tokens_harvested_on_free_pt == pytest.approx(45_000_000_000.0)
     assert scav.double_payment_waste_avoided_usd == pytest.approx(11_250.0)
     assert scav.effective_utilization_after_scavenging_pct > 60.0
 
     sched = schedule_residual_capacity(
-        provisioned_gsus=20,
-        tpm_per_gsu=120_900,
-        deadline_jobs=[
-            DeadlineJobSpec(
-                job_id="high-value-briefing",
-                value_usd=18_000.0,
-                burndown_tokens=240_000_000.0,
-                deadline_hour=6,
-            ),
-            DeadlineJobSpec(
-                job_id="huge-low-value-sweep",
-                value_usd=900.0,
-                burndown_tokens=600_000_000.0,
-                deadline_hour=6,
-            ),
-        ],
+        ResidualScheduleRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=20,
+            deadline_jobs=[
+                DeadlineJobSpec(
+                    job_id="high-value-briefing",
+                    value_usd=18_000.0,
+                    burndown_tokens=240_000_000.0,
+                    deadline_hour=6,
+                ),
+                DeadlineJobSpec(
+                    job_id="huge-low-value-sweep",
+                    value_usd=900.0,
+                    burndown_tokens=600_000_000.0,
+                    deadline_hour=6,
+                ),
+            ],
+        )
     )
     by_id = {j.job_id: j for j in sched.jobs}
     assert by_id["high-value-briefing"].status == "admitted_edf_pt"
     assert by_id["huge-low-value-sweep"].status == "spilled_or_aborted"
 
     fpool = evaluate_folder_pooling(
-        hourly_tpm_by_project={
-            "emea": [480_000.0, 40_000.0],
-            "amer": [40_000.0, 480_000.0],
-        },
-        tpm_per_gsu=120_900,
+        FolderPoolingRequest(
+            model="gemini-3.8-flash",
+            hourly_tpm_by_project={
+                "emea": [480_000.0, 40_000.0],
+                "amer": [40_000.0, 480_000.0],
+            },
+        )
     )
     assert fpool.siloed_total_gsus == 8
     assert fpool.pooled_folder_gsus == 5
     assert fpool.stranded_gsus_saved == 3
 
-    kpis = compute_finops_kpis()
+    kpis = compute_finops_kpis(FinOpsKpiRequest())
     assert kpis.cpvo_usd == pytest.approx(0.175)
     assert kpis.total_weighted_burndown_tokens == pytest.approx(4.36e9)
     assert kpis.csr_pct == pytest.approx(68.4)
@@ -664,13 +735,13 @@ def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) ->
     res_demo = runner.invoke(cli_app, ["demo", "--html-out", str(html_out)])
     assert res_demo.exit_code == 0
     assert html_out.is_file()
-    assert "Capacity Showcase Workbench (v0.3.0)" in html_out.read_text(encoding="utf-8")
+    assert "Capacity Showcase Workbench (v0.4.0)" in html_out.read_text(encoding="utf-8")
 
     res_gw = runner.invoke(cli_app, ["gateway", "--target", "litellm", "--gsus", "20"])
     assert res_gw.exit_code == 0
     assert "litellm_config.yaml" in res_gw.stdout
 
-    res_sched = runner.invoke(cli_app, ["schedule", "--gsus", "20"])
+    res_sched = runner.invoke(cli_app, ["schedule", "--demo", "--gsus", "20"])
     assert res_sched.exit_code == 0
     assert "admitted_edf_pt" in res_sched.stdout
 
@@ -689,4 +760,4 @@ async def test_percentile_demo_and_region_filter_query(
     )
     demo_gsu, mins = build_demo_throughput(days=7, by_region=True, mode="gsu")
     assert mins == 10080
-    assert "gemini-3.8-flash@us-central1" in demo_gsu
+    assert SeriesKey("gemini-3.8-flash", "us-central1") in demo_gsu

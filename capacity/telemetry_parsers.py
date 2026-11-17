@@ -1,4 +1,4 @@
-"""Phase 2 vLLM/SGLang Prometheus `/metrics` & OpenTelemetry `gen_ai.usage.*` JSONL parsers."""
+"""vLLM/SGLang Prometheus `/metrics` & OpenTelemetry `gen_ai.usage.*` JSONL parsers."""
 
 from __future__ import annotations
 
@@ -12,8 +12,14 @@ from pathlib import Path
 from pydantic import Field
 
 from capacity.burst import compute_weighted_burndown_tokens
-from capacity.model_families import normalize_model_id, resolve_model_family
-from capacity.models import StrictModel
+from capacity.model_families import (
+    GEMINI_1P_FLASH_SPEC,
+    SELF_HOSTED_MODEL_IDS,
+    ModelCatalog,
+    build_model_catalog,
+    normalize_model_id,
+)
+from capacity.models import MAX_HOURLY_POINTS, MAX_SERIES_CELLS, StrictModel, VllmParseRequest
 
 
 class VllmTelemetrySnapshot(StrictModel):
@@ -52,20 +58,21 @@ _PROM_METRIC_RE = re.compile(
 _PROM_LABEL_RE = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="([^"]*)"')
 _SCRAPE_TS_COMMENT_RE = re.compile(r"^#\s*scrape_timestamp_seconds\s+(\d+(?:\.\d+)?)", re.I)
 
-
 # Scrapes without timestamps are read as one minute apart, and a lone scrape as one minute.
 _ASSUMED_SCRAPE_WINDOW_MINUTES = 1.0
 
 
 def parse_inference_server_telemetry(
-    raw_content: str, default_model: str = "llama-3.3-70b-fp8"
+    req: VllmParseRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> VllmTelemetrySnapshot:
-    """Parse Phase 2 vLLM/SGLang Prometheus `/metrics` text or OTel/vLLM JSONL logs."""
-    stripped = raw_content.strip()
+    """Parse vLLM/SGLang Prometheus `/metrics` text or OTel/vLLM JSONL logs."""
+    stripped = req.raw_content.strip()
     if not stripped:
         return VllmTelemetrySnapshot(
             source_format="empty",
-            model=default_model,
+            model=req.default_model,
             tpm_series=[0.0],
             prompt_tokens_total=0,
             cached_tokens_total=0,
@@ -88,16 +95,22 @@ def parse_inference_server_telemetry(
     )
 
     if first_non_comment.startswith(("{", "[")):
-        return _parse_jsonl_or_json_logs(stripped, default_model=default_model)
-    return _parse_prometheus_metrics(stripped, default_model=default_model)
+        return _parse_jsonl_or_json_logs(stripped, default_model=req.default_model, catalog=catalog)
+    return _parse_prometheus_metrics(stripped, default_model=req.default_model)
 
 
 def load_inference_server_file(
-    path: Path | str, default_model: str = "llama-3.3-70b-fp8"
+    path: Path | str,
+    default_model: str = "llama-3.3-70b-fp8",
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> VllmTelemetrySnapshot:
     """Load and parse a vLLM/SGLang Prometheus `/metrics` snapshot or JSONL request log file."""
     content = Path(path).read_text(encoding="utf-8")
-    return parse_inference_server_telemetry(content, default_model=default_model)
+    return parse_inference_server_telemetry(
+        VllmParseRequest(raw_content=content, default_model=default_model),
+        catalog=catalog,
+    )
 
 
 def _normalize_epoch_seconds(ts_raw: float) -> float:
@@ -109,12 +122,8 @@ def _normalize_epoch_seconds(ts_raw: float) -> float:
 
 
 def _interval_burndown(prompt_tokens: int, generated_tokens: int, cached_tokens: int) -> float:
-    """Weighted burndown for counter totals accumulated over a scrape interval.
-
-    A scrape total is many requests added up, so the per-request rule that reprices prompts
-    over 200K tokens must not apply to it: a busy minute is not one long prompt.
-    """
-    spec = resolve_model_family(None)
+    """Weighted burndown for counter totals accumulated over a scrape interval."""
+    spec = GEMINI_1P_FLASH_SPEC
     prompt = max(0, prompt_tokens)
     cached = min(max(0, cached_tokens), prompt)
     return (
@@ -122,6 +131,11 @@ def _interval_burndown(prompt_tokens: int, generated_tokens: int, cached_tokens:
         + cached * spec.standard_cached_read_weight
         + max(0, generated_tokens) * spec.standard_output_weight
     )
+
+
+def _counter_delta(curr: Mapping[str, float], prev: Mapping[str, float], key: str) -> float:
+    diff = curr.get(key, 0.0) - prev.get(key, 0.0)
+    return curr.get(key, 0.0) if diff < 0.0 else diff
 
 
 def _parse_prometheus_metrics(
@@ -206,11 +220,7 @@ def _parse_prometheus_metrics(
     _flush_scrape()
 
     if len(scrapes) >= 2:
-        prompt_delta_total = 0.0
-        gen_delta_total = 0.0
-        cached_delta_total = 0.0
-        queries_delta_total = 0.0
-        hits_delta_total = 0.0
+        totals = {"prompt": 0.0, "gen": 0.0, "cached": 0.0, "queries": 0.0, "hits": 0.0}
         interval_tpms: list[float] = []
 
         for idx in range(1, len(scrapes)):
@@ -219,42 +229,31 @@ def _parse_prometheus_metrics(
             if "_ts" in prev and "_ts" in curr and curr["_ts"] > prev["_ts"]:
                 dt_min = max(1.0 / 60.0, (curr["_ts"] - prev["_ts"]) / 60.0)
 
-            p_d = curr.get("prompt", 0.0) - prev.get("prompt", 0.0)
-            if p_d < 0:
-                p_d = curr.get("prompt", 0.0)
-            g_d = curr.get("gen", 0.0) - prev.get("gen", 0.0)
-            if g_d < 0:
-                g_d = curr.get("gen", 0.0)
-            c_d = curr.get("cached", 0.0) - prev.get("cached", 0.0)
-            if c_d < 0:
-                c_d = curr.get("cached", 0.0)
-            q_d = curr.get("queries", 0.0) - prev.get("queries", 0.0)
-            if q_d < 0:
-                q_d = curr.get("queries", 0.0)
-            h_d = curr.get("hits", 0.0) - prev.get("hits", 0.0)
-            if h_d < 0:
-                h_d = curr.get("hits", 0.0)
+            deltas = {k: _counter_delta(curr, prev, k) for k in totals}
+            for k, dv in deltas.items():
+                totals[k] += dv
 
-            prompt_delta_total += p_d
-            gen_delta_total += g_d
-            cached_delta_total += c_d
-            queries_delta_total += q_d
-            hits_delta_total += h_d
-
+            p_d, g_d, c_d, q_d, h_d = (
+                deltas["prompt"],
+                deltas["gen"],
+                deltas["cached"],
+                deltas["queries"],
+                deltas["hits"],
+            )
             step_hit = h_d / q_d if q_d > 0 else (c_d / p_d if p_d > 0 else 0.0)
             step_cached = round(c_d if c_d > 0 else p_d * step_hit)
             step_w = _interval_burndown(round(p_d), round(g_d), step_cached)
             interval_tpms.append(round(step_w / dt_min, 2))
 
         hit_rate = (
-            hits_delta_total / queries_delta_total
-            if queries_delta_total > 0
-            else (cached_delta_total / prompt_delta_total if prompt_delta_total > 0 else 0.0)
+            totals["hits"] / totals["queries"]
+            if totals["queries"] > 0
+            else (totals["cached"] / totals["prompt"] if totals["prompt"] > 0 else 0.0)
         )
-        prompt_int = round(prompt_delta_total)
-        gen_int = round(gen_delta_total)
+        prompt_int = round(totals["prompt"])
+        gen_int = round(totals["gen"])
         effective_cached = round(
-            cached_delta_total if cached_delta_total > 0 else prompt_delta_total * hit_rate
+            totals["cached"] if totals["cached"] > 0 else totals["prompt"] * hit_rate
         )
         weighted_total = _interval_burndown(prompt_int, gen_int, effective_cached)
         mean_tpm = round(sum(interval_tpms) / len(interval_tpms), 2) if interval_tpms else 0.0
@@ -342,12 +341,6 @@ def _float_from_maps(maps: Sequence[Mapping[str, object]], keys: Sequence[str]) 
     return fv if math.isfinite(fv) else 0.0
 
 
-# Bounds on what one log may expand to: the hours between its first and last record, and the
-# tenant-by-hour matrix those hours are padded into.
-_MAX_HOURLY_SPAN = 8_784
-_MAX_TENANT_HOUR_CELLS = 1_000_000
-
-
 def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
     """Return a record's UTC time, or fail: a log without times has no rate to size from."""
     attrs = rec.get("attributes")
@@ -385,25 +378,21 @@ def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
 def _hourly_series_by_tenant(
     tenant_hour_tokens: Mapping[str, Mapping[datetime, float]],
 ) -> dict[str, list[float]]:
-    """Per-tenant hourly TPM for every hour from the first record to the last.
-
-    Hours without traffic stay in as zeros: dropping them would read two busy hours a day as
-    a fully used reservation.
-    """
+    """Per-tenant hourly TPM for every hour from the first record to the last."""
     observed = [hour for hours in tenant_hour_tokens.values() for hour in hours]
     if not observed:
         return {"default": [0.0]}
     first, last = min(observed), max(observed)
     span = int((last - first).total_seconds() // 3600) + 1
-    if span > _MAX_HOURLY_SPAN:
+    if span > MAX_HOURLY_POINTS:
         raise ValueError(
             f"records span {span:,} hours; split the log into windows of at most "
-            f"{_MAX_HOURLY_SPAN:,} hours"
+            f"{MAX_HOURLY_POINTS:,} hours"
         )
-    if span * len(tenant_hour_tokens) > _MAX_TENANT_HOUR_CELLS:
+    if span * len(tenant_hour_tokens) > MAX_SERIES_CELLS:
         raise ValueError(
             f"{len(tenant_hour_tokens):,} tenants over {span:,} hours exceeds "
-            f"{_MAX_TENANT_HOUR_CELLS:,} tenant-hours; split the log"
+            f"{MAX_SERIES_CELLS:,} tenant-hours; split the log"
         )
     axis = [first + timedelta(hours=i) for i in range(span)]
     return {
@@ -420,7 +409,7 @@ def _minute_series_by_key(
         return {}
     first, last = min(observed), max(observed)
     span = int((last - first).total_seconds() // 60) + 1
-    if span > _MAX_HOURLY_SPAN * 60 or span * len(key_minute_tokens) > _MAX_TENANT_HOUR_CELLS:
+    if span > MAX_HOURLY_POINTS * 60 or span * len(key_minute_tokens) > MAX_SERIES_CELLS:
         return {
             key: [round(minutes[m], 2) for m in sorted(minutes)]
             for key, minutes in key_minute_tokens.items()
@@ -432,22 +421,32 @@ def _minute_series_by_key(
     }
 
 
+def _as_map(obj: object) -> Mapping[str, object]:
+    return obj if isinstance(obj, Mapping) else {}
+
+
+def _load_json_records(text: str) -> list[Mapping[str, object]]:
+    if text.startswith("["):
+        loaded = json.loads(text)
+        return [r for r in loaded if isinstance(r, Mapping)] if isinstance(loaded, list) else []
+    records: list[Mapping[str, object]] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if s:
+            obj = json.loads(s)
+            if isinstance(obj, Mapping):
+                records.append(obj)
+    return records
+
+
 def _parse_jsonl_or_json_logs(
     text: str,
     default_model: str = "llama-3.3-70b-fp8",
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> VllmTelemetrySnapshot:
-    records: list[Mapping[str, object]] = []
-    if text.startswith("["):
-        loaded = json.loads(text)
-        if isinstance(loaded, list):
-            records = [r for r in loaded if isinstance(r, Mapping)]
-    else:
-        for line in text.splitlines():
-            s = line.strip()
-            if s:
-                obj = json.loads(s)
-                if isinstance(obj, Mapping):
-                    records.append(obj)
+    records = _load_json_records(text)
+    cat = catalog if catalog is not None else build_model_catalog()
 
     model_name = default_model
     prompt_total = 0
@@ -472,37 +471,18 @@ def _parse_jsonl_or_json_logs(
     err429_by_mr: dict[str, int] = {}
 
     for idx, rec in enumerate(records):
-        usage = rec.get("usage")
-        usage_map: Mapping[str, object] = usage if isinstance(usage, Mapping) else {}
-        json_payload = rec.get("jsonPayload")
-        payload_map: Mapping[str, object] = (
-            json_payload if isinstance(json_payload, Mapping) else {}
-        )
-        payload_usage = payload_map.get("usage_metadata") or payload_map.get("usage")
-        p_usage_map: Mapping[str, object] = (
-            payload_usage if isinstance(payload_usage, Mapping) else {}
-        )
-        req_labels = payload_map.get("request_labels") or payload_map.get("labels")
-        req_label_map: Mapping[str, object] = req_labels if isinstance(req_labels, Mapping) else {}
-        top_labels = rec.get("labels")
-        top_label_map: Mapping[str, object] = top_labels if isinstance(top_labels, Mapping) else {}
-        prompt_details = usage_map.get("prompt_tokens_details")
-        p_details_map: Mapping[str, object] = (
-            prompt_details if isinstance(prompt_details, Mapping) else {}
-        )
-        comp_details = usage_map.get("completion_tokens_details")
-        c_details_map: Mapping[str, object] = (
-            comp_details if isinstance(comp_details, Mapping) else {}
-        )
-        cache_creation = usage_map.get("cache_creation")
-        cc_map: Mapping[str, object] = cache_creation if isinstance(cache_creation, Mapping) else {}
-        attrs = rec.get("attributes")
-        attr_map: Mapping[str, object] = attrs if isinstance(attrs, Mapping) else {}
-        res_obj = rec.get("resource")
-        res_attrs = res_obj.get("attributes") if isinstance(res_obj, Mapping) else None
-        res_labels = res_obj.get("labels") if isinstance(res_obj, Mapping) else None
-        res_attr_map: Mapping[str, object] = res_attrs if isinstance(res_attrs, Mapping) else {}
-        res_label_map: Mapping[str, object] = res_labels if isinstance(res_labels, Mapping) else {}
+        usage_map = _as_map(rec.get("usage"))
+        payload_map = _as_map(rec.get("jsonPayload"))
+        p_usage_map = _as_map(payload_map.get("usage_metadata") or payload_map.get("usage"))
+        req_label_map = _as_map(payload_map.get("request_labels") or payload_map.get("labels"))
+        top_label_map = _as_map(rec.get("labels"))
+        p_details_map = _as_map(usage_map.get("prompt_tokens_details"))
+        c_details_map = _as_map(usage_map.get("completion_tokens_details"))
+        cc_map = _as_map(usage_map.get("cache_creation"))
+        attr_map = _as_map(rec.get("attributes"))
+        res_map = _as_map(rec.get("resource"))
+        res_attr_map = _as_map(res_map.get("attributes"))
+        res_label_map = _as_map(res_map.get("labels"))
 
         search_maps = (
             usage_map,
@@ -556,13 +536,9 @@ def _parse_jsonl_or_json_logs(
                 "gen_ai.usage.cache_read.input_tokens",
             ),
         )
-        w1_tok = _int_from_maps(
-            search_maps,
-            ("ephemeral_1h_input_tokens", "cache_write_1h_tokens"),
-        )
+        w1_tok = _int_from_maps(search_maps, ("ephemeral_1h_input_tokens", "cache_write_1h_tokens"))
         w5_explicit = _lookup_first(
-            search_maps,
-            ("ephemeral_5m_input_tokens", "cache_write_5m_tokens"),
+            search_maps, ("ephemeral_5m_input_tokens", "cache_write_5m_tokens")
         )
         if w5_explicit is not None:
             w5_tok = max(0, int(float(str(w5_explicit))))
@@ -618,14 +594,21 @@ def _parse_jsonl_or_json_logs(
             ),
         )
 
+        # Known catalog/self-hosted models use their family weights; arbitrary external trace IDs
+        # default to standard 1P weights without guessing capacities.
+        is_known = (
+            cat.get(rec_model) is not None or normalize_model_id(rec_model) in SELF_HOSTED_MODEL_IDS
+        )
+        known_model = rec_model if is_known else None
         w_tok = compute_weighted_burndown_tokens(
             input_tokens=p_tok,
             output_tokens=o_tok,
             thoughts_tokens=t_tok,
             cached_tokens=c_tok,
-            model=rec_model,
+            model=known_model,
             cache_write_5m_tokens=w5_tok,
             cache_write_1h_tokens=w1_tok,
+            catalog=cat,
         )
         prompt_total += p_tok
         cached_total += c_tok

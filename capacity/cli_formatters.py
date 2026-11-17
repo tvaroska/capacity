@@ -2,31 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-from collections.abc import Callable
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import typer
 
-from capacity.core import (
-    GCPQueryError,
-    check_gcp_project_access,
-    fetch_inventory_telemetry,
-    fetch_throughput,
+from capacity.forecasting import minute_list_to_sparse
+from capacity.models import (
+    FocusChargebackReport,
+    GatewayConfigBundle,
+    OptimizeResponse,
+    RecommendationResponse,
+    ResidualScheduleReport,
+    SeriesKey,
 )
-from capacity.models import FocusChargebackReport, OptimizeResponse, RecommendationResponse
-from capacity.scenario import (
-    FinOpsPoolingMode,
-    GatewayPresentationMode,
-    PlatformBrand,
-    ShowcaseScenario,
-    audit_scenario_public_safety,
-    compile_scenario_from_telemetry,
-    load_orders_overlay,
-)
-from capacity.self_hosted import SelfHostedEndpointAudit, load_inference_server_file
+from capacity.scenario import ShowcaseReport
+from capacity.self_hosted import SelfHostedEndpointAudit
 
 
 def parse_folder_map(raw: str | None) -> dict[str, str]:
@@ -49,23 +41,66 @@ def load_sparse_from_trace_file(
     days: int,
     by_region: bool,
     default_model: str = "gemini-3.8-flash",
-) -> tuple[dict[str, dict[datetime, int]], int]:
+) -> tuple[dict[SeriesKey, dict[datetime, int]], int]:
     raw_data = json.loads(trace_file.read_text(encoding="utf-8"))
-    base_dt = datetime(2026, 11, 2, 8, 0, tzinfo=UTC)
     total_minutes = days * 24 * 60
     if isinstance(raw_data, list):
-        key = f"{default_model}@us-central1" if by_region else default_model
-        series_map = {base_dt + timedelta(minutes=i): int(float(v)) for i, v in enumerate(raw_data)}
-        return {key: series_map}, max(total_minutes, len(raw_data))
+        skey = SeriesKey(model=default_model, region="us-central1" if by_region else None)
+        return {skey: minute_list_to_sparse(raw_data)}, max(total_minutes, len(raw_data))
     if isinstance(raw_data, dict):
-        sparse: dict[str, dict[datetime, int]] = {}
-        for k, vals in raw_data.items():
+        sparse: dict[SeriesKey, dict[datetime, int]] = {}
+        max_len = 0
+        for raw_k, vals in raw_data.items():
             if isinstance(vals, list):
-                sparse[str(k)] = {
-                    base_dt + timedelta(minutes=i): int(float(v)) for i, v in enumerate(vals)
-                }
-        return sparse, total_minutes
+                k_str = str(raw_k)
+                max_len = max(max_len, len(vals))
+                parsed = SeriesKey.parse(k_str, by_region=by_region and "@" in k_str)
+                bucket = sparse.setdefault(parsed, {})
+                for dt, val in minute_list_to_sparse(vals).items():
+                    bucket[dt] = bucket.get(dt, 0) + val
+        return sparse, max(total_minutes, max_len)
     raise ValueError(f"Unsupported trace file structure in {trace_file}")
+
+
+def print_demo_report(report: ShowcaseReport, html_out: Path | None) -> None:
+    kpis = report.finops_kpis
+    fpool = report.folder_pooling
+    scav = report.scavenger
+    disagg = report.disaggregated_sizing
+    audit = report.gateway.litellm_audit
+
+    typer.echo(f"=== Capacity v{report.version} — End-to-End Executive Showcase Scorecard ===")
+    typer.echo(
+        f"1. FinOps for AI KPIs:    CPVO=${kpis.cpvo_usd:.4f}/outcome | "
+        f"CPWT_1M=${kpis.cpwt_1m_usd:.4f} | TER={kpis.ter_pct:.1f}% | "
+        f"CSR={kpis.csr_pct:.1f}% | ECUR_168h={kpis.ecur_168h_pct:.1f}%"
+    )
+    typer.echo(
+        f"2. Folder RHPT Pooling:   Siloed={fpool.siloed_total_gsus} GSUs -> "
+        f"Pooled={fpool.pooled_folder_gsus} GSUs "
+        f"(Saved={fpool.stranded_gsus_saved} GSUs / ${fpool.monthly_savings_usd:,.0f}/mo)"
+    )
+    typer.echo(
+        f"3. Batch 0.5x Trap Saved: ${scav.double_payment_waste_avoided_usd:,.2f}/mo "
+        f"(Lifts PT utilization {scav.daytime_active_utilization_pct:.0f}% -> "
+        f"{scav.effective_utilization_after_scavenging_pct:.1f}%)"
+    )
+    if disagg is not None:
+        typer.echo(
+            f"4. Disaggregated P/D:     {disagg.prefill_replicas} Prefill + "
+            f"{disagg.decode_replicas} Decode Replicas "
+            f"(vs {disagg.monolithic_replicas} Monolithic, "
+            f"saves {disagg.replica_delta} replica[s])"
+        )
+    else:
+        typer.echo("4. Disaggregated P/D:     disabled (--no-self-hosted)")
+    typer.echo(
+        f"5. Multi-Gateway Audit:   LiteLLM ({audit.total_prisma_rust_engines} "
+        f"Prisma engines, cooldown={audit.anti_blackhole_cooldown_seconds}s, "
+        f"status={audit.scale_status}) + Envoy CEL + GKE epp"
+    )
+    if html_out is not None:
+        typer.echo(f"6. HTML Scorecard Saved:  {html_out}")
 
 
 def print_recommendations_table(
@@ -211,12 +246,64 @@ def print_gsu_optimize_report(
     )
 
 
-def print_chargeback_report(
-    report: FocusChargebackReport, unit_name: str, unit_price: float
-) -> None:
+def print_gateway_report(bundle: GatewayConfigBundle, target: str) -> None:
+    audit = bundle.litellm_audit
+    typer.echo(
+        f"=== Multi-Gateway Configuration & Scale Audit "
+        f"({bundle.normalized_model}, {bundle.provisioned_gsus} GSUs) ==="
+    )
+    typer.echo(
+        f"LiteLLM Scale Audit: {audit.total_prisma_rust_engines} Prisma engines "
+        f"({audit.pods} pods * {audit.uvicorn_workers_per_pod} workers) | "
+        f"PgBouncer pool={audit.recommended_pgbouncer_pool_size} | "
+        f"Cooldown={audit.anti_blackhole_cooldown_seconds}s | Status={audit.scale_status}"
+    )
+    if target in ("litellm", "all"):
+        typer.echo("\n--- [1] LiteLLM Proxy (litellm_config.yaml) ---")
+        typer.echo(bundle.litellm_config_yaml.rstrip())
+        typer.echo(
+            "\n--- [2] LiteLLM Weighted Burndown Callback (litellm_burndown_callback.py) ---"
+        )
+        typer.echo(bundle.litellm_burndown_callback_py.rstrip())
+    if target in ("envoy", "all"):
+        typer.echo("\n--- [3] Envoy AI Gateway CEL (AIGatewayRoute + BackendTrafficPolicy) ---")
+        typer.echo(bundle.envoy_ai_gateway_yaml.rstrip())
+    if target in ("epp", "all"):
+        typer.echo("\n--- [4] GKE Inference Gateway (InferencePool + EndpointPickerConfig) ---")
+        typer.echo(bundle.gke_epp_inference_pool_yaml.rstrip())
+
+
+def print_schedule_report(report: ResidualScheduleReport, normalized_model: str) -> None:
+    typer.echo(
+        f"=== 3-Tier Residual Capacity Schedule "
+        f"({normalized_model}, {report.provisioned_gsus} GSUs) ==="
+    )
+    typer.echo(
+        f"Residual PT Budget ({report.horizon_hours}h): "
+        f"{report.total_residual_pt_tokens:,.0f} burndown tokens"
+    )
+    typer.echo(
+        f"Tier-1 Admitted (EDF PT):    {report.admitted_deadline_tokens:,.0f} tokens ($0 marginal)"
+    )
+    typer.echo(
+        f"Tier-1 Spilled (0.5x Flex):  {report.spilled_deadline_tokens:,.0f} tokens "
+        f"(${report.flex_spillover_cost_usd:,.2f})"
+    )
+    typer.echo(
+        f"Tier-2 Evergreen Water-Fill: {report.evergreen_waterfilled_tokens:,.0f} tokens ($0)"
+    )
+    for j in report.jobs:
+        typer.echo(
+            f"  - {j.job_id}: status={j.status} | deadline=T+{j.deadline_hour}h | "
+            f"density=${j.value_density_per_1m_tokens:.2f}/1M | cost=${j.marginal_cost_usd:.2f}"
+        )
+
+
+def print_chargeback_report(report: FocusChargebackReport) -> None:
+    unit_name = "GPU Replicas" if report.mode == "self-hosted" else "GSUs"
     typer.echo(
         f"=== FOCUS 1.2 Two-Pool Chargeback "
-        f"({report.provisioned_gsus} {unit_name} @ ${unit_price:,.0f}/mo) ==="
+        f"({report.provisioned_gsus} {unit_name} @ ${report.unit_price_usd:,.0f}/mo) ==="
     )
     typer.echo(f"Total Monthly Commitment:      ${report.total_commitment_cost_usd:,.2f}")
     typer.echo(
@@ -257,122 +344,3 @@ def print_chargeback_report(
     typer.echo("  ".join("—" * w for w in widths))
     for r in rows:
         typer.echo(fmt.format(*r))
-
-
-def print_auth_check_report(report: dict[str, object]) -> None:
-    auth_ok = bool(report.get("authenticated"))
-    account = report.get("account") or "unauthenticated"
-    typer.echo(
-        f"=== GCP Monitoring Pre-Flight Check (authenticated={auth_ok}, caller={account}) ==="
-    )
-    projects = report.get("projects")
-    if isinstance(projects, dict):
-        for proj, info in projects.items():
-            if isinstance(info, dict):
-                status = "OK" if info.get("ok") else f"BLOCKED ({info.get('error', 'unknown')})"
-                typer.echo(f"  - {proj}: {status}")
-    instructions = report.get("instructions")
-    if isinstance(instructions, list) and instructions:
-        typer.echo("Remediation:")
-        for item in instructions:
-            typer.echo(f"  * {item}")
-
-
-def print_collect_summary(
-    out_path: Path,
-    project_label: str,
-    series_count: int,
-    annotation_count: int,
-) -> None:
-    typer.echo(
-        f"Compiled ShowcaseScenario ({project_label}): "
-        f"{series_count} model series, {annotation_count} inventory annotations -> {out_path}"
-    )
-
-
-def execute_collect_command(
-    *,
-    proj_list: list[str],
-    days: int,
-    by_region: bool,
-    logs_file: Path | None,
-    orders_file: Path | None,
-    project_label: str,
-    gateway_mode: GatewayPresentationMode,
-    pooling_mode: FinOpsPoolingMode,
-    platform_brand: PlatformBrand,
-    self_hosted: bool,
-    check_auth: bool,
-    strict_public_check: bool,
-    out: Path | None,
-    json_output: bool,
-    or_exit: Callable[[Callable[[], object]], object],
-    fail: Callable[[str], typer.Exit],
-) -> None:
-    if check_auth:
-        report_obj = or_exit(lambda: asyncio.run(check_gcp_project_access(proj_list)))
-        report = report_obj if isinstance(report_obj, dict) else {}
-        if json_output:
-            typer.echo(json.dumps(report, indent=2))
-        else:
-            print_auth_check_report(report)
-        if not report.get("ok", False):
-            raise typer.Exit(code=1)
-        if out is None and logs_file is None:
-            return
-
-    if not proj_list and logs_file is None:
-        raise fail("provide `--project <id>` and/or `--logs-file <path>` (or `--check-auth`).")
-
-    sparse: dict[str, dict[datetime, int]] | None = None
-    total_mins: int | None = None
-    inventory: dict[str, dict[str, int]] | None = None
-    if proj_list:
-        try:
-            sparse, total_mins = asyncio.run(
-                fetch_throughput(project=proj_list, days=days, by_region=by_region)
-            )
-            inventory = asyncio.run(
-                fetch_inventory_telemetry(project=proj_list, days=days, by_region=by_region)
-            )
-        except (GCPQueryError, ValueError) as exc:
-            raise fail(str(exc)) from exc
-
-    snap = (
-        load_inference_server_file(logs_file, default_model="gemini-3.8-flash")
-        if logs_file is not None
-        else None
-    )
-    overlay = load_orders_overlay(orders_file) if orders_file is not None else None
-    scenario: ShowcaseScenario = compile_scenario_from_telemetry(
-        project_label=project_label,
-        days=days,
-        by_region=by_region,
-        sparse_series=sparse,
-        total_minutes=total_mins,
-        inventory_telemetry=inventory,
-        log_snapshot=snap,
-        orders_overlay=overlay,
-        gateway_mode=gateway_mode,
-        pooling_mode=pooling_mode,
-        platform_brand=platform_brand,
-        self_hosted_enabled=self_hosted,
-    )
-    if strict_public_check:
-        issues = audit_scenario_public_safety(scenario)
-        if issues:
-            raise fail("Scenario failed --strict-public-check:\n  " + "\n  ".join(issues))
-
-    serialized = scenario.model_dump_json(indent=2)
-    if out is not None:
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_text(serialized + "\n", encoding="utf-8")
-    if json_output or out is None:
-        typer.echo(serialized)
-    else:
-        print_collect_summary(
-            out,
-            scenario.gsu_sizing.project_label,
-            len(scenario.gsu_sizing.minute_tpm_series),
-            len(scenario.gsu_sizing.inventory_annotations),
-        )

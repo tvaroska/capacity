@@ -15,11 +15,11 @@ from typing import Any
 
 import pytest
 from google.cloud import monitoring_v3
+from pydantic import ValidationError
 
 from capacity import finops
 from capacity.burst import compute_weighted_burndown_tokens, evaluate_micro_burst_window
 from capacity.capacity import (
-    DEFAULT_GSU_CONFIG,
     compute_recommendations,
     evaluate_gsu_optimization,
     find_capacity,
@@ -36,12 +36,24 @@ from capacity.finops import (
     optimize_hybrid_commitment,
     schedule_residual_capacity,
 )
-from capacity.models import DeadlineJobSpec, OptimizeRequest
-from capacity.telemetry_parsers import parse_inference_server_telemetry as parse
+from capacity.model_families import DEFAULT_GSU_CONFIG, build_model_catalog
+from capacity.models import (
+    ChargebackRequest,
+    DeadlineJobSpec,
+    MicroBurstRequest,
+    OptimizeRequest,
+    ResidualScheduleRequest,
+    VllmParseRequest,
+)
+from capacity.telemetry_parsers import parse_inference_server_telemetry
 from tests.conftest import FakeMonitoringClient
 
 GSU_TPM = 120_900
 PROMPT = 'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"}'
+
+
+def _parse(raw_content: str) -> Any:
+    return parse_inference_server_telemetry(VllmParseRequest(raw_content=raw_content))
 
 
 @pytest.mark.asyncio
@@ -68,13 +80,17 @@ async def test_every_live_query_sums_series_server_side(
 
 def test_window_ceiling_is_the_committed_rate_plus_five_percent() -> None:
     """CRITICAL #5: 10 GSUs commit 20,150 tokens/s and may burst to 21,157.5, not below."""
-    inside_credit = evaluate_micro_burst_window(600_000, 21_000, 10, tps_per_gsu=2_015.0)
+    inside_credit = evaluate_micro_burst_window(
+        MicroBurstRequest(sixty_sec_tpm=600_000, peak_1s_tps=21_000, provisioned_gsus=10)
+    )
     assert inside_credit.committed_tps_ceiling == 20_150.0
     assert inside_credit.effective_window_tps_ceiling == 21_157.5
     assert inside_credit.window_token_budget == 211_575.0
     assert inside_credit.triggers_429_or_spillover is False
 
-    past_credit = evaluate_micro_burst_window(600_000, 21_200, 10, tps_per_gsu=2_015.0)
+    past_credit = evaluate_micro_burst_window(
+        MicroBurstRequest(sixty_sec_tpm=600_000, peak_1s_tps=21_200, provisioned_gsus=10)
+    )
     assert past_credit.triggers_429_or_spillover is True
     assert past_credit.burst_spillover_tps == 42.5
 
@@ -82,22 +98,35 @@ def test_window_ceiling_is_the_committed_rate_plus_five_percent() -> None:
 def test_bucket_window_is_ten_seconds_below_fifty_gsus_and_one_second_from_fifty() -> None:
     """CRITICAL #5: the refill window switches at exactly 50 GSUs."""
     windows = [
-        evaluate_micro_burst_window(600_000, 20_000, gsus).refill_window_seconds
+        evaluate_micro_burst_window(
+            MicroBurstRequest(sixty_sec_tpm=600_000, peak_1s_tps=20_000, provisioned_gsus=gsus)
+        ).refill_window_seconds
         for gsus in (49, 50)
     ]
     assert windows == [10, 1]
 
 
 def test_measured_ten_second_peak_replaces_the_one_second_spike() -> None:
-    with_measurement = evaluate_micro_burst_window(600_000, 50_000, 10, peak_10s_tps=5_000.0)
-    without = evaluate_micro_burst_window(600_000, 50_000, 10)
+    with_measurement = evaluate_micro_burst_window(
+        MicroBurstRequest(
+            sixty_sec_tpm=600_000, peak_1s_tps=50_000, provisioned_gsus=10, peak_10s_tps=5_000.0
+        )
+    )
+    without = evaluate_micro_burst_window(
+        MicroBurstRequest(sixty_sec_tpm=600_000, peak_1s_tps=50_000, provisioned_gsus=10)
+    )
     assert with_measurement.peak_window_tps == 10_000.0
     assert without.peak_window_tps == 50_000.0
 
 
 def test_claude_buckets_are_thirty_and_sixty_seconds_with_no_burst_credit() -> None:
     audit = evaluate_micro_burst_window(
-        600_000, 20_000, 10, tps_per_gsu=350.0, model="claude-sonnet-4-6"
+        MicroBurstRequest(
+            model="claude-sonnet-4-6",
+            sixty_sec_tpm=600_000,
+            peak_1s_tps=20_000,
+            provisioned_gsus=10,
+        )
     )
     assert (audit.refill_window_seconds, audit.long_window_seconds) == (30, 60)
     assert audit.burst_credit_pct == 0.0
@@ -127,7 +156,11 @@ def test_claude_burndown_is_flat_and_prices_cache_writes() -> None:
 def test_water_fill_reclaims_spare_capacity_and_never_more() -> None:
     """CRITICAL #6: batch demand above the spare is capped at the spare, to the token."""
     demand_above_spare = compute_focus_chargeback(
-        {"a": [90_000.0]}, provisioned_gsus=1, tpm_per_gsu=GSU_TPM, async_batch_waterfill_tpm=5e5
+        ChargebackRequest(
+            hourly_consumed_tpm_by_tenant={"a": [90_000.0]},
+            provisioned_gsus=1,
+            async_batch_waterfill_tpm=5e5,
+        )
     )
     assert demand_above_spare.waterfill_reclaimed_tokens == (GSU_TPM - 90_000) * MINUTES_PER_MONTH
     assert demand_above_spare.effective_utilization_with_waterfill_pct == 100.0
@@ -135,7 +168,11 @@ def test_water_fill_reclaims_spare_capacity_and_never_more() -> None:
     assert demand_above_spare.net_unallocated_idle_cost_usd == 0.0
 
     demand_below_spare = compute_focus_chargeback(
-        {"a": [90_000.0]}, provisioned_gsus=1, tpm_per_gsu=GSU_TPM, async_batch_waterfill_tpm=1e4
+        ChargebackRequest(
+            hourly_consumed_tpm_by_tenant={"a": [90_000.0]},
+            provisioned_gsus=1,
+            async_batch_waterfill_tpm=1e4,
+        )
     )
     assert demand_below_spare.waterfill_reclaimed_tokens == 10_000 * MINUTES_PER_MONTH
     assert demand_below_spare.reclaimed_waterfill_cost_usd == 165.43
@@ -145,10 +182,11 @@ def test_water_fill_reclaims_spare_capacity_and_never_more() -> None:
 def test_active_pool_is_split_by_weighted_burndown_not_raw_tokens() -> None:
     """CRITICAL #6: twice the weighted tokens costs twice as much, whatever the raw token count."""
     report = compute_focus_chargeback(
-        {"a": [60_450.0], "b": [30_225.0]},
-        provisioned_gsus=1,
-        tpm_per_gsu=GSU_TPM,
-        tenant_raw_token_weights={"a": 2.0, "b": 0.5},
+        ChargebackRequest(
+            hourly_consumed_tpm_by_tenant={"a": [60_450.0], "b": [30_225.0]},
+            provisioned_gsus=1,
+            tenant_raw_token_weights={"a": 2.0, "b": 0.5},
+        )
     )
     a, b = report.tenants
     assert report.active_consumed_cost_usd == 1_500.0
@@ -160,7 +198,9 @@ def test_active_pool_is_split_by_weighted_burndown_not_raw_tokens() -> None:
 
 def test_active_and_idle_pools_add_up_to_the_commitment() -> None:
     """CRITICAL #6: the two pools split the invoice; neither is lost or counted twice."""
-    report = compute_focus_chargeback({"a": [90_000.0]}, provisioned_gsus=1, tpm_per_gsu=GSU_TPM)
+    report = compute_focus_chargeback(
+        ChargebackRequest(hourly_consumed_tpm_by_tenant={"a": [90_000.0]}, provisioned_gsus=1)
+    )
     assert report.active_utilization_pct == 74.44
     assert report.active_consumed_cost_usd == 1_488.83
     assert report.unallocated_idle_cost_before_waterfill_usd == 511.17
@@ -172,7 +212,7 @@ def test_active_and_idle_pools_add_up_to_the_commitment() -> None:
     [
         ({}, 2_000.0, 0.9),
         ({"fsp_discount_pct": 15.0}, 1_700.0, 0.9),
-        ({"fsp_discount_pct": 80.0}, 1_000.0, 0.9),
+        ({"fsp_discount_pct": 50.0}, 1_000.0, 0.9),
         ({"spillover_tier": "standard"}, 2_000.0, 0.5),
         ({"spillover_tier": "flex"}, 2_000.0, 0.25),
     ],
@@ -180,13 +220,16 @@ def test_active_and_idle_pools_add_up_to_the_commitment() -> None:
 def test_discount_lowers_the_price_and_tiers_scale_the_spillover_rate(
     options: dict[str, Any], gsu_price: float, spill_per_1m: float
 ) -> None:
-    rec = optimize_hybrid_commitment([241_800.0] * 10, tpm_per_gsu=GSU_TPM, **options)
+    rec = optimize_hybrid_commitment(OptimizeRequest(tpm_series=[241_800.0] * 10, **options))
     assert rec.effective_gsu_monthly_price_usd == gsu_price
     assert rec.effective_spillover_per_1m_tokens_usd == spill_per_1m
 
+    with pytest.raises(ValidationError):
+        OptimizeRequest(tpm_series=[241_800.0], fsp_discount_pct=80.0)
+
 
 def test_break_even_is_the_price_over_a_full_month_of_priority_spillover() -> None:
-    rec = optimize_hybrid_commitment([241_800.0] * 10, tpm_per_gsu=GSU_TPM)
+    rec = optimize_hybrid_commitment(OptimizeRequest(tpm_series=[241_800.0] * 10))
     assert rec.breakeven_utilization_pct == 42.55
     assert (rec.optimal_gsus, rec.total_hybrid_monthly_cost_usd) == (2, 4_000.0)
 
@@ -199,7 +242,7 @@ def _monthly_cost(gsus: int, series: list[float]) -> float:
 def test_commitment_is_the_exact_optimum_above_500_gsus() -> None:
     """A coarse candidate grid returned 1,823 GSUs here, 62,002 USD a month over the optimum."""
     rec = optimize_hybrid_commitment(
-        [GSU_TPM * k for k in (120, 1_000, 2_000, 3_000)], tpm_per_gsu=GSU_TPM
+        OptimizeRequest(tpm_series=[float(GSU_TPM * k) for k in (120, 1_000, 2_000, 3_000)])
     )
     assert rec.optimal_gsus == 2_000
     assert rec.total_hybrid_monthly_cost_usd == 5_175_148.0
@@ -211,7 +254,7 @@ def test_commitment_matches_brute_force_on_heavy_tailed_series() -> None:
         series = [rng.lognormvariate(0, 1.0) * GSU_TPM * 300 for _ in range(rng.randint(4, 12))]
         ceiling = math.ceil(max(series) / GSU_TPM)
         exact = min(range(ceiling + 1), key=lambda g: _monthly_cost(g, series))
-        assert optimize_hybrid_commitment(series, tpm_per_gsu=GSU_TPM).optimal_gsus == exact
+        assert optimize_hybrid_commitment(OptimizeRequest(tpm_series=series)).optimal_gsus == exact
 
 
 def _blocking_jobs(fillers: int) -> list[DeadlineJobSpec]:
@@ -232,10 +275,11 @@ def test_admission_is_exact_up_to_24_jobs_and_greedy_from_25(
     job_count: int, admitted: set[str]
 ) -> None:
     report = schedule_residual_capacity(
-        provisioned_gsus=20,
-        tpm_per_gsu=GSU_TPM,
-        revenue_tpm_by_hour=[(123_318_000.0 - 120_000_000.0) / 60.0],
-        deadline_jobs=_blocking_jobs(job_count - 3),
+        ResidualScheduleRequest(
+            provisioned_gsus=20,
+            revenue_tpm_by_hour=[(123_318_000.0 - 120_000_000.0) / 60.0],
+            deadline_jobs=_blocking_jobs(job_count - 3),
+        )
     )
     assert {j.job_id for j in report.jobs if j.status == "admitted_edf_pt"} == admitted
 
@@ -250,12 +294,15 @@ def test_equal_value_jobs_fill_the_capacity_within_the_search_budget(
         DeadlineJobSpec(job_id=f"j{i:02d}", value_usd=100.0, burndown_tokens=1e6, deadline_hour=8)
         for i in range(24)
     ]
+    custom_cat = build_model_catalog(overrides={"gemini-3.8-flash": 25_001})
     report = schedule_residual_capacity(
-        provisioned_gsus=1,
-        tpm_per_gsu=25_001,
-        safety_headroom_ratio=1.0,
-        revenue_tpm_by_hour=[0.0] * 8,
-        deadline_jobs=tied,
+        ResidualScheduleRequest(
+            provisioned_gsus=1,
+            safety_headroom_ratio=1.0,
+            revenue_tpm_by_hour=[0.0] * 8,
+            deadline_jobs=tied,
+        ),
+        catalog=custom_cat,
     )
     assert report.total_residual_pt_tokens == 12_000_480.0
     assert sum(j.status == "admitted_edf_pt" for j in report.jobs) == 12
@@ -267,10 +314,11 @@ def test_search_stops_at_its_node_budget_and_falls_back_to_the_greedy_ranking(
     """A budget spent before the search reaches job-b plus job-c leaves greedy's job-a standing."""
     monkeypatch.setattr(finops, "_EXACT_SEARCH_NODE_BUDGET", 3)
     report = schedule_residual_capacity(
-        provisioned_gsus=20,
-        tpm_per_gsu=GSU_TPM,
-        revenue_tpm_by_hour=[(123_318_000.0 - 120_000_000.0) / 60.0],
-        deadline_jobs=_blocking_jobs(0),
+        ResidualScheduleRequest(
+            provisioned_gsus=20,
+            revenue_tpm_by_hour=[(123_318_000.0 - 120_000_000.0) / 60.0],
+            deadline_jobs=_blocking_jobs(0),
+        )
     )
     assert {j.job_id for j in report.jobs if j.status == "admitted_edf_pt"} == {"job-a"}
 
@@ -280,13 +328,14 @@ def test_search_stops_at_its_node_budget_and_falls_back_to_the_greedy_ranking(
 )
 def test_job_is_admitted_only_if_it_fits_by_its_deadline(tokens: float, status: str) -> None:
     report = schedule_residual_capacity(
-        provisioned_gsus=1,
-        tpm_per_gsu=GSU_TPM,
-        safety_headroom_ratio=1.0,
-        revenue_tpm_by_hour=[0.0],
-        deadline_jobs=[
-            DeadlineJobSpec(job_id="x", value_usd=1e6, burndown_tokens=tokens, deadline_hour=1)
-        ],
+        ResidualScheduleRequest(
+            provisioned_gsus=1,
+            safety_headroom_ratio=1.0,
+            revenue_tpm_by_hour=[0.0],
+            deadline_jobs=[
+                DeadlineJobSpec(job_id="x", value_usd=1e6, burndown_tokens=tokens, deadline_hour=1)
+            ],
+        )
     )
     assert report.jobs[0].status == status
 
@@ -392,12 +441,12 @@ def test_explicit_request_rate_overrides_the_rate_implied_by_the_trace() -> None
 )
 def test_prometheus_counter_handling(guard: str, scrape: str, tpm: int) -> None:
     """ADR-006: each cumulative-counter guard, with the exact rate it must produce."""
-    assert parse(scrape).tpm_series == [float(tpm)], guard
+    assert _parse(scrape).tpm_series == [float(tpm)], guard
 
 
 def test_epoch_is_read_in_seconds_milliseconds_or_nanoseconds() -> None:
     by_unit = [
-        parse(
+        _parse(
             f'{{"timestamp": {stamp}, "prompt_tokens": 60000}}\n'
             f'{{"timestamp": {stamp + step}, "prompt_tokens": 120000}}'
         ).tpm_series

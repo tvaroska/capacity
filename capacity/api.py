@@ -1,18 +1,19 @@
-"""FastAPI REST service & interactive GM3 Light Web Calculator for `capacity` (`v0.3.0`)."""
+"""FastAPI REST service & interactive GM3 Light Web Calculator for `capacity`."""
 
 from __future__ import annotations
 
+import math
 import os
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field
 
 from capacity.burst import evaluate_model_tier_prefix_cache
-from capacity.capacity import evaluate_gsu_optimization, recommend_capacity, require_capacity
-from capacity.core import CloudMonitoringAdapter, GCPQueryError
+from capacity.capacity import evaluate_gsu_optimization, recommend_capacity
 from capacity.finops import (
     compute_finops_kpis,
     compute_focus_chargeback,
@@ -25,14 +26,13 @@ from capacity.forecasting import (
     DEFAULT_PERCENTILES,
     LocalTraceAdapter,
     TelemetryPort,
-    UnknownModelError,
 )
 from capacity.gateway import generate_gateway_bundle
-from capacity.model_families import normalize_model_id
 from capacity.models import (
     GCP_LOCATION_PATTERN,
     GCP_PROJECT_ID_PATTERN,
     MODEL_ID_PATTERN,
+    PACKAGE_VERSION,
     BatchScavengerAudit,
     BatchScavengerRequest,
     ChargebackRequest,
@@ -53,20 +53,22 @@ from capacity.models import (
     ResidualScheduleReport,
     ResidualScheduleRequest,
     SelfHostedAuditRequest,
+    UnknownModelError,
     VllmParseRequest,
-    fields_of,
 )
 from capacity.portal import render_showcase_portal_html
-from capacity.scenario import load_showcase_scenario
+from capacity.scenario import (
+    ShowcaseReport,
+    ShowcaseScenario,
+    evaluate_showcase_scenario,
+    load_showcase_scenario,
+)
 from capacity.self_hosted import (
     SelfHostedEndpointAudit,
-    VllmTelemetrySnapshot,
     evaluate_self_hosted_endpoint,
-    parse_inference_server_telemetry,
     size_disaggregated_prefill_decode,
 )
-
-load_dotenv()
+from capacity.telemetry_parsers import VllmTelemetrySnapshot, parse_inference_server_telemetry
 
 app = FastAPI(
     title="Capacity - AI Capacity, Multi-Gateway & FOCUS 1.2 FinOps Showcase",
@@ -75,8 +77,26 @@ app = FastAPI(
         "LiteLLM / Envoy AI Gateway / K8s epp config generation, Newsvendor hybrid commitment "
         "optimizer, 3-Tier Residual Capacity Scheduler, and FOCUS 1.2 Two-Pool Chargeback."
     ),
-    version="0.3.0",
+    version=PACKAGE_VERSION,
 )
+
+
+def _sanitize_nonfinite(node: Any) -> Any:  # noqa: ANN401
+    if isinstance(node, float) and not math.isfinite(node):
+        return repr(node)
+    if isinstance(node, list):
+        return [_sanitize_nonfinite(item) for item in node]
+    if isinstance(node, dict):
+        return {k: _sanitize_nonfinite(v) for k, v in node.items()}
+    return node
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_request: Request, exc: RequestValidationError) -> JSONResponse:
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _sanitize_nonfinite(jsonable_encoder(exc.errors()))},
+    )
 
 
 @app.exception_handler(UnknownModelError)
@@ -92,12 +112,23 @@ async def unknown_model_handler(_request: Request, exc: UnknownModelError) -> JS
 def index() -> HTMLResponse:
     scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
     scenario = load_showcase_scenario(scenario_path) if scenario_path else None
-    return HTMLResponse(content=render_showcase_portal_html(static_export=False, scenario=scenario))
+    report = evaluate_showcase_scenario(scenario)
+    return HTMLResponse(content=render_showcase_portal_html(static_export=False, report=report))
 
 
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/api/v1/scenario/demo", response_model=ShowcaseReport)
+def get_demo_scenario_report() -> ShowcaseReport:
+    return evaluate_showcase_scenario(None)
+
+
+@app.post("/api/v1/scenario/evaluate", response_model=ShowcaseReport)
+def post_evaluate_scenario(scenario: ShowcaseScenario) -> ShowcaseReport:
+    return evaluate_showcase_scenario(scenario)
 
 
 @app.get("/api/v1/recommendations", response_model=RecommendationResponse)
@@ -117,7 +148,13 @@ async def get_recommendations(
     demo: Annotated[bool, Query()] = False,
     forecast_hours: Annotated[int, Query(ge=0, le=168)] = 24,
 ) -> RecommendationResponse:
-    source: TelemetryPort = LocalTraceAdapter() if demo else CloudMonitoringAdapter()
+    source: TelemetryPort
+    if demo:
+        source = LocalTraceAdapter()
+    else:
+        from capacity.core import CloudMonitoringAdapter
+
+        source = CloudMonitoringAdapter()
     try:
         return await recommend_capacity(
             source,
@@ -131,7 +168,7 @@ async def get_recommendations(
             forecast_steps=forecast_hours,
             mode=mode,
         )
-    except GCPQueryError as exc:
+    except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
@@ -142,66 +179,52 @@ def post_optimize(req: OptimizeRequest) -> OptimizeResponse:
 
 @app.post("/api/v1/prefix-cache/model-tier", response_model=ModelTierPrefixCacheAudit)
 def post_model_tier_prefix_cache(req: ModelTierPrefixCacheRequest) -> ModelTierPrefixCacheAudit:
-    # An unknown model fails here as on every other route (ADR-001), not with Flash numbers.
-    require_capacity(req.model)
-    return evaluate_model_tier_prefix_cache(**fields_of(req))
+    return evaluate_model_tier_prefix_cache(req)
 
 
 @app.post("/api/v1/self-hosted/audit", response_model=SelfHostedEndpointAudit)
 def post_self_hosted_audit(req: SelfHostedAuditRequest) -> SelfHostedEndpointAudit:
-    return evaluate_self_hosted_endpoint(**fields_of(req))
+    return evaluate_self_hosted_endpoint(req)
 
 
 @app.post("/api/v1/self-hosted/disaggregated", response_model=DisaggregatedPoolSizing)
 def post_disaggregated_sizing(req: DisaggregatedPoolRequest) -> DisaggregatedPoolSizing:
-    return size_disaggregated_prefill_decode(**fields_of(req))
+    return size_disaggregated_prefill_decode(req)
 
 
 @app.post("/api/v1/vllm/parse", response_model=VllmTelemetrySnapshot)
 def post_vllm_parse(req: VllmParseRequest) -> VllmTelemetrySnapshot:
     try:
-        return parse_inference_server_telemetry(**fields_of(req))
+        return parse_inference_server_telemetry(req)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=f"Unreadable telemetry: {exc}") from exc
 
 
 @app.post("/api/v1/gateway/config", response_model=GatewayConfigBundle)
 def post_gateway_config(req: GatewayConfigRequest) -> GatewayConfigBundle:
-    return generate_gateway_bundle(**fields_of(req))
+    return generate_gateway_bundle(req)
 
 
 @app.post("/api/v1/chargeback", response_model=FocusChargebackReport)
 def post_chargeback(req: ChargebackRequest) -> FocusChargebackReport:
-    return compute_focus_chargeback(
-        tpm_per_gsu=require_capacity(req.model), **fields_of(req, without=("model",))
-    )
+    return compute_focus_chargeback(req)
 
 
 @app.post("/api/v1/finops/scavenger", response_model=BatchScavengerAudit)
 def post_batch_scavenger(req: BatchScavengerRequest) -> BatchScavengerAudit:
-    return evaluate_batch_scavenger_economics(
-        model=normalize_model_id(req.model),
-        tpm_per_gsu=require_capacity(req.model),
-        **fields_of(req, without=("model",)),
-    )
+    return evaluate_batch_scavenger_economics(req)
 
 
 @app.post("/api/v1/finops/schedule", response_model=ResidualScheduleReport)
 def post_residual_schedule(req: ResidualScheduleRequest) -> ResidualScheduleReport:
-    return schedule_residual_capacity(
-        tpm_per_gsu=require_capacity(req.model), **fields_of(req, without=("model",))
-    )
+    return schedule_residual_capacity(req)
 
 
 @app.post("/api/v1/finops/folder-pooling", response_model=FolderPoolingReport)
 def post_folder_pooling(req: FolderPoolingRequest) -> FolderPoolingReport:
-    return evaluate_folder_pooling(
-        model=normalize_model_id(req.model),
-        tpm_per_gsu=require_capacity(req.model),
-        **fields_of(req, without=("model",)),
-    )
+    return evaluate_folder_pooling(req)
 
 
 @app.post("/api/v1/finops/kpis", response_model=FinOpsKpiScorecard)
 def post_finops_kpis(req: FinOpsKpiRequest) -> FinOpsKpiScorecard:
-    return compute_finops_kpis(**fields_of(req))
+    return compute_finops_kpis(req)

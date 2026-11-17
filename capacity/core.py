@@ -8,81 +8,34 @@ import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 from typing import Any
 
 from capacity.capacity import find_capacity
-from capacity.forecasting import (
-    DEFAULT_DAYS,
-    DEFAULT_PERCENTILES,
-    LocalTraceAdapter,
-    TelemetryPort,
-    UnknownModelError,
-    build_demo_throughput,
-    holts_linear_trend,
-    percentile,
+from capacity.forecasting import DEFAULT_DAYS, filter_and_fold_series
+from capacity.model_families import (
+    CLAUDE_3P_SONNET_SPEC,
+    GEMINI_1P_FLASH_SPEC,
+    SELF_HOSTED_VLLM_SPEC,
+    is_partner_claude,
+    normalize_model_id,
+    resolve_model_family,
 )
-from capacity.model_families import is_partner_claude, resolve_model_family
-from capacity.models import GCP_LOCATION_PATTERN, GCP_PROJECT_ID_PATTERN, MODEL_ID_PATTERN
+from capacity.models import (
+    GCP_LOCATION_PATTERN,
+    GCP_PROJECT_ID_PATTERN,
+    MODEL_ID_PATTERN,
+    GcpAccessCheckReport,
+    GcpProjectAccessStatus,
+    SeriesKey,
+)
 
-try:
-    from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
-    from google.auth.exceptions import DefaultCredentialsError
-    from google.cloud import monitoring_v3
-    from google.protobuf import duration_pb2
-except ImportError:  # pragma: no cover
-
-    class GoogleAPICallError(Exception):  # type: ignore[no-redef]
-        message: str = ""
-
-    class PermissionDenied(GoogleAPICallError):  # type: ignore[no-redef]
-        pass
-
-    class DefaultCredentialsError(Exception):  # type: ignore[no-redef]
-        pass
-
-    class _DurationNamespace:
-        @staticmethod
-        def Duration(seconds: int = 60) -> Any:  # noqa: ANN401
-            return SimpleNamespace(seconds=seconds)
-
-    class _MonitoringV3Fallback:
-        class Aggregation:
-            class Aligner:
-                ALIGN_SUM = 1
-                ALIGN_MAX = 2
-
-            class Reducer:
-                REDUCE_SUM = 1
-
-            def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-
-        class ListTimeSeriesRequest:
-            class TimeSeriesView:
-                FULL = 1
-
-        class TimeInterval:
-            def __init__(self, **kwargs: Any) -> None:  # noqa: ANN401
-                for k, v in kwargs.items():
-                    setattr(self, k, v)
-
-        class MetricServiceAsyncClient:
-            def __init__(self, *_args: Any, **_kwargs: Any) -> None:  # noqa: ANN401
-                err_cls: Any = DefaultCredentialsError
-                raise err_cls("google-cloud-monitoring is not installed or credentials missing.")
-
-    duration_pb2 = _DurationNamespace()
-    monitoring_v3 = _MonitoringV3Fallback()  # type: ignore[assignment]
-
-PT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/consumed_token_throughput"
+PT_METRIC = GEMINI_1P_FLASH_SPEC.monitoring_metric
 DEDICATED_LIMIT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/dedicated_token_limit"
 INVOCATION_COUNT_METRIC = (
     "aiplatform.googleapis.com/publisher/online_serving/model_invocation_count"
 )
-PARTNER_TOKEN_METRIC = "aiplatform.googleapis.com/publisher/online_serving/token_count"  # noqa: S105
-SELF_HOSTED_PREDICTION_METRIC = "aiplatform.googleapis.com/prediction/online/prediction_count"
+PARTNER_TOKEN_METRIC = CLAUDE_3P_SONNET_SPEC.monitoring_metric
+SELF_HOSTED_PREDICTION_METRIC = SELF_HOSTED_VLLM_SPEC.monitoring_metric
 
 LIMIT_GROUP_BY_FIELDS = [
     "resource.label.model_id",
@@ -115,6 +68,17 @@ SELF_HOSTED_GROUP_BY_FIELDS = [
 ]
 
 
+class GCPQueryError(RuntimeError):
+    """Raised when a GCP Cloud Monitoring query fails due to auth, permissions, or API errors."""
+
+
+def create_monitoring_client() -> Any:  # noqa: ANN401
+    """Lazily import `google.cloud.monitoring_v3` and create an async client."""
+    from google.cloud import monitoring_v3
+
+    return monitoring_v3.MetricServiceAsyncClient()
+
+
 def _partner_token_weight(model_id: str, token_type: str) -> float:
     """Map Cloud Monitoring `token_count` `metric.label.type` to 3P Claude burndown weight."""
     spec = resolve_model_family(model_id)
@@ -130,10 +94,6 @@ def _partner_token_weight(model_id: str, token_type: str) -> float:
     return spec.standard_input_weight
 
 
-class GCPQueryError(Exception):
-    """Raised when a GCP Cloud Monitoring query fails due to auth, permissions, or API errors."""
-
-
 def _validate_identifier(field_name: str, value: str, pattern: str) -> str:
     cleaned = value.strip()
     if not re.fullmatch(pattern, cleaned):
@@ -142,21 +102,13 @@ def _validate_identifier(field_name: str, value: str, pattern: str) -> str:
 
 
 def _whole_day_window(now: datetime, days: int) -> tuple[datetime, datetime]:
-    """The last `days` complete UTC days before `now`.
-
-    A window cut mid-day hands the daily-peak forecast a partial first and last day, and the
-    forecast then moves with the hour the query happens to run.
-    """
+    """The last `days` complete UTC days before `now`."""
     end = now.astimezone(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
     return end - timedelta(days=days), end
 
 
 def _minute_start(end_time: Any) -> datetime:  # noqa: ANN401
-    """Key a 60-second point by the start of the minute it covers, not by its end.
-
-    Cloud Monitoring stamps an aligned point with the end of its interval, which would date
-    the 23:59 minute on the following day.
-    """
+    """Key a 60-second point by the start of the minute it covers, not by its end."""
     end = (
         end_time
         if isinstance(end_time, datetime)
@@ -184,22 +136,34 @@ def _build_filter(
     return " AND ".join(parts)
 
 
-def _build_aggregation(group_by_fields: Sequence[str]) -> monitoring_v3.Aggregation:
+def _build_aggregation(group_by_fields: Sequence[str], *, align_max: bool = False) -> Any:  # noqa: ANN401
+    from google.cloud import monitoring_v3
+    from google.protobuf import duration_pb2
+
+    aligner = (
+        monitoring_v3.Aggregation.Aligner.ALIGN_MAX
+        if align_max
+        else monitoring_v3.Aggregation.Aligner.ALIGN_SUM
+    )
     return monitoring_v3.Aggregation(
         alignment_period=duration_pb2.Duration(seconds=60),
-        per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_SUM,
+        per_series_aligner=aligner,
         cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
         group_by_fields=list(group_by_fields),
     )
 
 
 async def _query_series(
-    client: monitoring_v3.MetricServiceAsyncClient,
+    client: Any,  # noqa: ANN401
     project: str,
     filter_str: str,
-    interval: monitoring_v3.TimeInterval,
-    aggregation: monitoring_v3.Aggregation,
+    interval: Any,  # noqa: ANN401
+    aggregation: Any,  # noqa: ANN401
 ) -> list[Any]:
+    from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud import monitoring_v3
+
     request = {
         "name": f"projects/{project}",
         "filter": filter_str,
@@ -235,8 +199,11 @@ async def fetch_throughput(
     folder_map: Mapping[str, str] | None = None,
     mode: str = "gsu",
     tokens_per_prediction: int = 1_800,
-) -> tuple[dict[str, dict[datetime, int]], int]:
+) -> tuple[dict[SeriesKey, dict[datetime, int]], int]:
     """Fetch per-minute token throughput across one or more GCP projects."""
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud import monitoring_v3
+
     raw_projects = [project] if isinstance(project, str) else list(project)
     if not raw_projects:
         raw_projects = ["default-project"]
@@ -251,7 +218,7 @@ async def fetch_throughput(
             _validate_identifier("model", mod, MODEL_ID_PATTERN)
 
     try:
-        client = monitoring_v3.MetricServiceAsyncClient()
+        client = create_monitoring_client()
     except DefaultCredentialsError as exc:
         raise GCPQueryError(
             "GCP credentials not found. Run `gcloud auth application-default login` "
@@ -261,9 +228,7 @@ async def fetch_throughput(
     start, end = _whole_day_window(datetime.now(UTC), days)
     interval = monitoring_v3.TimeInterval(start_time=start, end_time=end)
     total_minutes = days * 24 * 60
-
-    sparse: dict[str, dict[datetime, int]] = defaultdict(lambda: defaultdict(int))
-    models_filter = {m.lower() for m in models} if models else None
+    raw_entries: list[tuple[str | None, SeriesKey, dict[datetime, int]]] = []
 
     if mode == "self-hosted":
         agg = _build_aggregation(group_by_fields=SELF_HOSTED_GROUP_BY_FIELDS)
@@ -271,24 +236,27 @@ async def fetch_throughput(
         tasks = [_query_series(client, proj, pred_filter, interval, agg) for proj in project_list]
         results = await asyncio.gather(*tasks)
         for proj_id, series_list in zip(project_list, results, strict=False):
-            folder_prefix = (
-                f"{folder_map[proj_id]}/" if folder_map and proj_id in folder_map else ""
-            )
             for ts in series_list:
                 endpoint_id = ts.resource.labels.get("endpoint_id", "self-hosted-endpoint")
                 location = ts.resource.labels.get("location", "global")
-                if models_filter and not any(
-                    endpoint_id.lower().startswith(m) for m in models_filter
-                ):
-                    continue
-                base_key = f"{folder_prefix}{endpoint_id}"
-                key = f"{base_key}@{location}" if by_region else base_key
+                pts: dict[datetime, int] = defaultdict(int)
                 for pt in ts.points:
                     dt_key = _minute_start(pt.interval.end_time)
                     val = int(pt.value.int64_value or round(pt.value.double_value))
-                    sparse[key][dt_key] += val * max(1, tokens_per_prediction)
-        return {k: dict(v) for k, v in sparse.items()}, total_minutes
+                    pts[dt_key] += val * max(1, tokens_per_prediction)
+                raw_entries.append((proj_id, SeriesKey(model=endpoint_id, region=location), pts))
+        return (
+            filter_and_fold_series(
+                raw_entries,
+                models=models,
+                regions=regions,
+                by_region=by_region,
+                folder_map=folder_map,
+            ),
+            total_minutes,
+        )
 
+    models_filter = {m.lower() for m in models} if models else None
     has_partner_filter = bool(models_filter and any(is_partner_claude(m) for m in models_filter))
     has_1p_filter = bool(models_filter and any(not is_partner_claude(m) for m in models_filter))
     query_1p = models_filter is None or has_1p_filter
@@ -323,60 +291,64 @@ async def fetch_throughput(
     all_series_lists = await asyncio.gather(*coros)
 
     for (proj_id, is_partner_query), series_list in zip(coro_meta, all_series_lists, strict=False):
-        folder_prefix = f"{folder_map[proj_id]}/" if folder_map and proj_id in folder_map else ""
         for ts in series_list:
             model_id = ts.resource.labels.get("model_id", "unknown")
             location = ts.resource.labels.get("location", "global")
             if is_partner_query and not is_partner_claude(model_id):
-                continue
-            if models_filter and not any(model_id.lower().startswith(m) for m in models_filter):
                 continue
             token_weight = (
                 _partner_token_weight(model_id, str(ts.metric.labels.get("type", "input")))
                 if is_partner_query
                 else 1.0
             )
-            base_key = f"{folder_prefix}{model_id}"
-            key = f"{base_key}@{location}" if by_region else base_key
+            pts = defaultdict(int)
             for pt in ts.points:
                 dt_key = _minute_start(pt.interval.end_time)
                 val = int(pt.value.int64_value or round(pt.value.double_value))
-                sparse[key][dt_key] += round(val * token_weight) if is_partner_query else val
+                pts[dt_key] += round(val * token_weight) if is_partner_query else val
+            raw_entries.append((proj_id, SeriesKey(model=model_id, region=location), pts))
 
-    return {k: dict(v) for k, v in sparse.items()}, total_minutes
+    return (
+        filter_and_fold_series(
+            raw_entries,
+            models=models,
+            regions=regions,
+            by_region=by_region,
+            folder_map=folder_map,
+        ),
+        total_minutes,
+    )
 
 
-async def check_gcp_project_access(projects: Sequence[str]) -> dict[str, Any]:
+async def check_gcp_project_access(projects: Sequence[str]) -> GcpAccessCheckReport:
     """Pre-flight check separating ADC auth, Monitoring API state, and viewer IAM access."""
+    from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
+    from google.auth.exceptions import DefaultCredentialsError
+
     project_list = [
         _validate_identifier("project", p, GCP_PROJECT_ID_PATTERN) for p in projects if p.strip()
     ]
-    report: dict[str, Any] = {
-        "authenticated": False,
-        "account": None,
-        "projects": {},
-        "instructions": [],
-    }
+    instructions: list[str] = []
     try:
         import google.auth
 
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/monitoring.read"])
-        report["authenticated"] = True
-        report["account"] = getattr(creds, "service_account_email", None) or "user-adc"
-        client = monitoring_v3.MetricServiceAsyncClient()
+        account = getattr(creds, "service_account_email", None) or "user-adc"
+        client = create_monitoring_client()
     except (DefaultCredentialsError, ImportError) as exc:
-        report["instructions"].append(
+        instructions.append(
             "Authenticate with Google Cloud ADC: gcloud auth application-default login"
         )
-        report["error"] = str(exc)
-        return report
+        return GcpAccessCheckReport(
+            authenticated=False,
+            account=None,
+            ok=False,
+            error=str(exc),
+            instructions=instructions,
+        )
 
+    statuses: dict[str, GcpProjectAccessStatus] = {}
     for proj in project_list:
-        entry: dict[str, Any] = {
-            "monitoring_api_enabled": False,
-            "has_viewer_role": False,
-            "ok": False,
-        }
         try:
             pager = await client.list_metric_descriptors(
                 request={
@@ -387,30 +359,47 @@ async def check_gcp_project_access(projects: Sequence[str]) -> dict[str, Any]:
             )
             async for _ in pager:
                 break
-            entry["monitoring_api_enabled"] = True
-            entry["has_viewer_role"] = True
-            entry["ok"] = True
+            statuses[proj] = GcpProjectAccessStatus(
+                monitoring_api_enabled=True,
+                has_viewer_role=True,
+                ok=True,
+            )
         except PermissionDenied as exc:
             msg = str(getattr(exc, "message", "") or exc)
             if "has not been used" in msg or "is disabled" in msg:
-                entry["error"] = "Cloud Monitoring API is disabled on this project."
-                report["instructions"].append(
+                statuses[proj] = GcpProjectAccessStatus(
+                    monitoring_api_enabled=False,
+                    has_viewer_role=False,
+                    ok=False,
+                    error="Cloud Monitoring API is disabled on this project.",
+                )
+                instructions.append(
                     f"Enable API: gcloud services enable monitoring.googleapis.com --project={proj}"
                 )
             else:
-                entry["monitoring_api_enabled"] = True
-                entry["error"] = "Caller lacks roles/monitoring.viewer on this project."
-                report["instructions"].append(
+                statuses[proj] = GcpProjectAccessStatus(
+                    monitoring_api_enabled=True,
+                    has_viewer_role=False,
+                    ok=False,
+                    error="Caller lacks roles/monitoring.viewer on this project.",
+                )
+                instructions.append(
                     f"Grant viewer access (`roles/monitoring.viewer`) on project '{proj}'."
                 )
         except GoogleAPICallError as exc:
-            entry["error"] = str(getattr(exc, "message", "") or exc)
-        report["projects"][proj] = entry
+            statuses[proj] = GcpProjectAccessStatus(
+                ok=False,
+                error=str(getattr(exc, "message", "") or exc),
+            )
 
-    report["ok"] = bool(report["authenticated"]) and all(
-        p.get("ok", False) for p in report["projects"].values()
+    all_ok = all(s.ok for s in statuses.values())
+    return GcpAccessCheckReport(
+        authenticated=True,
+        account=account,
+        ok=all_ok,
+        projects=statuses,
+        instructions=instructions,
     )
-    return report
 
 
 async def fetch_inventory_telemetry(
@@ -418,8 +407,11 @@ async def fetch_inventory_telemetry(
     days: int = DEFAULT_DAYS,
     regions: Sequence[str] | None = None,
     by_region: bool = True,
-) -> dict[str, dict[str, int]]:
+) -> dict[SeriesKey, dict[str, int]]:
     """Fetch provisioned GSU ceiling (`dedicated_token_limit`) and spillover/429 counts."""
+    from google.auth.exceptions import DefaultCredentialsError
+    from google.cloud import monitoring_v3
+
     raw_projects = [project] if isinstance(project, str) else list(project)
     project_list = [
         _validate_identifier("project", p, GCP_PROJECT_ID_PATTERN) for p in raw_projects
@@ -429,7 +421,7 @@ async def fetch_inventory_telemetry(
             _validate_identifier("region", reg, GCP_LOCATION_PATTERN)
 
     try:
-        client = monitoring_v3.MetricServiceAsyncClient()
+        client = create_monitoring_client()
     except DefaultCredentialsError as exc:
         raise GCPQueryError(
             "GCP credentials not found. Run `gcloud auth application-default login`."
@@ -438,12 +430,7 @@ async def fetch_inventory_telemetry(
     start, end = _whole_day_window(datetime.now(UTC), days)
     interval = monitoring_v3.TimeInterval(start_time=start, end_time=end)
 
-    limit_agg = monitoring_v3.Aggregation(
-        alignment_period=duration_pb2.Duration(seconds=60),
-        per_series_aligner=monitoring_v3.Aggregation.Aligner.ALIGN_MAX,
-        cross_series_reducer=monitoring_v3.Aggregation.Reducer.REDUCE_SUM,
-        group_by_fields=list(LIMIT_GROUP_BY_FIELDS),
-    )
+    limit_agg = _build_aggregation(group_by_fields=LIMIT_GROUP_BY_FIELDS, align_max=True)
     inv_agg = _build_aggregation(group_by_fields=INVOCATION_GROUP_BY_FIELDS)
     limit_filter = _build_filter(DEDICATED_LIMIT_METRIC, regions)
     inv_filter = _build_filter(INVOCATION_COUNT_METRIC, regions)
@@ -459,48 +446,42 @@ async def fetch_inventory_telemetry(
         asyncio.gather(*inv_tasks),
     )
 
-    max_tps_by_key: dict[str, float] = defaultdict(float)
+    max_tps_by_key: dict[SeriesKey, float] = defaultdict(float)
     for series_list in limit_lists:
         for ts in series_list:
-            model_id = normalize_key_model(ts.resource.labels.get("model_id", "unknown"))
+            model_id = normalize_model_id(ts.resource.labels.get("model_id", "unknown"))
             loc = ts.resource.labels.get("location", "global")
-            key = f"{model_id}@{loc}" if by_region else model_id
+            skey = SeriesKey(model=model_id, region=loc if by_region else None)
             peak_pt = max(
                 (float(pt.value.int64_value or pt.value.double_value or 0.0) for pt in ts.points),
                 default=0.0,
             )
-            max_tps_by_key[key] += peak_pt
+            max_tps_by_key[skey] += peak_pt
 
-    summary: dict[str, dict[str, int]] = defaultdict(
+    summary: dict[SeriesKey, dict[str, int]] = defaultdict(
         lambda: {"contracted_gsus": 0, "spillover_requests": 0, "http_429_count": 0}
     )
-    for key, limit_tps in max_tps_by_key.items():
-        cap_tpm = find_capacity(key.split("@", 1)[0])
+    for skey, limit_tps in max_tps_by_key.items():
+        cap_tpm = find_capacity(skey.model)
         if cap_tpm and cap_tpm > 0 and limit_tps > 0.0:
-            summary[key]["contracted_gsus"] = max(1, math.ceil((limit_tps * 60.0) / cap_tpm))
+            summary[skey]["contracted_gsus"] = max(1, math.ceil((limit_tps * 60.0) / cap_tpm))
 
     for series_list in inv_lists:
         for ts in series_list:
-            model_id = normalize_key_model(ts.resource.labels.get("model_id", "unknown"))
+            model_id = normalize_model_id(ts.resource.labels.get("model_id", "unknown"))
             loc = ts.resource.labels.get("location", "global")
-            key = f"{model_id}@{loc}" if by_region else model_id
+            skey = SeriesKey(model=model_id, region=loc if by_region else None)
             resp_code = str(ts.metric.labels.get("response_code", "")).strip()
             req_type = str(ts.metric.labels.get("request_type", "")).strip().lower()
             total_calls = sum(
                 int(pt.value.int64_value or round(pt.value.double_value)) for pt in ts.points
             )
             if resp_code == "429":
-                summary[key]["http_429_count"] += total_calls
+                summary[skey]["http_429_count"] += total_calls
             if req_type in {"shared", "spillover", "on_demand", "on_demand_priority"}:
-                summary[key]["spillover_requests"] += total_calls
+                summary[skey]["spillover_requests"] += total_calls
 
     return dict(summary)
-
-
-def normalize_key_model(model_id: str) -> str:
-    from capacity.model_families import normalize_model_id
-
-    return normalize_model_id(model_id)
 
 
 class CloudMonitoringAdapter:
@@ -515,7 +496,7 @@ class CloudMonitoringAdapter:
         by_region: bool = False,
         folder_map: Mapping[str, str] | None = None,
         mode: str = "gsu",
-    ) -> tuple[dict[str, dict[datetime, int]], int]:
+    ) -> tuple[dict[SeriesKey, dict[datetime, int]], int]:
         return await fetch_throughput(
             project=project,
             days=days,
@@ -525,28 +506,3 @@ class CloudMonitoringAdapter:
             folder_map=folder_map,
             mode=mode,
         )
-
-
-__all__ = [
-    "DEDICATED_LIMIT_METRIC",
-    "DEFAULT_DAYS",
-    "DEFAULT_PERCENTILES",
-    "GROUP_BY_FIELDS",
-    "INVOCATION_COUNT_METRIC",
-    "PARTNER_GROUP_BY_FIELDS",
-    "PARTNER_TOKEN_METRIC",
-    "PT_METRIC",
-    "SELF_HOSTED_GROUP_BY_FIELDS",
-    "SELF_HOSTED_PREDICTION_METRIC",
-    "CloudMonitoringAdapter",
-    "GCPQueryError",
-    "LocalTraceAdapter",
-    "TelemetryPort",
-    "UnknownModelError",
-    "build_demo_throughput",
-    "check_gcp_project_access",
-    "fetch_inventory_telemetry",
-    "fetch_throughput",
-    "holts_linear_trend",
-    "percentile",
-]

@@ -1,11 +1,11 @@
-"""Tests for ShowcaseScenario (`--scenario-file`), `capacity collect`, Carbon, and D5 fixes."""
+"""Tests for ShowcaseScenario (`--scenario-file`), `capacity collect`, Carbon, and P1 fixes."""
 
 from __future__ import annotations
 
 import json
 import re
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,10 +20,20 @@ from capacity.capacity import require_capacity
 from capacity.cli import app as cli_app
 from capacity.core import check_gcp_project_access, fetch_inventory_telemetry
 from capacity.model_families import resolve_model_family
+from capacity.models import (
+    MicroBurstRequest,
+    ModelTierPrefixCacheRequest,
+    SeriesKey,
+    UnknownModelError,
+    VllmParseRequest,
+)
 from capacity.portal import render_showcase_portal_html
 from capacity.scenario import (
     ShowcaseScenario,
     audit_scenario_public_safety,
+    build_default_showcase_scenario,
+    compile_scenario_from_telemetry,
+    evaluate_showcase_scenario,
     load_showcase_scenario,
 )
 from capacity.telemetry_parsers import parse_inference_server_telemetry
@@ -39,35 +49,37 @@ def test_gemini_4_carbon_registered_with_pro_token_boundary_spec() -> None:
     assert spec.min_prefix_floor_tokens == 2_048
     assert spec.checkpoint_granularity == "token_boundary"
     audit = evaluate_model_tier_prefix_cache(
-        model="gemini-4-carbon",
-        static_prefix_tokens=3_000,
-        dynamic_header_offset_tokens=None,
+        ModelTierPrefixCacheRequest(
+            model="gemini-4-carbon",
+            static_prefix_tokens=3_000,
+            dynamic_header_offset_tokens=None,
+        )
     )
     assert not audit.below_minimum_floor
     assert audit.aligned_cacheable_tokens == 3_000
 
 
 def test_micro_burst_zero_spillover_accounts_for_50_gsu_window_switch() -> None:
-    # 60s avg = 60,000 TPS; at 40 GSUs (<50), 10s peak = 110,000 TPS -> 52 GSUs (>=50).
-    # Crossing >=50 GSUs switches 1P enforcement to the 1s bucket (1s peak = 150,000 -> 71 GSUs).
     audit = evaluate_micro_burst_window(
-        sixty_sec_tpm=3_600_000.0,
-        peak_1s_tps=150_000.0,
-        peak_10s_tps=110_000.0,
-        provisioned_gsus=40,
-        tps_per_gsu=2_015.0,
-        model="gemini-3.8-flash",
+        MicroBurstRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=40,
+            sixty_sec_tpm=3_600_000.0,
+            peak_1s_tps=150_000.0,
+            peak_10s_tps=110_000.0,
+        )
     )
     assert audit.refill_window_seconds == 10
     assert audit.gsus_required_for_zero_spillover == 71
 
     verified = evaluate_micro_burst_window(
-        sixty_sec_tpm=3_600_000.0,
-        peak_1s_tps=150_000.0,
-        peak_10s_tps=110_000.0,
-        provisioned_gsus=audit.gsus_required_for_zero_spillover,
-        tps_per_gsu=2_015.0,
-        model="gemini-3.8-flash",
+        MicroBurstRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=audit.gsus_required_for_zero_spillover,
+            sixty_sec_tpm=3_600_000.0,
+            peak_1s_tps=150_000.0,
+            peak_10s_tps=110_000.0,
+        )
     )
     assert verified.refill_window_seconds == 1
     assert not verified.triggers_429_or_spillover
@@ -77,6 +89,43 @@ def test_recommend_table_forecast_header_reflects_requested_horizon() -> None:
     res = runner.invoke(cli_app, ["recommend", "--demo", "--active-only", "--forecast-hours", "72"])
     assert res.exit_code == 0, res.output
     assert "Forecast+72h TPM" in res.stdout
+
+
+def test_demo_matches_default_showcase_scenario_and_omits_disabled_self_hosted(
+    tmp_path: Path,
+) -> None:
+    default_scen = build_default_showcase_scenario()
+    scen_file = tmp_path / "default_scenario.json"
+    scen_file.write_text(default_scen.model_dump_json(indent=2), encoding="utf-8")
+
+    res_demo = runner.invoke(cli_app, ["demo", "--format", "json"])
+    res_scen = runner.invoke(
+        cli_app, ["demo", "--scenario-file", str(scen_file), "--format", "json"]
+    )
+    assert res_demo.exit_code == 0 and res_scen.exit_code == 0
+    demo_json = json.loads(res_demo.stdout)
+    scen_json = json.loads(res_scen.stdout)
+    demo_json.pop("scenario_mode")
+    scen_json.pop("scenario_mode")
+    assert demo_json == scen_json
+    assert demo_json["self_hosted_audit"]["max_replica_count"] == 6
+    assert demo_json["self_hosted_audit"]["locked_regional_accelerators"] == 48
+
+    no_sh = default_scen.model_copy(
+        update={"self_hosted": default_scen.self_hosted.model_copy(update={"enabled": False})}
+    )
+    rep_no_sh = evaluate_showcase_scenario(no_sh)
+    assert rep_no_sh.self_hosted_audit is None
+    assert rep_no_sh.disaggregated_sizing is None
+
+
+def test_compile_scenario_rejects_unknown_model() -> None:
+    t0 = datetime(2026, 11, 10, 9, 0, tzinfo=UTC)
+    with pytest.raises(UnknownModelError):
+        compile_scenario_from_telemetry(
+            project_label="hub-prod",
+            sparse_series={"unknown-future-model@us-central1": {t0 + timedelta(minutes=1): 50_000}},
+        )
 
 
 def test_observability_2_inference_request_logs_parse_and_compile_to_scenario(
@@ -115,7 +164,9 @@ def test_observability_2_inference_request_logs_parse_and_compile_to_scenario(
     logs_path = tmp_path / "bql_inference.jsonl"
     logs_path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 
-    snap = parse_inference_server_telemetry(logs_path.read_text(encoding="utf-8"))
+    snap = parse_inference_server_telemetry(
+        VllmParseRequest(raw_content=logs_path.read_text(encoding="utf-8"))
+    )
     assert snap.total_requests == 2
     assert snap.spillover_requests == 1
     assert snap.http_429_count == 1
@@ -164,7 +215,7 @@ def test_observability_2_inference_request_logs_parse_and_compile_to_scenario(
     assert "Contracted Managed PT Fleet" in rendered
     assert "Short-Term GA (Eval/Pilot)" in rendered
     assert "LiteLLM Prisma Engines" not in rendered
-    assert re.findall(r"__[A-Z][A-Z_]*__", rendered) == []
+    assert re.findall(r"__[A-Z0-9_]+__", rendered) == []
 
 
 def test_shipped_enterprise_scenario_renders_clean_and_passes_strict_public_check() -> None:
@@ -176,7 +227,7 @@ def test_shipped_enterprise_scenario_renders_clean_and_passes_strict_public_chec
     assert "Option A / Option B" in rendered
     assert "Fixed-Term Renewal Cliff" in rendered
     assert "gemini-4-carbon" in rendered
-    assert re.findall(r"__[A-Z][A-Z_]*__", rendered) == []
+    assert re.findall(r"__[A-Z0-9_]+__", rendered) == []
 
 
 def test_strict_public_check_catches_leaked_project_numbers_and_suffixes(tmp_path: Path) -> None:
@@ -184,7 +235,7 @@ def test_strict_public_check_catches_leaked_project_numbers_and_suffixes(tmp_pat
         (REPO_ROOT / "examples/scenarios/multi_tenant_enterprise.json").read_text(encoding="utf-8")
     )
     raw["gsu_sizing"]["project_label"] = "proj-1085051178019"
-    raw["gsu_sizing"]["inventory_annotations"]["gemini-3.8-flash@global"]["note"] = (
+    raw["gsu_sizing"]["inventory_annotations"]["gemini-3.8-flash@global"]["scope_label"] = (
         "gemini-3.8-flash-qcd"
     )
     bad_path = tmp_path / "leaked.json"
@@ -232,12 +283,12 @@ async def test_check_gcp_project_access_distinguishes_disabled_api_vs_iam(
     with patch("google.auth.default", return_value=(fake_creds, "proj-ok")):
         rep = await check_gcp_project_access(["proj-ok", "proj-disabled", "proj-noiam"])
 
-    assert rep["authenticated"] is True
-    assert rep["ok"] is False
-    assert rep["projects"]["proj-ok"]["ok"] is True
-    assert rep["projects"]["proj-disabled"]["monitoring_api_enabled"] is False
-    assert rep["projects"]["proj-noiam"]["monitoring_api_enabled"] is True
-    assert rep["projects"]["proj-noiam"]["has_viewer_role"] is False
+    assert rep.authenticated is True
+    assert rep.ok is False
+    assert rep.projects["proj-ok"].ok is True
+    assert rep.projects["proj-disabled"].monitoring_api_enabled is False
+    assert rep.projects["proj-noiam"].monitoring_api_enabled is True
+    assert rep.projects["proj-noiam"].has_viewer_role is False
 
 
 @pytest.mark.asyncio
@@ -258,6 +309,7 @@ async def test_fetch_inventory_telemetry_converts_dedicated_limit_and_429s(
     )
     inv = await fetch_inventory_telemetry("demo-project", days=3, by_region=True)
 
-    assert inv["gemini-3.8-flash@global"]["contracted_gsus"] == 20
-    assert inv["gemini-3.8-flash@global"]["http_429_count"] == 250
-    assert inv["gemini-3.8-flash@global"]["spillover_requests"] == 250
+    skey = SeriesKey("gemini-3.8-flash", "global")
+    assert inv[skey]["contracted_gsus"] == 20
+    assert inv[skey]["http_429_count"] == 250
+    assert inv[skey]["spillover_requests"] == 250

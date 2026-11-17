@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import html
-from typing import Any
 
 from capacity.model_families import normalize_model_id
-from capacity.scenario import ModelInventoryAnnotation, ShowcaseScenario
-
-SIM_MODELS: tuple[tuple[str, str], ...] = (
-    ("gemini-3.8-flash", "gemini-3.8-flash (4,096-block / 6,144 floor, Long-Term GA)"),
-    ("gemini-3.8-flash-fast", "gemini-3.8-flash-fast (2.5x decode speed)"),
-    ("gemini-4-argon", "gemini-4-argon (token-boundary / 2,048 floor, Long-Term GA)"),
-    ("gemini-4-carbon", "gemini-4-carbon (500 TPS/GSU, 2,048 floor, Short-Term GA)"),
-    ("gemini-3.5-flash-lite", "gemini-3.5-flash-lite (4,096-block / 6,144 floor, Long-Term GA)"),
-    ("claude-sonnet-4-6", "claude-sonnet-4-6 (350 TPS/GSU, 30s bucket, 1,024 floor)"),
-    ("claude-opus-4-6", "claude-opus-4-6 (210 TPS/GSU, 30s bucket, 4,096 floor)"),
-    ("claude-sonnet-5-5", "claude-sonnet-5-5 (525 TPS/GSU, 30s bucket, 512 floor)"),
+from capacity.models import GatewayConfigBundle, GatewayConfigRequest, RecommendationResponse
+from capacity.scenario import (
+    ModelInventoryAnnotation,
+    ShowcaseReport,
+    ShowcaseScenario,
 )
 
 
@@ -57,20 +50,19 @@ def lookup_annotation(
     return None
 
 
-def render_sizing_kpis(
-    data: dict[str, Any],
-    scenario: ShowcaseScenario | None,
-) -> tuple[str, str]:
-    models_list = data["gsu_recommendations"]["models"]
-    mean_duty = (
-        sum(m["duty_cycle_pct"] for m in models_list) / len(models_list) if models_list else 23.8
-    )
-    duty_val = "23.8" if scenario is None else f"{mean_duty:.1f}"
-    wave_lbl = html.escape(
-        scenario.presentation.wave_badge_label if scenario is not None else "8x5 Business Wave"
-    )
+def compute_mean_duty_pct(recs: RecommendationResponse) -> float:
+    if not recs.models:
+        return 0.0
+    return sum(m.duty_cycle_pct for m in recs.models) / len(recs.models)
 
-    if scenario is not None and not scenario.self_hosted.enabled:
+
+def render_sizing_kpis(report: ShowcaseReport) -> tuple[str, str]:
+    scenario = report.scenario
+    mean_duty = compute_mean_duty_pct(report.gsu_recommendations)
+    duty_val = f"{mean_duty:.1f}"
+    wave_lbl = html.escape(scenario.presentation.wave_badge_label)
+
+    if not scenario.self_hosted.enabled or report.self_hosted_audit is None:
         anns = list(scenario.gsu_sizing.inventory_annotations.values())
         total_gsus = sum(a.contracted_gsus or 0 for a in anns)
         total_429 = sum(a.http_429_count or 0 for a in anns)
@@ -112,10 +104,22 @@ def render_sizing_kpis(
         )
         return kpis_html, ""
 
-    sh_d = data["self_hosted_audit"]
-    disagg_d = data["disaggregated_sizing"]
-    accel_type = html.escape(str(sh_d["accelerator_type"]))
-    disagg_rec = html.escape(str(disagg_d["recommendation"]))
+    sh_d = report.self_hosted_audit
+    disagg_d = report.disaggregated_sizing
+    if disagg_d is None:
+        return "", ""
+    disagg_req = scenario.self_hosted.disaggregated
+    accel_type = html.escape(sh_d.accelerator_type)
+    disagg_rec = html.escape(disagg_d.recommendation)
+    if disagg_d.replica_delta > 0:
+        disagg_badge_cls = "badge-green"
+        disagg_badge_txt = f"Saves {disagg_d.replica_delta} Replica(s) vs Monolithic"
+    else:
+        disagg_badge_cls = "badge-warn"
+        disagg_badge_txt = (
+            f"Monolithic Cheaper ({disagg_d.monolithic_replicas} vs "
+            f"{disagg_d.total_disaggregated_replicas} Reps)"
+        )
     kpis_html = (
         f"<div class='kpi-grid'>"
         f"<div class='kpi-card'><div class='kpi-label'>Active vs 24x7 Duty Cycle</div>"
@@ -124,19 +128,19 @@ def render_sizing_kpis(
         f"<div class='kpi-caption'>Prevents 24x7 zero-padding P50=0 under-sizing</div></div>"
         f"<div class='kpi-card'><div class='kpi-label'>Upfront GPU Quota Lock</div>"
         f"<div class='kpi-value' id='kpi-locked-gpus'>"
-        f"{sh_d['locked_regional_accelerators']} GPUs</div>"
+        f"{sh_d.locked_regional_accelerators} GPUs</div>"
         f"<span class='badge badge-danger'>"
-        f"{sh_d['stranded_quota_accelerators']} Stranded vs Min</span>"
-        f"<div class='kpi-caption'>max_replica_count ({sh_d['max_replica_count']}) &times; "
-        f"{sh_d['accelerators_per_replica']} {accel_type}</div></div>"
+        f"{sh_d.stranded_quota_accelerators} Stranded vs Min</span>"
+        f"<div class='kpi-caption'>max_replica_count ({sh_d.max_replica_count}) &times; "
+        f"{sh_d.accelerators_per_replica} {accel_type}</div></div>"
         f"<div class='kpi-card'><div class='kpi-label'>Disaggregated P/D Pool</div>"
         f"<div class='kpi-value' id='kpi-disagg-reps'>"
-        f"{disagg_d['prefill_replicas']}P + {disagg_d['decode_replicas']}D</div>"
-        f"<span class='badge badge-green' id='kpi-disagg-badge'>"
-        f"Saves {disagg_d['replica_delta']} Replica(s) vs Monolithic</span>"
+        f"{disagg_d.prefill_replicas}P + {disagg_d.decode_replicas}D</div>"
+        f"<span class='badge {disagg_badge_cls}' id='kpi-disagg-badge'>"
+        f"{disagg_badge_txt}</span>"
         f"<div class='kpi-caption'>Isolates TTFT prefill bursts from TPOT decode</div></div>"
         f"<div class='kpi-card'><div class='kpi-label'>Non-Prod Scale-to-Zero</div>"
-        f"<div class='kpi-value'>${sh_d['scale_to_zero_nonprod_savings_usd']:,.0f}/mo</div>"
+        f"<div class='kpi-value'>${sh_d.scale_to_zero_nonprod_savings_usd:,.0f}/mo</div>"
         f"<span class='badge badge-green'>ScaleToZeroSpec (108h/wk idle)</span>"
         f"<div class='kpi-caption'>Eliminates overnight/weekend idle GPU burn</div></div>"
         f"</div>"
@@ -149,17 +153,17 @@ def render_sizing_kpis(
         "bandwidth/KV-bound Decode replicas (TPOT SLA).</p>"
         "<div class='controls-grid'>"
         "<div class='field'><label for='pd-qps'>Peak Arrival QPS</label>"
-        "<input id='pd-qps' type='number' value='18' min='0.1' max='500' step='1' "
-        "oninput='recalcDisagg()' /></div>"
+        f"<input id='pd-qps' type='number' value='{disagg_req.peak_qps:g}' min='0.1' max='500' "
+        "step='1' oninput='recalcDisagg()' /></div>"
         "<div class='field'><label for='pd-in'>Avg Input Tokens</label>"
-        "<input id='pd-in' type='number' value='6400' min='256' max='128000' step='256' "
-        "oninput='recalcDisagg()' /></div>"
+        f"<input id='pd-in' type='number' value='{disagg_req.avg_input_tokens}' min='256' "
+        "max='128000' step='256' oninput='recalcDisagg()' /></div>"
         "<div class='field'><label for='pd-out'>Avg Output Tokens</label>"
-        "<input id='pd-out' type='number' value='450' min='32' max='16384' step='50' "
-        "oninput='recalcDisagg()' /></div>"
+        f"<input id='pd-out' type='number' value='{disagg_req.avg_output_tokens}' min='32' "
+        "max='16384' step='50' oninput='recalcDisagg()' /></div>"
         "<div class='field'><label for='pd-ttft'>Target TTFT (ms)</label>"
-        "<input id='pd-ttft' type='number' value='350' min='50' max='2000' step='25' "
-        "oninput='recalcDisagg()' /></div>"
+        f"<input id='pd-ttft' type='number' value='{disagg_req.target_ttft_ms:g}' min='50' "
+        "max='2000' step='25' oninput='recalcDisagg()' /></div>"
         "</div>"
         f"<div id='pd-output' class='info-banner'>{disagg_rec}</div>"
         "</div>"
@@ -168,10 +172,11 @@ def render_sizing_kpis(
 
 
 def render_gateway_top_section(
-    gw: dict[str, Any],
-    scenario: ShowcaseScenario | None,
+    gw: GatewayConfigBundle,
+    gw_req: GatewayConfigRequest,
+    scenario: ShowcaseScenario,
 ) -> str:
-    if scenario is not None and scenario.gateway.presentation_mode == "central_proxy":
+    if scenario.gateway.presentation_mode == "central_proxy":
         proxy_lbl = html.escape(scenario.gateway.proxy_label)
         brand = html.escape(scenario.presentation.platform_brand)
         return (
@@ -245,20 +250,40 @@ def render_gateway_top_section(
             f"</div>"
         )
 
-    litellm_cfg = html.escape(str(gw["litellm_config_yaml"]))
-    litellm_cb = html.escape(str(gw["litellm_burndown_callback_py"]))
-    envoy_cfg = html.escape(str(gw["envoy_ai_gateway_yaml"]))
-    epp_cfg = html.escape(str(gw["gke_epp_inference_pool_yaml"]))
+    audit = gw.litellm_audit
+    if audit.scale_status == "migrate_dataplane_to_envoy":
+        status_cls = "badge-danger"
+        status_txt = "Migrate Data Plane to Envoy AI Gateway"
+        banner_cls = "danger-banner"
+    elif audit.scale_status == "tune_required":
+        status_cls = "badge-warn"
+        status_txt = "Tune Required (&ge;500 RPS)"
+        banner_cls = "warn-banner"
+    else:
+        status_cls = "badge-green"
+        status_txt = "Healthy Scale Envelope"
+        banner_cls = "info-banner"
+    banner_msg = html.escape(
+        audit.bottleneck_warnings[-1] if audit.bottleneck_warnings else status_txt
+    )
+
+    litellm_cfg = html.escape(gw.litellm_config_yaml)
+    litellm_cb = html.escape(gw.litellm_burndown_callback_py)
+    envoy_cfg = html.escape(gw.envoy_ai_gateway_yaml)
+    epp_cfg = html.escape(gw.gke_epp_inference_pool_yaml)
     return (
         "<div class='kpi-grid'>"
         "<div class='kpi-card'><div class='kpi-label'>LiteLLM Prisma Engines</div>"
-        "<div class='kpi-value' id='gw-prisma-val'>48 Engines</div>"
-        "<span class='badge badge-warn' id='gw-status-badge'>Tune Required (&ge;500 RPS)</span>"
-        "<div class='kpi-caption' id='gw-pg-caption'>PgBouncer pool=34, Postgres max_conns&ge;100"
+        f"<div class='kpi-value' id='gw-prisma-val'>{audit.total_prisma_rust_engines} Engines</div>"
+        f"<span class='badge {status_cls}' id='gw-status-badge'>{status_txt}</span>"
+        f"<div class='kpi-caption' id='gw-pg-caption'>"
+        f"PgBouncer pool={audit.recommended_pgbouncer_pool_size}, "
+        f"Postgres max_conns&ge;{audit.recommended_postgres_max_connections}"
         "</div></div>"
         "<div class='kpi-card'><div class='kpi-label'>Anti-Blackhole Cooldown</div>"
-        "<div class='kpi-value' id='gw-cooldown-val'>5s Cooldown</div>"
-        "<span class='badge badge-green'>Matched to 10s PT Bucket</span>"
+        f"<div class='kpi-value' id='gw-cooldown-val'>"
+        f"{audit.anti_blackhole_cooldown_seconds}s Cooldown</div>"
+        f"<span class='badge badge-green'>Matched to {gw.refill_window_seconds}s PT Bucket</span>"
         "<div class='kpi-caption'>Prevents 1s/10s micro-burst 429 from blackholing PT</div></div>"
         "<div class='kpi-card'><div class='kpi-label'>Envoy AI Gateway CEL</div>"
         "<div class='kpi-value'>Two-Phase RLS</div>"
@@ -276,21 +301,19 @@ def render_gateway_top_section(
         "to size PgBouncer pools and detect the Envoy data-plane crossover.</p>"
         "<div class='controls-grid'>"
         "<div class='field'><label for='gw-rps'>Target Gateway RPS</label>"
-        "<input id='gw-rps' type='number' value='650' min='10' max='10000' step='50' "
-        "oninput='recalcGatewayAudit()' /></div>"
+        f"<input id='gw-rps' type='number' value='{gw_req.target_rps}' min='10' max='10000' "
+        "step='50' oninput='recalcGatewayAudit()' /></div>"
         "<div class='field'><label for='gw-sse'>Concurrent SSE Streams</label>"
-        "<input id='gw-sse' type='number' value='400' min='0' max='5000' step='50' "
-        "oninput='recalcGatewayAudit()' /></div>"
+        f"<input id='gw-sse' type='number' value='{gw_req.concurrent_sse_streams}' min='0' "
+        "max='5000' step='50' oninput='recalcGatewayAudit()' /></div>"
         "<div class='field'><label for='gw-pods'>LiteLLM Pods</label>"
-        "<input id='gw-pods' type='number' value='12' min='1' max='100' step='1' "
+        f"<input id='gw-pods' type='number' value='{gw_req.pods}' min='1' max='100' step='1' "
         "oninput='recalcGatewayAudit()' /></div>"
         "<div class='field'><label for='gw-workers'>Uvicorn Workers / Pod</label>"
-        "<input id='gw-workers' type='number' value='4' min='1' max='16' step='1' "
-        "oninput='recalcGatewayAudit()' /></div>"
+        f"<input id='gw-workers' type='number' value='{gw_req.uvicorn_workers_per_pod}' min='1' "
+        "max='16' step='1' oninput='recalcGatewayAudit()' /></div>"
         "</div>"
-        "<div id='gw-audit-msg' class='warn-banner'>48 Prisma Rust query engines active across "
-        "12 pods. Enable use_redis_transaction_buffer: true (10s), LITELLM_RUST=1, and front "
-        "PostgreSQL with PgBouncer transaction pooling.</div></div>"
+        f"<div id='gw-audit-msg' class='{banner_cls}'>{banner_msg}</div></div>"
         "<div class='two-col'>"
         "<div class='card'><h2>1. LiteLLM Proxy Config (<code>litellm_config.yaml</code>)</h2>"
         "<p class='sub'>Tag-based PT &rarr; Priority 1.8x spillover, Non-Prod 0.5x Flex "
@@ -315,11 +338,10 @@ def render_gateway_top_section(
     )
 
 
-def render_finops_pool_cards(
-    fpool: dict[str, Any],
-    scenario: ShowcaseScenario | None,
-) -> tuple[str, str]:
-    if scenario is not None and scenario.finops.pooling_mode == "1p_vs_3p_hub":
+def render_finops_pool_cards(report: ShowcaseReport) -> tuple[str, str]:
+    scenario = report.scenario
+    fpool = report.folder_pooling
+    if scenario.finops.pooling_mode == "1p_vs_3p_hub":
         brand = html.escape(scenario.presentation.platform_brand)
         kpi_card = (
             "<div class='kpi-card'>"
@@ -355,10 +377,10 @@ def render_finops_pool_cards(
     kpi_card = (
         "<div class='kpi-card'>"
         "<div class='kpi-label'>Shared Folder RHPT Pooling</div>"
-        f"<div class='kpi-value'>{fpool['siloed_total_gsus']} &rarr; "
-        f"{fpool['pooled_folder_gsus']} GSUs</div>"
-        f"<span class='badge badge-blue'>Saves ${fpool['monthly_savings_usd']:,.0f}/mo "
-        f"(${fpool['annual_savings_usd']:,.0f}/yr)</span>"
+        f"<div class='kpi-value'>{fpool.siloed_total_gsus} &rarr; "
+        f"{fpool.pooled_folder_gsus} GSUs</div>"
+        f"<span class='badge badge-blue'>Saves ${fpool.monthly_savings_usd:,.0f}/mo "
+        f"(${fpool.annual_savings_usd:,.0f}/yr)</span>"
         "<div class='kpi-caption'>Follow-the-sun EMEA + AMER + APAC spoke pooling</div>"
         "</div>"
     )

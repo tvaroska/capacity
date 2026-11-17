@@ -10,6 +10,7 @@ import pytest
 from capacity.capacity import compute_recommendations
 from capacity.core import CloudMonitoringAdapter
 from capacity.forecasting import LocalTraceAdapter, TelemetryPort
+from capacity.models import SeriesKey
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 
@@ -62,7 +63,9 @@ async def test_telemetry_port_adapters_satisfy_identical_contract(
         )
 
     assert total_mins == 2_880
-    assert list(sparse.keys()) == ["wealth/gemini-3.8-flash@us-central1"]
+    assert list(sparse.keys()) == [
+        SeriesKey(model="gemini-3.8-flash", region="us-central1", folder="wealth")
+    ]
     recs = compute_recommendations(
         sparse, total_minutes=total_mins, percentiles=[50, 95], active_only=True, by_region=True
     )

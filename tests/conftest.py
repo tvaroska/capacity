@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-MONITORING_PATCH_TARGET = "capacity.core.monitoring_v3.MetricServiceAsyncClient"
+MONITORING_PATCH_TARGET = "capacity.core.create_monitoring_client"
 
 
 class AsyncItems:

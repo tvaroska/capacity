@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+try:
+    PACKAGE_VERSION = version("capacity")
+except PackageNotFoundError:  # pragma: no cover
+    PACKAGE_VERSION = "0.4.0"
 
 # Interpolated into generated YAML/Kubernetes manifests and Cloud Monitoring filters;
 # reject quotes, newlines, spaces, or injection tokens at validation boundaries.
@@ -19,10 +26,12 @@ FinitePosFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 
 # Size bounds: one request must not be able to make the service compute for seconds.
 MAX_HOURLY_POINTS = 8_784  # hours in a leap year
+MAX_SERIES_POINTS = 60_480  # 42 days of 1-minute buckets or 7 days of 10-second buckets
 MAX_SERIES_KEYS = 1_000  # tenants or projects in one request
 MAX_SERIES_CELLS = 1_000_000  # keys times the longest series: the padded matrix
 HourlyTpmSeries = Annotated[list[BoundedTpmFloat], Field(max_length=MAX_HOURLY_POINTS)]
 SpilloverTier = Literal["priority", "standard", "flex"]
+CapacityModeLiteral = Literal["gsu", "self-hosted"]
 
 DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR: tuple[float, ...] = (
     600_000.0,
@@ -36,20 +45,47 @@ DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR: tuple[float, ...] = (
 )
 
 
+class UnknownModelError(ValueError):
+    """Raised when a model or self-hosted profile has no known capacity, instead of guessing."""
+
+
+@dataclass(frozen=True, order=True)
+class SeriesKey:
+    """Typed telemetry series identifier replacing ad-hoc `folder/model@region` string splitting."""
+
+    model: str
+    region: str | None = None
+    folder: str | None = None
+
+    @classmethod
+    def parse(cls, raw: str, *, by_region: bool = True) -> SeriesKey:
+        cleaned = raw.strip()
+        if "@" in cleaned:
+            model_part, reg_raw = cleaned.split("@", 1)
+            region: str | None = reg_raw if by_region else None
+        else:
+            model_part = cleaned
+            region = "global" if by_region else None
+
+        if "/" in model_part and not model_part.startswith("publishers/"):
+            folder_part, model_id = model_part.split("/", 1)
+            folder: str | None = folder_part or None
+        else:
+            folder, model_id = None, model_part
+        return cls(model=model_id, region=region, folder=folder)
+
+    def format(self, *, by_region: bool = True) -> str:
+        prefix = f"{self.folder}/" if self.folder else ""
+        if by_region:
+            loc = self.region or "global"
+            return f"{prefix}{self.model}@{loc}"
+        return f"{prefix}{self.model}"
+
+
 class StrictModel(BaseModel):
     """Base wire model: a field the schema does not define is an error, never ignored."""
 
     model_config = ConfigDict(extra="forbid")
-
-
-def fields_of(req: BaseModel, *, without: tuple[str, ...] = ()) -> dict[str, Any]:
-    """Request fields as keyword arguments for the domain function of the same operation.
-
-    Request models name their fields after the parameters of the function they feed
-    (`tests/test_request_contract.py` holds them to it), so a port hands a request on
-    without restating each argument.
-    """
-    return {name: value for name, value in req if name not in without}
 
 
 def _reject_oversized_matrix(series_by_key: dict[str, Any]) -> None:
@@ -102,11 +138,11 @@ class ModelRecommendation(StrictModel):
     )
     forecast_24h_peak_tpm: int = Field(
         default=0,
-        description="Holt double-exponential smoothing 24-step projected peak TPM",
+        description="Holt double-exponential smoothing projected peak TPM",
     )
     forecast_24h_recommended_gsus: int = Field(
         default=0,
-        description="Recommended GSUs (or replicas) for the Holt 24-step projected peak",
+        description="Recommended GSUs (or replicas) for the Holt projected peak",
     )
     percentiles: dict[str, PercentileDetail] = Field(
         description=(
@@ -128,8 +164,26 @@ class RecommendationResponse(StrictModel):
     days: int
     active_only: bool = False
     by_region: bool = False
-    mode: str = "gsu"
+    mode: CapacityModeLiteral = "gsu"
+    forecast_hours: int = Field(default=24, ge=0, le=168)
+    requested_percentiles: list[int] = Field(default_factory=lambda: [50, 75, 90, 95])
     models: list[ModelRecommendation]
+
+
+class GcpProjectAccessStatus(StrictModel):
+    monitoring_api_enabled: bool = False
+    has_viewer_role: bool = False
+    ok: bool = False
+    error: str | None = None
+
+
+class GcpAccessCheckReport(StrictModel):
+    authenticated: bool = False
+    account: str | None = None
+    ok: bool = False
+    error: str | None = None
+    projects: dict[str, GcpProjectAccessStatus] = Field(default_factory=dict)
+    instructions: list[str] = Field(default_factory=list)
 
 
 class MicroBurstAudit(StrictModel):
@@ -164,6 +218,15 @@ class MicroBurstAudit(StrictModel):
         )
     )
     gsus_required_for_zero_spillover: int
+
+
+class MicroBurstRequest(StrictModel):
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
+    provisioned_gsus: int = Field(default=10, ge=0, le=100_000)
+    sixty_sec_tpm: BoundedTpmFloat
+    peak_1s_tps: BoundedTpmFloat
+    peak_10s_tps: BoundedTpmFloat | None = None
+    peak_30s_tps: BoundedTpmFloat | None = None
 
 
 class PrefixCacheAudit(StrictModel):
@@ -217,7 +280,7 @@ class ModelTierPrefixCacheAudit(StrictModel):
 
 
 class ModelTierPrefixCacheRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
     total_input_tokens: int = Field(default=18_000, ge=1, le=2_000_000)
     static_prefix_tokens: int = Field(default=14_000, ge=0, le=2_000_000)
     output_tokens: int = Field(default=800, ge=0, le=200_000)
@@ -258,24 +321,8 @@ class HybridCommitmentRecommendation(StrictModel):
 
 
 class OptimizeRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
-    tpm_series: list[BoundedTpmFloat] = Field(
-        default_factory=lambda: [
-            420_000.0,
-            390_000.0,
-            360_000.0,
-            310_000.0,
-            280_000.0,
-            250_000.0,
-            240_000.0,
-            220_000.0,
-            190_000.0,
-            160_000.0,
-            90_000.0,
-            40_000.0,
-        ],
-        max_length=50_000,
-    )
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
+    tpm_series: list[BoundedTpmFloat] = Field(min_length=1, max_length=MAX_SERIES_POINTS)
     gsu_monthly_price_usd: FinitePosFloat = 2_000.0
     paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
     spillover_tier: SpilloverTier = "priority"
@@ -322,18 +369,8 @@ class OptimizeResponse(StrictModel):
 
 
 class SelfHostedAuditRequest(StrictModel):
-    profile: str = "llama-3.3-70b-fp8"
-    tpm_series: list[BoundedTpmFloat] = Field(
-        default_factory=lambda: [
-            520_000.0,
-            480_000.0,
-            410_000.0,
-            340_000.0,
-            290_000.0,
-            180_000.0,
-        ],
-        max_length=50_000,
-    )
+    profile: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
+    tpm_series: list[BoundedTpmFloat] = Field(min_length=1, max_length=MAX_SERIES_POINTS)
     min_replica_count: int = Field(default=2, ge=0, le=10_000)
     max_replica_count: int = Field(default=6, ge=1, le=10_000)
     observed_accelerator_duty_cycle_pct: float = Field(
@@ -350,7 +387,7 @@ class SelfHostedAuditRequest(StrictModel):
 
 class VllmParseRequest(StrictModel):
     raw_content: str = Field(max_length=5_000_000)
-    default_model: str = "llama-3.3-70b-fp8"
+    default_model: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
 
 
 class TenantChargebackRow(StrictModel):
@@ -369,6 +406,8 @@ class FocusChargebackReport(StrictModel):
     """FOCUS 1.2 Two-Pool Chargeback Report (Active Consumed vs Unallocated Idle + Water-Fill)."""
 
     provisioned_gsus: int
+    unit_price_usd: float = 2_000.0
+    mode: CapacityModeLiteral = "gsu"
     total_commitment_cost_usd: float
     active_utilization_pct: float
     effective_utilization_with_waterfill_pct: float
@@ -381,11 +420,16 @@ class FocusChargebackReport(StrictModel):
 
 
 class ChargebackRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
+    mode: CapacityModeLiteral = "gsu"
     provisioned_gsus: int = Field(default=10, ge=1, le=100_000)
-    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
+    gsu_monthly_price_usd: FinitePosFloat | None = Field(
+        default=None,
+        description="Monthly price per GSU or GPU replica (defaults to 2,000 GSU or profile price)",
+    )
     hourly_consumed_tpm_by_tenant: dict[str, HourlyTpmSeries | BoundedTpmFloat] = Field(
-        max_length=MAX_SERIES_KEYS
+        min_length=1,
+        max_length=MAX_SERIES_KEYS,
     )
     tenant_raw_token_weights: dict[str, FinitePosFloat] | None = Field(
         default=None, max_length=MAX_SERIES_KEYS
@@ -418,7 +462,7 @@ class BatchScavengerAudit(StrictModel):
 
 
 class BatchScavengerRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
     provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
     gsu_monthly_price_usd: FinitePosFloat = 2_000.0
     daytime_active_utilization_pct: float = Field(
@@ -433,30 +477,6 @@ class DeadlineJobSpec(StrictModel):
     value_usd: FinitePosFloat
     burndown_tokens: FinitePosFloat
     deadline_hour: int = Field(ge=1, le=168)
-
-
-def make_default_deadline_jobs() -> list[DeadlineJobSpec]:
-    """Return the canonical 3-job overnight residual scheduling portfolio."""
-    return [
-        DeadlineJobSpec(
-            job_id="premarket-portfolio-briefings",
-            value_usd=18_000.0,
-            burndown_tokens=240_000_000.0,
-            deadline_hour=6,
-        ),
-        DeadlineJobSpec(
-            job_id="regulatory-risk-digest",
-            value_usd=12_000.0,
-            burndown_tokens=180_000_000.0,
-            deadline_hour=5,
-        ),
-        DeadlineJobSpec(
-            job_id="low-density-archive-sweep",
-            value_usd=900.0,
-            burndown_tokens=320_000_000.0,
-            deadline_hour=6,
-        ),
-    ]
 
 
 class ScheduledDeadlineJob(StrictModel):
@@ -488,7 +508,7 @@ class ResidualScheduleReport(StrictModel):
 
 
 class ResidualScheduleRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
     provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
     safety_headroom_ratio: float = Field(default=0.85, gt=0.1, le=1.0, allow_inf_nan=False)
     revenue_tpm_by_hour: list[BoundedTpmFloat] = Field(
@@ -496,10 +516,7 @@ class ResidualScheduleRequest(StrictModel):
         min_length=1,
         max_length=168,
     )
-    deadline_jobs: list[DeadlineJobSpec] = Field(
-        default_factory=make_default_deadline_jobs,
-        max_length=200,
-    )
+    deadline_jobs: list[DeadlineJobSpec] = Field(max_length=200)
     evergreen_backfill_tokens: FiniteNonNegFloat = 250_000_000.0
     paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
 
@@ -533,16 +550,12 @@ class FolderPoolingReport(StrictModel):
 
 
 class FolderPoolingRequest(StrictModel):
-    model: str = "gemini-3.8-flash"
+    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
     percentile_target: int = Field(default=90, ge=1, le=100)
     gsu_monthly_price_usd: FinitePosFloat = 2_000.0
     hourly_tpm_by_project: dict[str, HourlyTpmSeries] = Field(
+        min_length=1,
         max_length=MAX_SERIES_KEYS,
-        default_factory=lambda: {
-            "emea-wealth-spoke": [480_000.0, 520_000.0, 410_000.0, 90_000.0, 40_000.0, 30_000.0],
-            "amer-retail-spoke": [60_000.0, 80_000.0, 490_000.0, 560_000.0, 510_000.0, 90_000.0],
-            "apac-markets-spoke": [510_000.0, 110_000.0, 50_000.0, 40_000.0, 460_000.0, 530_000.0],
-        },
     )
 
     @model_validator(mode="after")
@@ -599,7 +612,7 @@ class DisaggregatedPoolSizing(StrictModel):
 
 
 class DisaggregatedPoolRequest(StrictModel):
-    profile: str = "llama-3.3-70b-fp8"
+    profile: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
     peak_qps: float = Field(default=18.0, gt=0.0, le=100_000.0, allow_inf_nan=False)
     avg_input_tokens: int = Field(default=6_400, ge=1, le=2_000_000)
     avg_output_tokens: int = Field(default=450, ge=1, le=200_000)

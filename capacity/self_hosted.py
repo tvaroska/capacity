@@ -3,23 +3,53 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 
 from pydantic import Field
 
 from capacity.burst import evaluate_prefix_cache_dilution
-from capacity.finops import MINUTES_PER_MONTH, clean_finite_series
-from capacity.forecasting import UnknownModelError, argmin_convex_int, percentile
-from capacity.models import DisaggregatedPoolSizing, PrefixCacheAudit, StrictModel
-from capacity.telemetry_parsers import (
-    VllmTelemetrySnapshot,
-    load_inference_server_file,
-    parse_inference_server_telemetry,
+from capacity.forecasting import argmin_convex_int, percentile
+from capacity.model_families import normalize_model_id
+from capacity.models import (
+    DisaggregatedPoolRequest,
+    DisaggregatedPoolSizing,
+    PrefixCacheAudit,
+    SelfHostedAuditRequest,
+    StrictModel,
+    UnknownModelError,
 )
 
+# Standard 30-day billing month in hours (30 * 24).
 HOURS_PER_MONTH = 720.0
-# Scale-to-zero savings assume a non-production endpoint is idle this many of a week's 168 hours.
+# Hours in a 7-day calendar week (7 * 24).
+HOURS_PER_WEEK = 168.0
+# Scale-to-zero savings assume a non-production endpoint is idle 108 of a week's 168 hours.
 NONPROD_IDLE_HOURS_PER_WEEK = 108.0
+# vLLM HBM KV-cache occupancy % above which continuous-batching preemption begins (ADR-006).
+KV_SATURATION_PREEMPTION_PCT = 85.0
+# Queued vLLM requests indicating decode slot saturation and queuing tail latency (ADR-006).
+WAITING_QUEUE_PREEMPTION_FLOOR = 5.0
+# Accelerator duty-cycle % below which legacy CPU/GPU autoscalers fail to scale (ADR-006).
+DUTY_CYCLE_ILLUSION_CEILING_PCT = 60.0
+# Parallel prefill compute throughput multiple relative to decode at reference TTFT (ADR-006).
+PREFILL_COMPUTE_SPEEDUP_AT_SLA = 4.5
+# Reference interactive Time-To-First-Token target in milliseconds (ADR-006).
+REFERENCE_TTFT_MS = 350.0
+# Minimum physical TTFT floor in milliseconds used to bound prefill scaling (ADR-006).
+MIN_TTFT_FLOOR_MS = 20.0
+# Reference interactive Time-Per-Output-Token target in milliseconds (ADR-006).
+REFERENCE_TPOT_MS = 25.0
+# Minimum physical TPOT floor in milliseconds used to bound decode scaling (ADR-006).
+MIN_TPOT_FLOOR_MS = 5.0
+# Upper bound on decode batching throughput gain when TPOT target relaxes (ADR-006).
+MAX_DECODE_BATCH_SCALE = 1.2
+# Autoregressive decode HBM-bandwidth TPS divisor relative to weighted replica TPS (ADR-006).
+DECODE_BANDWIDTH_DIVISOR = 4.0
+# Usable HBM KV-cache fraction kept safely below the 85% preemption cliff (ADR-006).
+SAFE_KV_UTILIZATION_RATIO = 0.80
+# Compute headroom multiplier required when prefill bursts share GPUs with decode (ADR-006).
+MONOLITHIC_INTERFERENCE_PENALTY = 1.30
+# Nominal request rate assumed for self-hosted replica KV-dilution reporting (ADR-002).
+NOMINAL_SELF_HOSTED_RPS = 1.0
 
 
 class SelfHostedProfile(StrictModel):
@@ -129,52 +159,36 @@ class SelfHostedEndpointAudit(StrictModel):
 
 
 def resolve_self_hosted_profile(model_or_profile: str) -> SelfHostedProfile:
-    """Resolve a self-hosted model identifier to its hardware and throughput profile."""
-    cleaned = model_or_profile.strip().lower()
-    if "@" in cleaned:
-        cleaned = cleaned.split("@", 1)[0]
-    if cleaned in DEFAULT_SELF_HOSTED_PROFILES:
-        return DEFAULT_SELF_HOSTED_PROFILES[cleaned]
-    for key in sorted(DEFAULT_SELF_HOSTED_PROFILES, key=len, reverse=True):
-        if cleaned.startswith(key):
-            return DEFAULT_SELF_HOSTED_PROFILES[key]
+    """Resolve a self-hosted model identifier by exact normalized ID (never prefix guessing)."""
+    norm = normalize_model_id(model_or_profile)
+    if norm in DEFAULT_SELF_HOSTED_PROFILES:
+        return DEFAULT_SELF_HOSTED_PROFILES[norm]
     raise UnknownModelError(
         f"No self-hosted profile for '{model_or_profile}'. "
         f"Known profiles: {', '.join(sorted(DEFAULT_SELF_HOSTED_PROFILES))}."
     )
 
 
-def evaluate_self_hosted_endpoint(
-    tpm_series: Sequence[int | float],
-    profile: SelfHostedProfile | str = "llama-3.3-70b-fp8",
-    min_replica_count: int = 2,
-    max_replica_count: int = 6,
-    observed_accelerator_duty_cycle_pct: float = 52.0,
-    observed_vllm_kv_cache_usage_pct: float = 91.5,
-    observed_vllm_requests_waiting: float = 14.0,
-    total_input_tokens: int = 20_000,
-    shared_prefix_ratio: float = 0.80,
-    baseline_cache_hit_rate: float = 0.80,
-) -> SelfHostedEndpointAudit:
+def evaluate_self_hosted_endpoint(req: SelfHostedAuditRequest) -> SelfHostedEndpointAudit:
     """Audit a self-hosted GPU/TPU endpoint for quota locks, KV saturation, and Newsvendor."""
-    prof = (
-        profile if isinstance(profile, SelfHostedProfile) else resolve_self_hosted_profile(profile)
-    )
-    min_reps = max(0, int(min_replica_count))
-    max_reps = max(max(1, min_reps), int(max_replica_count))
+    prof = resolve_self_hosted_profile(req.profile)
+    min_reps = req.min_replica_count
+    max_reps = max(max(1, min_reps), req.max_replica_count)
 
     locked_accels = max_reps * prof.accelerators_per_replica
     baseline_accels = min_reps * prof.accelerators_per_replica
     stranded_accels = max(0, locked_accels - baseline_accels)
 
-    cleaned = clean_finite_series(tpm_series)
-
+    cleaned = sorted(req.tpm_series)
     has_traffic = cleaned[-1] > 0.0
     kv_preemption_risk = has_traffic and (
-        observed_vllm_kv_cache_usage_pct >= 85.0 or observed_vllm_requests_waiting >= 5.0
+        req.observed_vllm_kv_cache_usage_pct >= KV_SATURATION_PREEMPTION_PCT
+        or req.observed_vllm_requests_waiting >= WAITING_QUEUE_PREEMPTION_FLOOR
     )
     duty_cycle_illusion = (
-        has_traffic and observed_accelerator_duty_cycle_pct < 60.0 and kv_preemption_risk
+        has_traffic
+        and req.observed_accelerator_duty_cycle_pct < DUTY_CYCLE_ILLUSION_CEILING_PCT
+        and kv_preemption_risk
     )
 
     rep_tpm = float(prof.tpm_per_replica)
@@ -196,7 +210,6 @@ def evaluate_self_hosted_endpoint(
         burst_cost = mean_burst_replicas * on_demand_monthly_equiv
         return base_cost + burst_cost, base_cost, burst_cost
 
-    # Reserved-plus-burst cost is convex in the reserved count, so bisection is exact.
     best_reps = argmin_convex_int(lambda r: _monthly_cost(r)[0], max_series_replicas)
     best_total, best_base, best_burst = _monthly_cost(best_reps)
 
@@ -205,17 +218,16 @@ def evaluate_self_hosted_endpoint(
     ) * on_demand_monthly_equiv
     p99_static_reserved_cost = p99_replicas * prof.reserved_replica_monthly_usd
 
-    idle_fraction = NONPROD_IDLE_HOURS_PER_WEEK / 168.0
+    idle_fraction = NONPROD_IDLE_HOURS_PER_WEEK / HOURS_PER_WEEK
     scale_to_zero_savings = max(1, min_reps) * on_demand_monthly_equiv * idle_fraction
 
-    # The trace carries no request size, so no request rate can be derived from it: the
-    # replica counts below stay at the function's nominal rate, which the audit reports.
     prefix_audit = evaluate_prefix_cache_dilution(
-        total_input_tokens=total_input_tokens,
-        shared_prefix_ratio=shared_prefix_ratio,
-        baseline_cache_hit_rate=baseline_cache_hit_rate,
-        num_round_robin_endpoints=max(1, max_reps),
+        total_input_tokens=req.total_input_tokens,
+        shared_prefix_ratio=req.shared_prefix_ratio,
+        baseline_cache_hit_rate=req.baseline_cache_hit_rate,
+        num_round_robin_endpoints=max_reps,
         tps_per_gsu=prof.tps_per_replica,
+        requests_per_second=NOMINAL_SELF_HOSTED_RPS,
     )
 
     return SelfHostedEndpointAudit(
@@ -230,9 +242,9 @@ def evaluate_self_hosted_endpoint(
         locked_regional_accelerators=locked_accels,
         active_baseline_accelerators=baseline_accels,
         stranded_quota_accelerators=stranded_accels,
-        observed_accelerator_duty_cycle_pct=round(observed_accelerator_duty_cycle_pct, 2),
-        observed_vllm_kv_cache_usage_pct=round(observed_vllm_kv_cache_usage_pct, 2),
-        observed_vllm_requests_waiting=round(observed_vllm_requests_waiting, 2),
+        observed_accelerator_duty_cycle_pct=round(req.observed_accelerator_duty_cycle_pct, 2),
+        observed_vllm_kv_cache_usage_pct=round(req.observed_vllm_kv_cache_usage_pct, 2),
+        observed_vllm_requests_waiting=round(req.observed_vllm_requests_waiting, 2),
         duty_cycle_illusion_detected=duty_cycle_illusion,
         kv_preemption_risk=kv_preemption_risk,
         recommended_autoscaler_metric=(
@@ -252,25 +264,16 @@ def evaluate_self_hosted_endpoint(
     )
 
 
-def size_disaggregated_prefill_decode(
-    profile: SelfHostedProfile | str = "llama-3.3-70b-fp8",
-    peak_qps: float = 18.0,
-    avg_input_tokens: int = 6_400,
-    avg_output_tokens: int = 450,
-    target_ttft_ms: float = 350.0,
-    target_tpot_ms: float = 25.0,
-) -> DisaggregatedPoolSizing:
+def size_disaggregated_prefill_decode(req: DisaggregatedPoolRequest) -> DisaggregatedPoolSizing:
     """Size separate Prefill (compute-bound) and Decode (KV/bandwidth-bound) worker pools."""
-    prof = (
-        profile if isinstance(profile, SelfHostedProfile) else resolve_self_hosted_profile(profile)
-    )
-    qps = max(0.01, float(peak_qps))
-    in_tok = max(1, int(avg_input_tokens))
-    out_tok = max(1, int(avg_output_tokens))
-    ttft_ms = max(20.0, float(target_ttft_ms))
-    tpot_ms = max(5.0, float(target_tpot_ms))
+    prof = resolve_self_hosted_profile(req.profile)
+    qps = req.peak_qps
+    in_tok = req.avg_input_tokens
+    out_tok = req.avg_output_tokens
+    ttft_ms = max(MIN_TTFT_FLOOR_MS, req.target_ttft_ms)
+    tpot_ms = max(MIN_TPOT_FLOOR_MS, req.target_tpot_ms)
 
-    prefill_scale = 4.5 * min(1.0, ttft_ms / 350.0)
+    prefill_scale = PREFILL_COMPUTE_SPEEDUP_AT_SLA * min(1.0, ttft_ms / REFERENCE_TTFT_MS)
     prefill_tps_capacity = prof.tps_per_replica * prefill_scale
     required_prefill_tps = qps * in_tok
     prefill_replicas = max(1, math.ceil(required_prefill_tps / max(1.0, prefill_tps_capacity)))
@@ -278,11 +281,11 @@ def size_disaggregated_prefill_decode(
     decode_duration_sec = out_tok * (tpot_ms / 1_000.0)
     active_sequences = qps * decode_duration_sec
     active_kv_tokens = active_sequences * (in_tok + out_tok)
-    kv_safe_per_replica = prof.max_kv_cache_tokens * 0.80
+    kv_safe_per_replica = prof.max_kv_cache_tokens * SAFE_KV_UTILIZATION_RATIO
 
-    decode_scale = min(1.2, 25.0 / tpot_ms)
+    decode_scale = min(MAX_DECODE_BATCH_SCALE, REFERENCE_TPOT_MS / tpot_ms)
     decode_by_kv = math.ceil(active_kv_tokens / max(1.0, kv_safe_per_replica))
-    decode_tps_capacity = (prof.tps_per_replica / 4.0) * decode_scale
+    decode_tps_capacity = (prof.tps_per_replica / DECODE_BANDWIDTH_DIVISOR) * decode_scale
     decode_by_bw = math.ceil((qps * out_tok) / max(1.0, decode_tps_capacity))
     decode_replicas = max(1, decode_by_kv, decode_by_bw)
 
@@ -290,8 +293,8 @@ def size_disaggregated_prefill_decode(
 
     mono_weighted_tps = (
         (required_prefill_tps / max(0.1, prefill_scale))
-        + ((qps * out_tok * 4.0) / max(0.1, decode_scale))
-    ) * 1.30
+        + ((qps * out_tok * DECODE_BANDWIDTH_DIVISOR) / max(0.1, decode_scale))
+    ) * MONOLITHIC_INTERFERENCE_PENALTY
     mono_by_compute = math.ceil(mono_weighted_tps / max(1.0, prof.tps_per_replica))
     mono_by_kv = math.ceil(active_kv_tokens / max(1.0, kv_safe_per_replica))
     monolithic_replicas = max(1, mono_by_compute, mono_by_kv)
@@ -350,17 +353,3 @@ def size_disaggregated_prefill_decode(
         tpot_headroom_pct=tpot_headroom,
         recommendation=rec,
     )
-
-
-__all__ = [
-    "DEFAULT_SELF_HOSTED_PROFILES",
-    "MINUTES_PER_MONTH",
-    "SelfHostedEndpointAudit",
-    "SelfHostedProfile",
-    "VllmTelemetrySnapshot",
-    "evaluate_self_hosted_endpoint",
-    "load_inference_server_file",
-    "parse_inference_server_telemetry",
-    "resolve_self_hosted_profile",
-    "size_disaggregated_prefill_decode",
-]

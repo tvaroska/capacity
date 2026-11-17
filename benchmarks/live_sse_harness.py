@@ -24,6 +24,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from capacity.burst import compute_weighted_burndown_tokens
 from capacity.gateway import generate_gateway_bundle
+from capacity.models import GatewayConfigRequest
 
 
 class _InMemoryAsyncRedisCache:
@@ -47,9 +48,11 @@ class _InMemoryAsyncRedisCache:
 
 def _compile_generated_logger(provisioned_gsus: int = 4) -> Any:  # noqa: ANN401
     bundle = generate_gateway_bundle(
-        model="gemini-3.8-flash",
-        provisioned_gsus=provisioned_gsus,
-        business_unit_shares=2,
+        GatewayConfigRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=provisioned_gsus,
+            business_unit_shares=2,
+        )
     )
     ns: dict[str, Any] = {}
     code_obj = compile(bundle.litellm_burndown_callback_py, "litellm_burndown_callback.py", "exec")

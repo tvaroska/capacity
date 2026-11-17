@@ -9,39 +9,49 @@ from pathlib import Path
 
 import yaml
 
-from capacity.capacity import require_capacity
-from capacity.model_families import normalize_model_id, resolve_model_family
+from capacity.model_families import (
+    GEMINI_1S_GSU_THRESHOLD,
+    ModelCatalog,
+    build_envoy_burndown_cel,
+    build_model_catalog,
+    normalize_model_id,
+    refill_window_for_gsus,
+    resolve_model_family,
+)
 from capacity.models import (
-    GCP_LOCATION_PATTERN,
-    GCP_PROJECT_ID_PATTERN,
-    K8S_NAME_PATTERN,
-    MODEL_ID_PATTERN,
+    PACKAGE_VERSION,
     GatewayConfigBundle,
+    GatewayConfigRequest,
     GatewayHeaderPolicy,
     LiteLLMScaleAudit,
 )
 
-ENVOY_BURNDOWN_CEL_EXPRESSION = (
-    "input_tokens > 200000\n"
-    "  ? int(\n"
-    "      double(input_tokens - cached_input_tokens) * 2.0\n"
-    "      + double(cached_input_tokens) * 0.2\n"
-    "      + double(output_tokens) * 7.5\n"
-    "    )\n"
-    "  : int(\n"
-    "      double(input_tokens - cached_input_tokens) * 1.0\n"
-    "      + double(cached_input_tokens) * 0.1\n"
-    "      + double(output_tokens) * 4.0\n"
-    "    )\n"
-)
-
-ENVOY_CLAUDE_BURNDOWN_CEL_EXPRESSION = (
-    "int(\n"
-    "    double(input_tokens - cached_input_tokens) * 1.0\n"
-    "    + double(cached_input_tokens) * 0.1\n"
-    "    + double(output_tokens) * 5.0\n"
-    "  )\n"
-)
+# Pre-SSE request reservation in Envoy Global Rate Limit before streaming completes (ADR-007).
+ENVOY_PREFLIGHT_COST_TOKENS = 256
+# Minimum per-BU funded TPM floor matching the LiteLLM callback's pre-SSE reservation (ADR-007).
+LITELLM_PREFLIGHT_FLOOR_TOKENS = 1_024
+# PgBouncer transaction-pool sizing bounds for Prisma query engines (ADR-007).
+PGBOUNCER_MIN_POOL_SIZE = 20
+PGBOUNCER_MAX_POOL_SIZE = 100
+PGBOUNCER_BASE_HEADROOM = 10
+# PostgreSQL `max_connections` floor and operational connection headroom (ADR-007).
+POSTGRES_MIN_MAX_CONNECTIONS = 100
+POSTGRES_ADMIN_HEADROOM = 40
+# LiteLLM Redis transaction buffer flush interval in seconds (ADR-007).
+REDIS_BUFFER_FLUSH_SECONDS = 10
+# Anti-blackhole router cooldowns kept shorter than PT token-bucket recovery (ADR-007).
+CLAUDE_COOLDOWN_SECONDS = 5
+GEMINI_1S_BUCKET_COOLDOWN_SECONDS = 2
+GEMINI_10S_BUCKET_COOLDOWN_SECONDS = 5
+# Transient per-minute 429 tolerance before LiteLLM cools down a PT deployment (ADR-007).
+MIN_ALLOWED_FAILS = 30
+ALLOWED_FAILS_PER_GSU = 3
+# Load thresholds where Python GIL / Uvicorn workers require tuning or Envoy migration (ADR-007).
+ENVOY_MIGRATION_RPS = 1_500
+ENVOY_MIGRATION_SSE = 1_000
+TUNE_REQUIRED_RPS = 500
+TUNE_REQUIRED_SSE = 300
+TUNE_REQUIRED_PRISMA_ENGINES = 32
 
 GATEWAY_HEADER_POLICIES: list[GatewayHeaderPolicy] = [
     GatewayHeaderPolicy(
@@ -188,9 +198,11 @@ def audit_litellm_scaling(
     pods: int = 12,
     uvicorn_workers_per_pod: int = 4,
     model: str | None = None,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> LiteLLMScaleAudit:
     """Audit LiteLLM Proxy high-QPS bottlenecks (Prisma engines, Postgres locks, SSE GIL)."""
-    spec = resolve_model_family(model)
+    spec = resolve_model_family(model, catalog=catalog)
     is_claude = spec.family == "claude_3p"
     gsus = max(1, int(provisioned_gsus))
     rps = max(1, int(target_rps))
@@ -199,20 +211,31 @@ def audit_litellm_scaling(
     workers = max(1, int(uvicorn_workers_per_pod))
 
     total_prisma = n_pods * workers
-    pgbouncer_pool = max(20, min(100, total_prisma // 2 + 10))
-    pg_max_conns = max(100, total_prisma + 40)
+    pgbouncer_pool = max(
+        PGBOUNCER_MIN_POOL_SIZE,
+        min(PGBOUNCER_MAX_POOL_SIZE, total_prisma // 2 + PGBOUNCER_BASE_HEADROOM),
+    )
+    pg_max_conns = max(POSTGRES_MIN_MAX_CONNECTIONS, total_prisma + POSTGRES_ADMIN_HEADROOM)
 
-    cooldown_sec = 5 if is_claude else (2 if gsus >= 50 else 5)
-    allowed_fails = max(30, gsus * 3)
+    cooldown_sec = (
+        CLAUDE_COOLDOWN_SECONDS
+        if is_claude
+        else (
+            GEMINI_1S_BUCKET_COOLDOWN_SECONDS
+            if gsus >= GEMINI_1S_GSU_THRESHOLD
+            else GEMINI_10S_BUCKET_COOLDOWN_SECONDS
+        )
+    )
+    allowed_fails = max(MIN_ALLOWED_FAILS, gsus * ALLOWED_FAILS_PER_GSU)
 
     bucket_label = "30s/60s" if is_claude else "1s/10s"
     warnings: list[str] = [
         f"Prisma spawns 1 Rust query engine binary per Uvicorn worker ({n_pods} pods * "
         f"{workers} workers = {total_prisma} engines); front PostgreSQL with PgBouncer "
         f"(pool_size={pgbouncer_pool}, max_connections>={pg_max_conns}).",
-        "Enable use_redis_transaction_buffer: true (buffer_time: 10s) to batch SpendLogs writes "
-        "and eliminate PostgreSQL row-lock contention on LiteLLM_VerificationToken and "
-        "LiteLLM_TeamTable.",
+        f"Enable use_redis_transaction_buffer: true (buffer_time: {REDIS_BUFFER_FLUSH_SECONDS}s) "
+        "to batch SpendLogs writes and eliminate PostgreSQL row-lock contention on "
+        "LiteLLM_VerificationToken and LiteLLM_TeamTable.",
         f"LiteLLM native tpm_limit counts unweighted raw tokens over 60s; attach "
         f"litellm_burndown_callback.py to enforce {bucket_label} weighted burndown quotas and "
         "capture usage_metadata.traffic_type.",
@@ -224,14 +247,18 @@ def audit_litellm_scaling(
             "1P Priority PayGo; enforce per-BU burndown limits in the gateway across hub projects."
         )
 
-    if rps > 1_500 or sse > 1_000:
+    if rps > ENVOY_MIGRATION_RPS or sse > ENVOY_MIGRATION_SSE:
         status = "migrate_dataplane_to_envoy"
         warnings.append(
             f"Target load ({rps:,} RPS / {sse:,} concurrent SSE streams) exceeds Python GIL and "
             "asyncio event-loop ceiling; offload data-plane routing and CEL rate limiting to "
             "Envoy AI Gateway while keeping LiteLLM for control-plane key management."
         )
-    elif rps >= 500 or sse >= 300 or total_prisma >= 32:
+    elif (
+        rps >= TUNE_REQUIRED_RPS
+        or sse >= TUNE_REQUIRED_SSE
+        or total_prisma >= TUNE_REQUIRED_PRISMA_ENGINES
+    ):
         status = "tune_required"
         warnings.append(
             f"At {rps:,} RPS / {sse:,} SSE streams, set LITELLM_RUST=1 for Rust tokenizers and "
@@ -250,7 +277,7 @@ def audit_litellm_scaling(
         recommended_pgbouncer_pool_size=pgbouncer_pool,
         recommended_postgres_max_connections=pg_max_conns,
         use_redis_transaction_buffer=True,
-        redis_buffer_time_seconds=10,
+        redis_buffer_time_seconds=REDIS_BUFFER_FLUSH_SECONDS,
         rust_tokenizer_enabled=True,
         anti_blackhole_cooldown_seconds=cooldown_sec,
         anti_blackhole_allowed_fails=allowed_fails,
@@ -259,57 +286,19 @@ def audit_litellm_scaling(
     )
 
 
-def generate_gateway_bundle(
-    model: str = "gemini-3.8-flash",
-    project_id: str = "prod-genai-pt-host",
-    location: str = "global",
-    provisioned_gsus: int = 20,
-    target_rps: int = 650,
-    concurrent_sse_streams: int = 400,
-    pods: int = 12,
-    uvicorn_workers_per_pod: int = 4,
-    self_hosted_model: str = "llama-3.3-70b-fp8",
-    business_unit_shares: int = 4,
-) -> GatewayConfigBundle:
-    """Generate production-hardened LiteLLM, Envoy AI Gateway, and GKE epp configurations."""
-    for field_name, value, pattern in (
-        ("model", model, MODEL_ID_PATTERN),
-        ("project_id", project_id, GCP_PROJECT_ID_PATTERN),
-        ("location", location, GCP_LOCATION_PATTERN),
-        ("self_hosted_model", self_hosted_model, K8S_NAME_PATTERN),
-    ):
-        if not re.fullmatch(pattern, value):
-            raise ValueError(f"Invalid {field_name} {value!r}: must match {pattern}")
-    norm = normalize_model_id(model)
-    spec = resolve_model_family(norm)
-    is_claude = spec.family == "claude_3p"
-    gsus = max(1, int(provisioned_gsus))
-    bu_count = max(1, int(business_unit_shares))
-    refill_window = spec.bucket_short_seconds if is_claude else (1 if gsus >= 50 else 10)
-    tpm_per_gsu = require_capacity(norm)
-    committed_tpm = gsus * tpm_per_gsu
-    per_bu_funded_tpm = max(1_024, committed_tpm // bu_count)
-
-    litellm_audit = audit_litellm_scaling(
-        provisioned_gsus=gsus,
-        target_rps=target_rps,
-        concurrent_sse_streams=concurrent_sse_streams,
-        pods=pods,
-        uvicorn_workers_per_pod=uvicorn_workers_per_pod,
-        model=norm,
-    )
-
-    spill_shared_header = "priority" if spec.supports_priority_paygo else "standard"
-    spill_model_name = (
-        f"{norm}-priority-spillover"
-        if spec.supports_priority_paygo
-        else f"{norm}-standard-spillover"
-    )
-    spill_pool_id = (
-        f"vertex-{norm}-priority-paygo"
-        if spec.supports_priority_paygo
-        else f"vertex-{norm}-standard-paygo"
-    )
+def _build_litellm_yaml(
+    *,
+    norm: str,
+    project_id: str,
+    location: str,
+    gsus: int,
+    committed_tpm: int,
+    refill_window: int,
+    spill_shared_header: str,
+    litellm_audit: LiteLLMScaleAudit,
+) -> str:
+    spill_model_name = f"{norm}-{spill_shared_header}-spillover"
+    spill_pool_id = f"vertex-{norm}-{spill_shared_header}-paygo"
     litellm_doc = {
         "model_list": [
             {
@@ -386,36 +375,14 @@ def generate_gateway_bundle(
         },
     }
     litellm_header = (
-        "# Production-Hardened LiteLLM Proxy Config (capacity v0.3.0)\n"
+        f"# Production-Hardened LiteLLM Proxy Config (capacity v{PACKAGE_VERSION})\n"
         f"# Model: {norm} | Provisioned GSUs: {gsus} ({committed_tpm:,} TPM, "
         f"{refill_window}s bucket)\n"
     )
-    litellm_yaml = litellm_header + yaml.safe_dump(
-        litellm_doc, sort_keys=False, default_flow_style=False
-    )
+    return litellm_header + yaml.safe_dump(litellm_doc, sort_keys=False, default_flow_style=False)
 
-    callback_py = _render_burndown_callback(
-        {
-            "MODEL_FAMILY": spec.family,
-            "LONG_CONTEXT_THRESHOLD": spec.long_context_threshold,
-            "STD_INPUT_WEIGHT": spec.standard_input_weight,
-            "STD_CACHED_WEIGHT": spec.standard_cached_read_weight,
-            "STD_OUTPUT_WEIGHT": spec.standard_output_weight,
-            "CACHE_WRITE_5M_WEIGHT": spec.cache_write_5m_weight,
-            "CACHE_WRITE_1H_WEIGHT": spec.cache_write_1h_weight,
-            "LONG_INPUT_WEIGHT": spec.long_context_input_weight,
-            "LONG_CACHED_WEIGHT": spec.long_context_cached_read_weight,
-            "LONG_OUTPUT_WEIGHT": spec.long_context_output_weight,
-            "SPILLOVER_SHARED_HEADER": spill_shared_header,
-            "COMMITTED_POOL_BURNDOWN_TPM": committed_tpm,
-            "DEFAULT_TEAM_FUNDED_BURNDOWN_TPM": per_bu_funded_tpm,
-        }
-    )
 
-    envoy_cel_expr = (
-        ENVOY_CLAUDE_BURNDOWN_CEL_EXPRESSION if is_claude else ENVOY_BURNDOWN_CEL_EXPRESSION
-    )
-
+def _build_envoy_yaml(*, norm: str, envoy_cel_expr: str, per_bu_funded_tpm: int) -> str:
     envoy_route_name = _k8s_dns_label(norm, suffix="-weighted-burndown-route")
     envoy_backend_svc = _k8s_dns_label(norm, prefix="vertex-", suffix="-backend")
     envoy_rl_name = _k8s_dns_label(norm, suffix="-burndown-ratelimit")
@@ -501,7 +468,7 @@ def generate_gateway_bundle(
                                 "cost": {
                                     "request": {
                                         "from": "Number",
-                                        "number": 256,
+                                        "number": ENVOY_PREFLIGHT_COST_TOKENS,
                                     },
                                     "response": {
                                         "from": "Metadata",
@@ -522,11 +489,15 @@ def generate_gateway_bundle(
             },
         },
     ]
-    envoy_header = "# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.3.0)\n"
-    envoy_yaml = envoy_header + yaml.dump_all(
+    envoy_header = (
+        f"# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v{PACKAGE_VERSION})\n"
+    )
+    return envoy_header + yaml.dump_all(
         envoy_docs, Dumper=_GatewayYamlDumper, sort_keys=False, default_flow_style=False
     )
 
+
+def _build_gke_epp_yaml(self_hosted_model: str) -> str:
     pool_name = _k8s_dns_label(self_hosted_model, suffix="-pool")
     app_label = _k8s_dns_label(self_hosted_model, prefix="vllm-")
     epp_cfg_name = _k8s_dns_label(self_hosted_model, suffix="-epp-config")
@@ -536,10 +507,7 @@ def generate_gateway_bundle(
         {
             "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
             "kind": "InferencePool",
-            "metadata": {
-                "name": pool_name,
-                "namespace": "ai-serving",
-            },
+            "metadata": {"name": pool_name, "namespace": "ai-serving"},
             "spec": {
                 "targetPortNumber": 8000,
                 "selector": {"app": app_label},
@@ -549,54 +517,96 @@ def generate_gateway_bundle(
         {
             "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
             "kind": "InferenceObjective",
-            "metadata": {
-                "name": obj_name,
-                "namespace": "ai-serving",
-            },
-            "spec": {
-                "priority": "Critical",
-                "poolRef": {"name": pool_name},
-            },
+            "metadata": {"name": obj_name, "namespace": "ai-serving"},
+            "spec": {"priority": "Critical", "poolRef": {"name": pool_name}},
         },
         {
             "apiVersion": "inference.networking.x-k8s.io/v1alpha2",
             "kind": "EndpointPickerConfig",
-            "metadata": {
-                "name": epp_cfg_name,
-                "namespace": "ai-serving",
-            },
+            "metadata": {"name": epp_cfg_name, "namespace": "ai-serving"},
             "spec": {
                 "scorers": [
-                    {
-                        "type": "prefix-cache-scorer",
-                        "weight": 4,
-                        "blockSizeTokens": 64,
-                    },
+                    {"type": "prefix-cache-scorer", "weight": 4, "blockSizeTokens": 64},
                     {
                         "type": "kv-cache-utilization-scorer",
                         "weight": 2,
                         "targetUtilizationPct": 80,
                     },
-                    {
-                        "type": "queue-scorer",
-                        "weight": 2,
-                        "maxWaitingRequests": 10,
-                    },
-                    {
-                        "type": "lora-affinity-scorer",
-                        "weight": 1,
-                    },
+                    {"type": "queue-scorer", "weight": 2, "maxWaitingRequests": 10},
+                    {"type": "lora-affinity-scorer", "weight": 1},
                 ]
             },
         },
     ]
     epp_header = "# GKE Inference Gateway / K8s Gateway API Inference Extension (epp / llm-d)\n"
-    epp_yaml = epp_header + yaml.dump_all(
+    return epp_header + yaml.dump_all(
         epp_docs, Dumper=_GatewayYamlDumper, sort_keys=False, default_flow_style=False
     )
 
+
+def generate_gateway_bundle(
+    req: GatewayConfigRequest,
+    *,
+    catalog: ModelCatalog | None = None,
+) -> GatewayConfigBundle:
+    """Generate production-hardened LiteLLM, Envoy AI Gateway, and GKE epp configurations."""
+    cat = catalog if catalog is not None else build_model_catalog()
+    record = cat.require(req.model)
+    norm = normalize_model_id(req.model)
+    spec = record.family_spec
+    gsus = req.provisioned_gsus
+    refill_window = refill_window_for_gsus(spec, gsus)
+    committed_tpm = gsus * record.gsu_capacity_tpm
+    per_bu_funded_tpm = max(
+        LITELLM_PREFLIGHT_FLOOR_TOKENS, committed_tpm // req.business_unit_shares
+    )
+
+    litellm_audit = audit_litellm_scaling(
+        provisioned_gsus=gsus,
+        target_rps=req.target_rps,
+        concurrent_sse_streams=req.concurrent_sse_streams,
+        pods=req.pods,
+        uvicorn_workers_per_pod=req.uvicorn_workers_per_pod,
+        model=req.model,
+        catalog=cat,
+    )
+    spill_shared_header = "priority" if spec.supports_priority_paygo else "standard"
+    litellm_yaml = _build_litellm_yaml(
+        norm=norm,
+        project_id=req.project_id,
+        location=req.location,
+        gsus=gsus,
+        committed_tpm=committed_tpm,
+        refill_window=refill_window,
+        spill_shared_header=spill_shared_header,
+        litellm_audit=litellm_audit,
+    )
+    callback_py = _render_burndown_callback(
+        {
+            "MODEL_FAMILY": spec.family,
+            "LONG_CONTEXT_THRESHOLD": spec.long_context_threshold,
+            "STD_INPUT_WEIGHT": spec.standard_input_weight,
+            "STD_CACHED_WEIGHT": spec.standard_cached_read_weight,
+            "STD_OUTPUT_WEIGHT": spec.standard_output_weight,
+            "CACHE_WRITE_5M_WEIGHT": spec.cache_write_5m_weight,
+            "CACHE_WRITE_1H_WEIGHT": spec.cache_write_1h_weight,
+            "LONG_INPUT_WEIGHT": spec.long_context_input_weight,
+            "LONG_CACHED_WEIGHT": spec.long_context_cached_read_weight,
+            "LONG_OUTPUT_WEIGHT": spec.long_context_output_weight,
+            "SPILLOVER_SHARED_HEADER": spill_shared_header,
+            "COMMITTED_POOL_BURNDOWN_TPM": committed_tpm,
+            "DEFAULT_TEAM_FUNDED_BURNDOWN_TPM": per_bu_funded_tpm,
+        }
+    )
+    envoy_yaml = _build_envoy_yaml(
+        norm=norm,
+        envoy_cel_expr=build_envoy_burndown_cel(spec),
+        per_bu_funded_tpm=per_bu_funded_tpm,
+    )
+    epp_yaml = _build_gke_epp_yaml(req.self_hosted_model)
+
     return GatewayConfigBundle(
-        model=model,
+        model=req.model,
         normalized_model=norm,
         provisioned_gsus=gsus,
         refill_window_seconds=refill_window,

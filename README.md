@@ -60,14 +60,14 @@ uv run capacity recommend --demo --active-only --by-region
 uv run capacity recommend --demo --mode self-hosted --active-only --by-region
 
 # 3. Newsvendor Hybrid Commitment, 1s/10s Micro-Burst & Self-Hosted vLLM KV-Cache Audit
-uv run capacity optimize --model gemini-3.8-flash --sixty-sec-tpm 150000 --peak-1s-tps 4750
+uv run capacity optimize --demo --model gemini-3.8-flash --sixty-sec-tpm 150000 --peak-1s-tps 4750
 uv run capacity optimize --mode self-hosted --model llama-3.3-70b-fp8 --vllm-file examples/vllm_prometheus_multiscrape.txt
 
 # 4. Compile Production LiteLLM Proxy, Envoy AI Gateway (CEL) & GKE Inference Gateway (epp) Configs
 uv run capacity gateway --target all --model gemini-3.8-flash --gsus 20 --rps 650
 
 # 5. Compute 3-Tier Overnight Residual Schedule & FOCUS 1.2 Two-Pool Chargeback
-uv run capacity schedule --model gemini-3.8-flash --gsus 20
+uv run capacity schedule --demo --model gemini-3.8-flash --gsus 20
 uv run capacity chargeback --model gemini-3.8-flash --gsus 10 --tenant-file examples/chargeback_tenants.json --waterfill-tpm 300000
 
 # 6. Replay or Re-Run the Open-Loop Level 3 Empirical Benchmark (10,000 Azure LLM Traces + Live SSE)
@@ -104,7 +104,7 @@ sequenceDiagram
 ### Generated Envoy AI Gateway Post-SSE `CEL` Manifest (`capacity gateway --target envoy`)
 
 ```yaml
-# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.3.0)
+# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.4.0)
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 metadata:
@@ -207,7 +207,7 @@ Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Re
 | **Monitoring & Governance** | `consumed_token_throughput` (pre-weighted) + Shared Folder `RHPT` | `token_count` (weighted client-side by token type) + project-scoped PT (central hub + gateway BU limits) |
 
 ```bash
-uv run capacity optimize --model claude-sonnet-4-6 --cache-write-5m-tokens 4000 --sixty-sec-tpm 12000 --peak-30s-tps 500
+uv run capacity optimize --demo --model claude-sonnet-4-6 --cache-write-5m-tokens 4000 --sixty-sec-tpm 12000 --peak-30s-tps 500
 uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 400
 ```
 
@@ -220,7 +220,7 @@ uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 4
 ### 4A. Executive Showcase Scorecard (`capacity demo`) & 5-KPI Definitions
 
 ```text
-=== Capacity v0.3.0 — End-to-End Executive Showcase Scorecard ===
+=== Capacity v0.4.0 — End-to-End Executive Showcase Scorecard ===
 1. FinOps for AI KPIs:    CPVO=$0.1750/outcome | CPWT_1M=$5.6193 | TER=7.4% | CSR=68.4% | ECUR_168h=57.0%
 2. Folder RHPT Pooling:   Siloed=15 GSUs -> Pooled=9 GSUs (Saved=6 GSUs / $12,000/mo)
 3. Batch 0.5x Trap Saved: $11,250.00/mo (Lifts PT utilization 24% -> 67.1%)
@@ -253,7 +253,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: d61332d7d30e...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 491e80c7efc1...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |
@@ -262,7 +262,7 @@ Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/
 | **Track A** · *Pure Priority PayGo (`L1`, `0` GSUs)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | `100%` Priority PayGo (`$8,981.73`) + `0.5x` Batch (`$1,732.50`); zero commitment (`0.00%` `ECUR_168h`) |
 | **Track A** · *Omniscient Hindsight Oracle (`L2` Lower Bound)* | `0` GSUs | `$10,714.23` | `0.00%` Tier-0 `429` | Ex-post optimum when spiky `10s` arrivals hold `168h` occupancy `< 42.55%` break-even |
 | **Track A** · *`capacity` Causal Compiler (`10s` + Night Scavenge)* | `4` GSUs | **`$11,072.47`** | **`0.00%` Tier-0 `429`** | **`43.03%` savings vs. Static `P99`**, **`3.34%` gap vs. `L1`/`L2`** (`37.02%` `ECUR_168h`) |
-| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `61` peer `PT` starvation events |
+| **Track B (`1,500` Live SSE Streams)** · *Unweighted `60s` Default* | `20` GSUs | `454 / 500` `200 OK` | `40.31%` burndown drift | `9.20%` `60s`-cooldown blackhole drops and `62` peer `PT` starvation events |
 | **Track B** · *Stateless `1/8` Round-Robin + Stripped Signature* | `20` GSUs | `500 / 500` `200 OK` | `51.31%` burndown drift | `0.25%` effective prefix-cache hit rate and `144` peer `PT` starvation events |
 | **Track B** · *`capacity` Two-Phase Redis Gateway + Sticky `epp`* | `20` GSUs | **`500 / 500` `200 OK`** | **`0.00%` burndown drift** | **`0` peer `PT` starvation events**, **`0.00%` blackhole drops**, **`26.84%` cache hit** |
 

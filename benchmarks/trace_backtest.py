@@ -18,7 +18,9 @@ from capacity.finops import (
     schedule_residual_capacity,
 )
 from capacity.forecasting import holts_linear_trend, percentile
-from capacity.models import make_default_deadline_jobs
+from capacity.model_families import GEMINI_1P_FLASH_SPEC, refill_window_for_gsus
+from capacity.models import OptimizeRequest, ResidualScheduleRequest
+from capacity.scenario import make_default_deadline_jobs
 
 TPM_PER_GSU = 120_900
 TPS_PER_GSU = TPM_PER_GSU / 60.0
@@ -63,7 +65,7 @@ def _simulate_gsu_policy_7d(
     for day_idx in range(len(gsu_by_day)):
         gsus = max(0, gsu_by_day[day_idx])
         pt_cost_7d += gsus * (GSU_7D_COST_USD / 7.0)
-        window_sec = 1 if gsus >= 50 else 10
+        window_sec = refill_window_for_gsus(GEMINI_1P_FLASH_SPEC, gsus)
         window_budget = gsus * TPS_PER_GSU * 1.05 * window_sec
 
         # Group day's 1-second arrivals into exact refill windows (1s or 10s).
@@ -86,12 +88,14 @@ def _simulate_gsu_policy_7d(
         else:
             night_rev = hourly_rev_tpm_by_day[day_idx][:8]
             sched = schedule_residual_capacity(
-                provisioned_gsus=gsus,
-                tpm_per_gsu=TPM_PER_GSU,
-                revenue_tpm_by_hour=night_rev,
-                deadline_jobs=daily_jobs,
-                evergreen_backfill_tokens=250_000_000.0,
-                paygo_per_1m_burndown_tokens_usd=PAYGO_BASE_PER_1M_USD,
+                ResidualScheduleRequest(
+                    model="gemini-3.8-flash",
+                    provisioned_gsus=gsus,
+                    revenue_tpm_by_hour=night_rev,
+                    deadline_jobs=daily_jobs,
+                    evergreen_backfill_tokens=250_000_000.0,
+                    paygo_per_1m_burndown_tokens_usd=PAYGO_BASE_PER_1M_USD,
+                )
             )
             harvested_batch_pt_tokens += (
                 sched.admitted_deadline_tokens + sched.evergreen_waterfilled_tokens
@@ -260,12 +264,14 @@ def run_track_a_backtest(
         # Weekday-only causal slices represent 5 active business days + weekend batch base (~78%)
         duty_pct = 100.0 if (pilot or d >= 6) else 78.0
         rec_opt = optimize_hybrid_commitment(
-            tpm_series=eff_series,
-            tpm_per_gsu=TPM_PER_GSU,
-            gsu_monthly_price_usd=GSU_MONTHLY_USD,
-            paygo_per_1m_burndown_tokens_usd=PAYGO_BASE_PER_1M_USD,
-            spillover_tier="priority",
-            active_duty_cycle_pct=duty_pct,
+            OptimizeRequest(
+                model="gemini-3.8-flash",
+                tpm_series=eff_series,
+                gsu_monthly_price_usd=GSU_MONTHLY_USD,
+                paygo_per_1m_burndown_tokens_usd=PAYGO_BASE_PER_1M_USD,
+                spillover_tier="priority",
+                active_duty_cycle_pct=duty_pct,
+            )
         )
         if d >= 2 and len(observed_daily_peaks) >= 2:
             proj_peak = holts_linear_trend(observed_daily_peaks, steps=1)[0]

@@ -7,13 +7,15 @@ from typing import Any
 import pytest
 import yaml
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from capacity.api import app as api_app
 from capacity.capacity import compute_recommendations, require_capacity
 from capacity.cli import app as cli_app
-from capacity.core import UnknownModelError, build_demo_throughput
+from capacity.forecasting import build_demo_throughput
 from capacity.gateway import generate_gateway_bundle
+from capacity.models import GatewayConfigRequest, SeriesKey, UnknownModelError
 from capacity.self_hosted import resolve_self_hosted_profile
 from tests.conftest import load_generated_burndown_logger
 
@@ -40,7 +42,7 @@ def test_forecast_tracks_daily_peak_not_last_minutes() -> None:
 
 def test_forecast_follows_rising_daily_peaks() -> None:
     sparse, total_minutes = build_demo_throughput(days=5, by_region=False)
-    series = sparse["gemini-3.8-flash"]
+    series = sparse[SeriesKey("gemini-3.8-flash")]
     first_day = min(series).date()
     grown = {ts: int(v * (1.0 + 0.1 * (ts.date() - first_day).days)) for ts, v in series.items()}
     rec = compute_recommendations({"gemini-3.8-flash": grown}, total_minutes)[0]
@@ -55,7 +57,9 @@ def test_unknown_model_raises_instead_of_defaulting() -> None:
 def test_unknown_model_env_override_is_honored(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GSU_CAPACITY_ACME_LLM_2", "77000")
     assert require_capacity("acme-llm-2") == 77_000
-    bundle = generate_gateway_bundle(model="acme-llm-2", provisioned_gsus=2, target_rps=10)
+    bundle = generate_gateway_bundle(
+        GatewayConfigRequest(model="acme-llm-2", provisioned_gsus=2, target_rps=10)
+    )
     assert "154,000 TPM" in bundle.litellm_config_yaml
 
 
@@ -85,10 +89,32 @@ def test_suffixed_self_hosted_profile_still_resolves() -> None:
             },
         ),
         ("post", "/api/v1/finops/scavenger", {"model": "claude-sonnet-9"}),
-        ("post", "/api/v1/finops/schedule", {"model": "claude-sonnet-9"}),
-        ("post", "/api/v1/finops/folder-pooling", {"model": "claude-sonnet-9"}),
+        (
+            "post",
+            "/api/v1/finops/schedule",
+            {
+                "model": "claude-sonnet-9",
+                "deadline_jobs": [
+                    {
+                        "job_id": "j1",
+                        "value_usd": 100.0,
+                        "burndown_tokens": 1000.0,
+                        "deadline_hour": 1,
+                    }
+                ],
+            },
+        ),
+        (
+            "post",
+            "/api/v1/finops/folder-pooling",
+            {"model": "claude-sonnet-9", "hourly_tpm_by_project": {"spoke": [1000.0]}},
+        ),
         ("post", "/api/v1/gateway/config", {"model": "claude-sonnet-9"}),
-        ("post", "/api/v1/self-hosted/audit", {"profile": "deepseek-r1"}),
+        (
+            "post",
+            "/api/v1/self-hosted/audit",
+            {"profile": "deepseek-r1", "tpm_series": [1000.0]},
+        ),
         ("post", "/api/v1/self-hosted/disaggregated", {"profile": "deepseek-r1"}),
     ],
 )
@@ -106,14 +132,16 @@ def test_api_rejects_unknown_mode() -> None:
 
 
 def test_cli_reports_unknown_model_without_traceback() -> None:
-    res = runner.invoke(cli_app, ["optimize", "--model", "claude-sonnet-9"])
+    res = runner.invoke(cli_app, ["optimize", "--demo", "--model", "claude-sonnet-9"])
     assert res.exit_code == 1
     assert "No capacity table entry" in res.output
     assert res.exception is None or isinstance(res.exception, SystemExit)
 
 
 def test_generated_gateway_configs_parse_and_compile() -> None:
-    bundle = generate_gateway_bundle(model="gemini-3.8-flash-001", provisioned_gsus=20)
+    bundle = generate_gateway_bundle(
+        GatewayConfigRequest(model="gemini-3.8-flash-001", provisioned_gsus=20)
+    )
     assert len(list(yaml.safe_load_all(bundle.litellm_config_yaml))) == 1
     assert len(list(yaml.safe_load_all(bundle.envoy_ai_gateway_yaml))) == 2
     assert len(list(yaml.safe_load_all(bundle.gke_epp_inference_pool_yaml))) == 3
@@ -134,7 +162,7 @@ def test_generated_gateway_configs_parse_and_compile() -> None:
 )
 def test_gateway_rejects_yaml_injection(field: str, value: str) -> None:
     kwargs: dict[str, Any] = {field: value}
-    with pytest.raises(ValueError, match=f"Invalid {field}"):
-        generate_gateway_bundle(**kwargs)
+    with pytest.raises(ValidationError):
+        GatewayConfigRequest(**kwargs)
     resp = client.post("/api/v1/gateway/config", json={field: value})
     assert resp.status_code == 422

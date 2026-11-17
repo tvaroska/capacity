@@ -55,3 +55,70 @@ Implemented milestones and completed passes moved from [`../roadmap.md`](../road
   - Put the gate in one script in the repository and call it from `AGENTS.md`, the workspace runner and `cloudbuild.yaml`. Run the `ast-grep` scan, the format check and the benchmark replay once, not twice.
   - Correct the two outdated notes in `AGENTS.md`: the lock check does run offline, and the hygiene test walks the directory.
   - Done when: the three places run the same script.
+
+## v0.4.0 (Milestone 2 - P1): Tidy in place, then one path from request to result
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-17.*
+
+Part A (`P1.1` to `P1.7`) fixes 11 of the 14 defects without new structure. Part B (`P1.8` to `P1.11`) gives every operation one shape and fixes two more (`P1.8`, `P1.9`). The last defect, the browser script replacing the page's numbers, goes with `P3.2`. Command-line text and the README blocks stay identical except where a decision above changes them.
+
+- [x] **P1.1 The page shows the data it was given**
+  - `recommend --html-out` renders the sizing tab only, with no sample data. Its duty-cycle card comes from the data; today it always reads 23.8%.
+  - On a scenario page the gateway cards and inputs, the sizer inputs and badge, and the cache badge, banner and inputs come from the computed result. Today they keep the values of the built-in demo, and the sizer badge stays green when the saving it reports is negative.
+  - With a capacity override every tab uses the same capacity for a model.
+  - An unknown capacity shows "?" in every cell. The forecast column names the real horizon, and the response carries the horizon and the requested percentiles.
+  - The browser's cache badge follows the engine's rule for models that cache at token boundaries. Today it can read "healthy, 0.0% hit".
+  - Files: `capacity/portal.py`, `capacity/portal_sections.py`, `capacity/portal_template.py`, `capacity/portal_scripts.py`, `capacity/models.py`.
+  - Done when: one render test per case asserts engine values, not phrases.
+- [x] **P1.2 Trace input has one clock and one window rule**
+  - A plain list of minutes is turned into a dated series in four places with two start hours. The same list forecasts 467,000 through `--trace-file` and 400,000 through a scenario file. A trace file shaped as a mapping can report a duty cycle above 100%.
+  - Round fractional TPM consistently in `--trace-file` (`round(float(v))` instead of `int(float(v))` truncation in `capacity/cli_formatters.py`) to match `--vllm-file` and scenario series.
+  - Files: `capacity/forecasting.py`, `capacity/cli.py`, `capacity/cli_formatters.py`, `capacity/portal.py`.
+  - Done when: one list gives one forecast through every entry point, fractional TPM rounds the same way everywhere, and a duty cycle never exceeds 100%.
+- [x] **P1.3 Small fixes**
+  - `optimize --mode self-hosted` works without `--model`. Today the default is a managed model id.
+  - Scenario compilation fails on an unknown model and no longer assumes a default model and capacity (`capacity/scenario.py`).
+  - The pooling mode `silo_stranding_audit` either changes the page or is removed. An annotation `note` is either shown or removed.
+  - The test for leftover placeholders also matches names with digits (`tests/test_portal_export.py`).
+- [x] **P1.4 The built-in demo is the default scenario**
+  - The page builder has a second branch that repeats the default scenario as literals and has drifted in one block. Delete it and build the demo from a default scenario.
+  - Keep the sample data (trace, tenants and their weights, jobs, projects) in one module. The self-hosted sample follows the request default: 6 replicas, 48 GPUs.
+  - Files: `capacity/portal.py`, `capacity/scenario.py`, `capacity/cli.py`, `capacity/finops.py`, `capacity/forecasting.py`.
+  - Done when: `capacity demo` and a scenario file that sets only defaults give the same result.
+- [x] **P1.5 Named constants and one version**
+  - Name the numbers that the self-hosted sizer, the cache audit and the gateway audit assume, each with a one-line source.
+  - Read the version from the package metadata. It is typed in ten lines today.
+  - Files: `capacity/self_hosted.py`, `capacity/burst.py`, `capacity/gateway.py`, `capacity/finops.py`, `capacity/api.py`, `capacity/cli.py`, `capacity/portal.py`, `capacity/scenario.py`.
+- [x] **P1.6 Dead code and start-up time**
+  - Load the Cloud Monitoring SDK only when a command needs it. Every command pays about half a second for it today.
+  - Load `.env` in the command-line entry point and at server start rather than when `capacity.cli` or `capacity.api` is imported, so an untracked local `.env` cannot change test results.
+  - Delete the fallback for a missing SDK (it cannot run, because the SDK is a required dependency), the function that only forwards to another, and the re-export lists that keep old import paths alive.
+  - Move the body of the `collect` command out of the formatter module into a module of its own. `capacity/cli.py` is at the 800-line cap, so one more line fails the gate. Free room in it before other `P1` tasks add to it, for example by moving the text reports of `demo`, `gateway` and `schedule` beside the other formatters.
+  - Files: `capacity/core.py`, `capacity/self_hosted.py`, `capacity/cli.py`, `capacity/cli_formatters.py`, `capacity/api.py`.
+  - Done when: importing the command line or the API neither loads the SDK nor reads `.env`.
+- [x] **P1.7 Complexity rules on, as a ratchet**
+  - Switch on the complexity lint rules that are listed as debt, with ceilings set to today's worst values. Lower the ceilings as functions are split. Remove the five entries from `tests/standards_debt.json`.
+  - Files: `pyproject.toml`, `tests/standards_debt.json`.
+- [x] **P1.8 One model catalog**
+  - One record per model holds capacity, family rules, lifecycle and display label. Today these sit in six places and are matched by substring: an id that contains "pro" is read as the Pro tier, and an unknown id gets default weights without an error.
+  - An unknown id is the same error everywhere. Overrides from the environment or a scenario produce a catalog.
+  - The rule for the 1-second and the 10-second bucket lives in one function. The Envoy expression is built from the family record.
+  - Files: `capacity/model_families.py`, `capacity/capacity.py`, `capacity/burst.py`, `capacity/gateway.py`, `capacity/scenario.py`, `capacity/core.py`, `capacity/portal_sections.py`, `benchmarks/trace_backtest.py`.
+  - Done when: adding a model is one record, and no module matches model names by substring.
+- [x] **P1.9 Every operation takes a checked request and returns a typed result**
+  - Each operation is one function that takes its request model and looks the model up itself, as optimisation and the gateway bundle already do.
+  - The capacity mode moves into the request, so the API accepts self-hosted chargeback as the command line does.
+  - Data fields (series, tenants, jobs, projects) become required. An empty request is rejected. Defaults remain only for prices and percentiles. Also sanitize non-finite float inputs in FastAPI `RequestValidationError` responses so raw `NaN`/`Infinity` HTTP bodies answer `422` instead of crashing `JSONResponse`.
+  - The command line takes its defaults from the same request models, so `optimize`, `schedule` and `chargeback` run on sample data today when no file is given, and the README quick start uses that. Decide when this task starts whether they then need an explicit sample switch, as `recommend --demo` has, or an input file from `examples/`.
+  - Remove the helper that unpacks requests, the defaults repeated in function signatures, the reflection tests that keep the two in step, and the silent re-clamping inside the calculations.
+  - Files: `capacity/finops.py`, `capacity/burst.py`, `capacity/self_hosted.py`, `capacity/gateway.py`, `capacity/capacity.py`, `capacity/models.py`, `capacity/api.py`, `capacity/cli.py`, `tests/test_request_contract.py`.
+  - Done when: the command line and the API each make one call per operation and give the same result for the same request in both modes.
+- [x] **P1.10 Scenario evaluation returns a typed report, outside the page**
+  - Move whole-scenario evaluation out of the page module into one function that returns a typed report. `capacity demo --format json`, the page and an API route read that report.
+  - The report holds only what the scenario defines. Today a scenario's result also carries sample self-hosted series under the scenario's own project label.
+  - Files: `capacity/portal.py`, `capacity/scenario.py`, `capacity/cli.py`, `capacity/api.py`.
+  - Done when: the page renderer takes a report and calls no calculation.
+- [x] **P1.11 Telemetry series have a typed key**
+  - Replace the text key (`folder/model@region`) with a typed key. Filter by model and region, and apply the folder map, in one place.
+  - `collect` reads through the same port as `recommend`, and the access check returns a typed result.
+  - Files: `capacity/forecasting.py`, `capacity/core.py`, `capacity/capacity.py`, `capacity/scenario.py`, `capacity/cli_formatters.py`.

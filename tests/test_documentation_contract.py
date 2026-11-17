@@ -10,6 +10,7 @@ from typer.testing import CliRunner
 
 from capacity.cli import app as cli_app
 from capacity.gateway import generate_gateway_bundle
+from capacity.models import GatewayConfigRequest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 runner = CliRunner()
@@ -69,14 +70,18 @@ def test_readme_fenced_outputs_match_live_cli_and_gateway_verbatim() -> None:
     expected_sched = _extract_fenced_block_after_heading(
         readme, "### 4B. 3-Tier Residual Capacity Scheduler"
     )
-    res_sched = runner.invoke(cli_app, ["schedule", "--model", "gemini-3.8-flash", "--gsus", "20"])
+    res_sched = runner.invoke(
+        cli_app, ["schedule", "--demo", "--model", "gemini-3.8-flash", "--gsus", "20"]
+    )
     assert res_sched.exit_code == 0
     assert res_sched.stdout.strip() == expected_sched
 
     expected_envoy = _extract_fenced_block_after_heading(
         readme, "### Generated Envoy AI Gateway Post-SSE"
     )
-    bundle = generate_gateway_bundle(model="gemini-3.8-flash", provisioned_gsus=20)
+    bundle = generate_gateway_bundle(
+        GatewayConfigRequest(model="gemini-3.8-flash", provisioned_gsus=20)
+    )
     assert bundle.envoy_ai_gateway_yaml.strip() == expected_envoy
 
 
@@ -104,7 +109,7 @@ def test_readme_quickstart_commands_execute_cleanly(tmp_path: Path) -> None:
         ["recommend", "--demo", "--active-only", "--by-region"],
         ["recommend", "--demo", "--mode", "self-hosted", "--active-only", "--by-region"],
         [
-            *("optimize", "--model", "gemini-3.8-flash"),
+            *("optimize", "--demo", "--model", "gemini-3.8-flash"),
             *("--sixty-sec-tpm", "150000", "--peak-1s-tps", "4750"),
         ],
         [
@@ -127,7 +132,7 @@ def test_readme_quickstart_commands_execute_cleanly(tmp_path: Path) -> None:
             "--rps",
             "650",
         ],
-        ["schedule", "--model", "gemini-3.8-flash", "--gsus", "20"],
+        ["schedule", "--demo", "--model", "gemini-3.8-flash", "--gsus", "20"],
         [
             "chargeback",
             "--model",

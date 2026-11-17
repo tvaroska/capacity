@@ -24,6 +24,7 @@ AST_RULES_PATH = REPO_ROOT / "specs" / "ast.rules.yaml"
 ADAPTER_SPECS: tuple[str, ...] = (
     "api.py",
     "cli.py",
+    "cli_collect.py",
     "cli_formatters.py",
     "core.py",
 )

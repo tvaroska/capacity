@@ -3,25 +3,42 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 from capacity.forecasting import argmin_convex_int, percentile
-from capacity.model_families import resolve_model_family
+from capacity.model_families import (
+    GEMINI_1P_FLASH_SPEC,
+    ModelCatalog,
+    build_model_catalog,
+    normalize_model_id,
+)
 from capacity.models import (
-    DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR,
     BatchScavengerAudit,
+    BatchScavengerRequest,
+    ChargebackRequest,
     DeadlineJobSpec,
+    FinOpsKpiRequest,
     FinOpsKpiScorecard,
     FocusChargebackReport,
     FolderPoolingReport,
+    FolderPoolingRequest,
     HybridCommitmentRecommendation,
+    OptimizeRequest,
     ResidualScheduleReport,
+    ResidualScheduleRequest,
     ScheduledDeadlineJob,
     TenantChargebackRow,
-    make_default_deadline_jobs,
 )
+from capacity.self_hosted import resolve_self_hosted_profile
 
-MINUTES_PER_MONTH = 30 * 24 * 60  # 43,200 minutes in a standard 30-day billing month
+# 43,200 minutes in a standard 30-day billing month (30 * 24 * 60).
+MINUTES_PER_MONTH = 30 * 24 * 60
+# 168 hours in a 7-day reservation week (`ECUR_168h` denominator, ADR-003).
+HOURS_PER_WEEK = 168.0
+# Default monthly list price per 1 Managed Gemini GSU in USD (ADR-003).
+DEFAULT_GSU_MONTHLY_PRICE_USD = 2_000.0
+# Maximum fraction of monthly PT capacity (85%, keeping 15% safety headroom) for $0 scavenging.
+SCAVENGER_SAFETY_UTILIZATION_CAP = 0.85
 
 SPILLOVER_MULTIPLIERS: dict[str, float] = {
     "priority": 1.8,
@@ -29,57 +46,27 @@ SPILLOVER_MULTIPLIERS: dict[str, float] = {
     "flex": 0.5,
 }
 
-DEFAULT_TENANT_RAW_TOKEN_WEIGHTS: dict[str, float] = {
-    "claims-triage": 1.85,
-    "underwriting-copilot": 1.10,
-    "policy-audit": 0.45,
-}
-
-
-def clean_finite_series(series: Sequence[int | float]) -> list[float]:
-    if not series:
-        return [0.0]
-    cleaned: list[float] = []
-    for raw in series:
-        val = float(raw)
-        if not math.isfinite(val):
-            raise ValueError(f"tpm_series values must be finite numbers, got {raw!r}")
-        cleaned.append(max(0.0, val))
-    return sorted(cleaned)
+_EXACT_SEARCH_MAX_JOBS = 24
+# Jobs of equal value defeat the value bound and cost 2^N node visits; caps search at ~50 ms.
+_EXACT_SEARCH_NODE_BUDGET = 250_000
 
 
 def optimize_hybrid_commitment(
-    tpm_series: Sequence[int | float],
-    model: str = "gemini-3.8-flash",
-    tpm_per_gsu: int = 120_900,
-    gsu_monthly_price_usd: float = 2_000.0,
-    paygo_per_1m_burndown_tokens_usd: float = 0.50,
-    spillover_tier: str = "priority",
-    fsp_discount_pct: float = 0.0,
-    active_duty_cycle_pct: float = 100.0,
+    req: OptimizeRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> HybridCommitmentRecommendation:
-    """Solve the Newsvendor critical fractile and the GSU count with the lowest monthly cost.
-
-    When `tpm_series` contains active-hours-only samples (e.g. an 8x5 daytime slice), pass
-    `active_duty_cycle_pct` (such as `23.81` for 40h/168h) so variable spillover is integrated
-    over active monthly minutes rather than 24x7 `43,200` minutes while PT still bills 24x7.
-    """
-    cleaned_series = clean_finite_series(tpm_series)
-    gsu_cap = max(1, int(tpm_per_gsu))
-    duty_fraction = min(1.0, max(1e-6, float(active_duty_cycle_pct) / 100.0))
+    """Solve the Newsvendor critical fractile and the GSU count with the lowest monthly cost."""
+    cat = catalog if catalog is not None else build_model_catalog()
+    norm_model = normalize_model_id(req.model)
+    gsu_cap = cat.require_capacity(req.model)
+    cleaned_series = sorted(req.tpm_series)
+    duty_fraction = req.active_duty_cycle_pct / 100.0
     active_month_minutes = MINUTES_PER_MONTH * duty_fraction
 
-    tier_key = spillover_tier.strip().lower()
-    if tier_key not in SPILLOVER_MULTIPLIERS:
-        raise ValueError(
-            f"Unsupported spillover_tier '{spillover_tier}'. "
-            f"Choose from {sorted(SPILLOVER_MULTIPLIERS)}."
-        )
-    spill_mult = SPILLOVER_MULTIPLIERS[tier_key]
-
-    fsp_clamped = min(50.0, max(0.0, float(fsp_discount_pct)))
-    effective_gsu_price = gsu_monthly_price_usd * (1.0 - fsp_clamped / 100.0)
-    effective_spill_per_1m = paygo_per_1m_burndown_tokens_usd * spill_mult
+    spill_mult = SPILLOVER_MULTIPLIERS[req.spillover_tier]
+    effective_gsu_price = req.gsu_monthly_price_usd * (1.0 - req.fsp_discount_pct / 100.0)
+    effective_spill_per_1m = req.paygo_per_1m_burndown_tokens_usd * spill_mult
 
     tokens_per_gsu_active_millions = (gsu_cap * active_month_minutes) / 1_000_000.0
     spillover_equiv_active_per_gsu = tokens_per_gsu_active_millions * effective_spill_per_1m
@@ -115,7 +102,6 @@ def optimize_hybrid_commitment(
         return pt_cost + spill_cost, pt_cost, spill_cost
 
     max_gsus = math.ceil(cleaned_series[-1] / gsu_cap) if cleaned_series[-1] > 0 else 0
-    # Monthly cost is convex in the commitment, so bisection finds the exact optimum.
     best_gsus = argmin_convex_int(lambda g: _evaluate_monthly_cost(g)[0], max_gsus)
     best_total, best_pt, best_spill = _evaluate_monthly_cost(best_gsus)
 
@@ -133,12 +119,12 @@ def optimize_hybrid_commitment(
     savings_vs_p99_pct = (savings_vs_p99 / p99_pt_cost) * 100.0 if p99_pt_cost > 0 else 0.0
 
     return HybridCommitmentRecommendation(
-        model=model,
+        model=norm_model,
         tpm_per_gsu=gsu_cap,
-        gsu_monthly_price_usd=round(gsu_monthly_price_usd, 2),
-        fsp_discount_pct=round(fsp_clamped, 2),
+        gsu_monthly_price_usd=round(req.gsu_monthly_price_usd, 2),
+        fsp_discount_pct=round(req.fsp_discount_pct, 2),
         effective_gsu_monthly_price_usd=round(effective_gsu_price, 2),
-        spillover_tier=tier_key,
+        spillover_tier=req.spillover_tier,
         spillover_multiplier=spill_mult,
         effective_spillover_per_1m_tokens_usd=round(effective_spill_per_1m, 4),
         breakeven_utilization_pct=round(breakeven_utilization * 100.0, 2),
@@ -159,51 +145,55 @@ def optimize_hybrid_commitment(
     )
 
 
+def _pad_series_matrix(
+    raw_by_key: dict[str, list[float] | float],
+) -> tuple[dict[str, list[float]], int]:
+    normalized: dict[str, list[float]] = {}
+    max_len = 1
+    for key, series_or_scalar in raw_by_key.items():
+        if isinstance(series_or_scalar, (int, float)):
+            arr = [float(series_or_scalar)]
+        else:
+            arr = [float(v) for v in series_or_scalar] or [0.0]
+        normalized[key] = arr
+        max_len = max(max_len, len(arr))
+    for key, arr in list(normalized.items()):
+        if len(arr) < max_len:
+            normalized[key] = arr + [0.0] * (max_len - len(arr))
+    return normalized, max_len
+
+
 def compute_focus_chargeback(
-    hourly_consumed_tpm_by_tenant: Mapping[str, Sequence[int | float] | int | float],
-    provisioned_gsus: int,
-    tpm_per_gsu: int = 120_900,
-    gsu_monthly_price_usd: float = 2_000.0,
-    async_batch_waterfill_tpm: float = 0.0,
-    tenant_raw_token_weights: Mapping[str, float] | None = None,
+    req: ChargebackRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> FocusChargebackReport:
     """Compute FinOps FOCUS 1.2 Two-Pool Chargeback + Async Batch Water-Filling."""
-    gsus = max(1, int(provisioned_gsus))
-    gsu_cap = max(1, int(tpm_per_gsu))
+    if req.mode == "self-hosted":
+        prof = resolve_self_hosted_profile(req.model)
+        gsu_cap = prof.tpm_per_replica
+        unit_price = (
+            req.gsu_monthly_price_usd
+            if req.gsu_monthly_price_usd is not None
+            else prof.reserved_replica_monthly_usd
+        )
+    else:
+        cat = catalog if catalog is not None else build_model_catalog()
+        gsu_cap = cat.require_capacity(req.model)
+        unit_price = (
+            req.gsu_monthly_price_usd
+            if req.gsu_monthly_price_usd is not None
+            else DEFAULT_GSU_MONTHLY_PRICE_USD
+        )
+
+    gsus = req.provisioned_gsus
     capacity_tpm = float(gsus * gsu_cap)
-    total_commitment_cost = gsus * float(gsu_monthly_price_usd)
+    total_commitment_cost = gsus * unit_price
 
-    normalized_tenants: dict[str, list[float]] = {}
-    max_hours = 1
-    for tenant, series_or_scalar in hourly_consumed_tpm_by_tenant.items():
-        if isinstance(series_or_scalar, (int, float)):
-            val = float(series_or_scalar)
-            if not math.isfinite(val):
-                raise ValueError(f"Non-finite chargeback value for tenant {tenant!r}")
-            arr = [max(0.0, val)]
-        else:
-            arr = []
-            for raw in series_or_scalar:
-                val = float(raw)
-                if not math.isfinite(val):
-                    raise ValueError(f"Non-finite chargeback value for tenant {tenant!r}")
-                arr.append(max(0.0, val))
-            if not arr:
-                arr = [0.0]
-        normalized_tenants[tenant] = arr
-        max_hours = max(max_hours, len(arr))
-
-    if not normalized_tenants:
-        normalized_tenants = {"default": [0.0]}
-        max_hours = 1
-
-    for tenant, arr in list(normalized_tenants.items()):
-        if len(arr) < max_hours:
-            normalized_tenants[tenant] = arr + [0.0] * (max_hours - len(arr))
-
+    normalized_tenants, max_hours = _pad_series_matrix(req.hourly_consumed_tpm_by_tenant)
     hourly_commit_cost = total_commitment_cost / max_hours
     scale_to_month_minutes = MINUTES_PER_MONTH / max_hours
-    waterfill_demand_tpm = max(0.0, float(async_batch_waterfill_tpm))
+    waterfill_demand_tpm = req.async_batch_waterfill_tpm
 
     tenant_active_cost: dict[str, float] = dict.fromkeys(normalized_tenants, 0.0)
     tenant_tokens: dict[str, float] = dict.fromkeys(normalized_tenants, 0.0)
@@ -216,7 +206,7 @@ def compute_focus_chargeback(
 
     for h in range(max_hours):
         hour_total_tpm = sum(normalized_tenants[t][h] for t in normalized_tenants)
-        active_util_h = min(1.0, hour_total_tpm / capacity_tpm) if capacity_tpm > 0 else 0.0
+        active_util_h = min(1.0, hour_total_tpm / capacity_tpm)
         sum_active_util += active_util_h
 
         active_cost_h = hourly_commit_cost * active_util_h
@@ -224,30 +214,26 @@ def compute_focus_chargeback(
 
         spare_tpm_h = max(0.0, capacity_tpm - min(capacity_tpm, hour_total_tpm))
         waterfilled_tpm_h = min(spare_tpm_h, waterfill_demand_tpm)
-        waterfill_util_h = waterfilled_tpm_h / capacity_tpm if capacity_tpm > 0 else 0.0
+        waterfill_util_h = waterfilled_tpm_h / capacity_tpm
         sum_effective_util += active_util_h + waterfill_util_h
 
-        waterfill_cost_h = hourly_commit_cost * waterfill_util_h
-        total_waterfill_cost += waterfill_cost_h
+        total_waterfill_cost += hourly_commit_cost * waterfill_util_h
         total_waterfill_tokens += waterfilled_tpm_h * scale_to_month_minutes
 
         for t in normalized_tenants:
             t_tpm = normalized_tenants[t][h]
             tenant_tokens[t] += t_tpm * scale_to_month_minutes
             if hour_total_tpm > 0:
-                share_h = t_tpm / hour_total_tpm
-                tenant_active_cost[t] += active_cost_h * share_h
+                tenant_active_cost[t] += active_cost_h * (t_tpm / hour_total_tpm)
 
     total_tokens_all_tenants = sum(tenant_tokens.values())
     raw_weights_cfg = (
-        dict(tenant_raw_token_weights)
-        if tenant_raw_token_weights is not None
-        else DEFAULT_TENANT_RAW_TOKEN_WEIGHTS
+        dict(req.tenant_raw_token_weights) if req.tenant_raw_token_weights is not None else {}
     )
-    tenant_raw_tokens: dict[str, float] = {}
-    for t, w_tok in tenant_tokens.items():
-        w_ratio = max(0.1, float(raw_weights_cfg.get(t, 1.0)))
-        tenant_raw_tokens[t] = w_tok / w_ratio
+    tenant_raw_tokens = {
+        t: w_tok / max(0.1, float(raw_weights_cfg.get(t, 1.0)))
+        for t, w_tok in tenant_tokens.items()
+    }
     total_raw_tokens_all_tenants = sum(tenant_raw_tokens.values())
 
     tenant_rows: list[TenantChargebackRow] = []
@@ -285,6 +271,8 @@ def compute_focus_chargeback(
 
     return FocusChargebackReport(
         provisioned_gsus=gsus,
+        unit_price_usd=round(unit_price, 2),
+        mode=req.mode,
         total_commitment_cost_usd=round(total_commitment_cost, 2),
         active_utilization_pct=round((sum_active_util / max_hours) * 100.0, 2),
         effective_utilization_with_waterfill_pct=round((sum_effective_util / max_hours) * 100.0, 2),
@@ -298,38 +286,34 @@ def compute_focus_chargeback(
 
 
 def evaluate_batch_scavenger_economics(
-    model: str = "gemini-3.8-flash",
-    provisioned_gsus: int = 20,
-    tpm_per_gsu: int = 120_900,
-    gsu_monthly_price_usd: float = 2_000.0,
-    daytime_active_utilization_pct: float = 24.0,
-    batch_monthly_burndown_tokens: float = 45_000_000_000.0,
-    paygo_per_1m_burndown_tokens_usd: float = 0.50,
+    req: BatchScavengerRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> BatchScavengerAudit:
     """Compare Batch API (0.5x extra double-payment) vs $0 online PT scavenging."""
-    gsus = max(1, int(provisioned_gsus))
-    gsu_cap = max(1, int(tpm_per_gsu))
-    pt_cost = gsus * float(gsu_monthly_price_usd)
-    active_util = min(100.0, max(0.0, float(daytime_active_utilization_pct)))
+    cat = catalog if catalog is not None else build_model_catalog()
+    gsu_cap = cat.require_capacity(req.model)
+    norm_model = normalize_model_id(req.model)
+    gsus = req.provisioned_gsus
+    pt_cost = gsus * req.gsu_monthly_price_usd
+    active_util = req.daytime_active_utilization_pct
 
     total_monthly_pt_tokens = float(gsus * gsu_cap * MINUTES_PER_MONTH)
     active_tokens = total_monthly_pt_tokens * (active_util / 100.0)
-    idle_scavengable_tokens = max(0.0, (total_monthly_pt_tokens * 0.85) - active_tokens)
+    idle_scavengable_tokens = max(
+        0.0, (total_monthly_pt_tokens * SCAVENGER_SAFETY_UTILIZATION_CAP) - active_tokens
+    )
 
-    batch_tokens = max(0.0, float(batch_monthly_burndown_tokens))
+    batch_tokens = req.batch_monthly_burndown_tokens
     harvested_free = min(batch_tokens, idle_scavengable_tokens)
     overflow_tokens = max(0.0, batch_tokens - harvested_free)
 
-    flex_rate_per_1m = float(paygo_per_1m_burndown_tokens_usd) * SPILLOVER_MULTIPLIERS["flex"]
+    flex_rate_per_1m = req.paygo_per_1m_burndown_tokens_usd * SPILLOVER_MULTIPLIERS["flex"]
     batch_api_extra_usd = (batch_tokens / 1_000_000.0) * flex_rate_per_1m
     hybrid_flex_extra_usd = (overflow_tokens / 1_000_000.0) * flex_rate_per_1m
     waste_avoided = max(0.0, batch_api_extra_usd - hybrid_flex_extra_usd)
 
-    effective_util_after = (
-        ((active_tokens + harvested_free) / total_monthly_pt_tokens) * 100.0
-        if total_monthly_pt_tokens > 0
-        else 0.0
-    )
+    effective_util_after = ((active_tokens + harvested_free) / total_monthly_pt_tokens) * 100.0
     if overflow_tokens == 0.0:
         policy = "X-Vertex-AI-LLM-Request-Type: dedicated ($0.00 overage guaranteed)"
     else:
@@ -339,7 +323,7 @@ def evaluate_batch_scavenger_economics(
         )
 
     return BatchScavengerAudit(
-        model=model,
+        model=norm_model,
         provisioned_gsus=gsus,
         pt_monthly_commitment_cost_usd=round(pt_cost, 2),
         daytime_active_utilization_pct=round(active_util, 2),
@@ -371,12 +355,6 @@ def _is_edf_feasible(
     return True
 
 
-_EXACT_SEARCH_MAX_JOBS = 24
-# Jobs of equal value defeat the value bound and cost 2^N node visits (24 tied jobs: over
-# 3 seconds). The budget caps the search at roughly 50 ms.
-_EXACT_SEARCH_NODE_BUDGET = 250_000
-
-
 def _admit_by_value_density(
     eligible: Sequence[DeadlineJobSpec],
     cum_residual: Sequence[float],
@@ -398,11 +376,7 @@ def _select_optimal_deadline_subset(
     cum_residual: Sequence[float],
     horizon_hours: int,
 ) -> set[str]:
-    """Select the deadline-feasible subset maximizing SLA-protected business value.
-
-    Exact branch-and-bound up to 24 jobs and a node budget. Past either limit the answer is
-    the greedy value-density ranking, or the search's best admission if that is worth more.
-    """
+    """Select the deadline-feasible subset maximizing SLA-protected business value."""
     eligible = [j for j in jobs_in if 1 <= j.deadline_hour <= horizon_hours]
     if not eligible:
         return set()
@@ -453,30 +427,20 @@ def _select_optimal_deadline_subset(
 
 
 def schedule_residual_capacity(
-    provisioned_gsus: int = 20,
-    tpm_per_gsu: int = 120_900,
-    safety_headroom_ratio: float = 0.85,
-    revenue_tpm_by_hour: Sequence[float] | None = None,
-    deadline_jobs: Sequence[DeadlineJobSpec] | None = None,
-    evergreen_backfill_tokens: float = 250_000_000.0,
-    paygo_per_1m_burndown_tokens_usd: float = 0.50,
+    req: ResidualScheduleRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> ResidualScheduleReport:
     """Schedule Tier-0 Revenue, Tier-1 Hard-Deadline (EDF + Exact Admission), & Tier-2 Evergreen."""
-    gsus = max(1, int(provisioned_gsus))
-    gsu_cap = max(1, int(tpm_per_gsu))
-    safety = min(1.0, max(0.1, float(safety_headroom_ratio)))
-    rev_series = (
-        [max(0.0, float(v)) for v in revenue_tpm_by_hour]
-        if revenue_tpm_by_hour is not None
-        else list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR)
-    )
-    if not rev_series:
-        rev_series = list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR)
-    horizon_hours = len(rev_series)
+    cat = catalog if catalog is not None else build_model_catalog()
+    gsu_cap = cat.require_capacity(req.model)
+    gsus = req.provisioned_gsus
+    safety = req.safety_headroom_ratio
+    horizon_hours = len(req.revenue_tpm_by_hour)
 
     hourly_ceiling_tokens = gsus * gsu_cap * 60.0 * safety
     residual_by_hour = [
-        max(0.0, hourly_ceiling_tokens - (rev_tpm * 60.0)) for rev_tpm in rev_series
+        max(0.0, hourly_ceiling_tokens - (rev_tpm * 60.0)) for rev_tpm in req.revenue_tpm_by_hour
     ]
     total_residual_tokens = sum(residual_by_hour)
     cum_residual: list[float] = []
@@ -485,12 +449,11 @@ def schedule_residual_capacity(
         running += r_h
         cum_residual.append(running)
 
-    jobs_in = list(deadline_jobs) if deadline_jobs is not None else make_default_deadline_jobs()
-    flex_rate_per_1m = float(paygo_per_1m_burndown_tokens_usd) * SPILLOVER_MULTIPLIERS["flex"]
-    admitted_ids = _select_optimal_deadline_subset(jobs_in, cum_residual, horizon_hours)
+    flex_rate_per_1m = req.paygo_per_1m_burndown_tokens_usd * SPILLOVER_MULTIPLIERS["flex"]
+    admitted_ids = _select_optimal_deadline_subset(req.deadline_jobs, cum_residual, horizon_hours)
 
     ordered_specs = sorted(
-        jobs_in,
+        req.deadline_jobs,
         key=lambda j: (0 if j.job_id in admitted_ids else 1, j.deadline_hour, j.job_id),
     )
 
@@ -523,7 +486,6 @@ def schedule_residual_capacity(
             if spec.value_usd > job_flex_cost:
                 total_value += spec.value_usd - job_flex_cost
                 flex_spill_cost += job_flex_cost
-                # Omit X-Vertex-AI-LLM-Request-Type so spare PT drains first before 0.5x Flex spill
                 headers = {"X-Vertex-AI-LLM-Shared-Request-Type": "flex"}
                 cost_val = job_flex_cost
             else:
@@ -543,7 +505,7 @@ def schedule_residual_capacity(
             )
 
     remaining_residual = max(0.0, total_residual_tokens - admitted_tokens)
-    waterfilled_evergreen = min(max(0.0, float(evergreen_backfill_tokens)), remaining_residual)
+    waterfilled_evergreen = min(req.evergreen_backfill_tokens, remaining_residual)
 
     return ResidualScheduleReport(
         provisioned_gsus=gsus,
@@ -560,38 +522,28 @@ def schedule_residual_capacity(
 
 
 def evaluate_folder_pooling(
-    hourly_tpm_by_project: Mapping[str, Sequence[float]],
-    model: str = "gemini-3.8-flash",
-    tpm_per_gsu: int = 120_900,
-    percentile_target: int = 90,
-    gsu_monthly_price_usd: float = 2_000.0,
+    req: FolderPoolingRequest,
+    *,
+    catalog: ModelCatalog | None = None,
 ) -> FolderPoolingReport:
     """Quantify GSU savings from pooling siloed spoke projects under a flat Folder RHPT pool."""
-    gsu_cap = max(1, int(tpm_per_gsu))
-    pct = min(100, max(1, int(percentile_target)))
+    cat = catalog if catalog is not None else build_model_catalog()
+    record = cat.require(req.model)
+    norm_model = normalize_model_id(req.model)
+    gsu_cap = record.gsu_capacity_tpm
+    pct = req.percentile_target
 
-    normalized: dict[str, list[float]] = {}
-    max_len = 1
-    for proj, series in hourly_tpm_by_project.items():
-        arr = [max(0.0, float(v)) for v in series] or [0.0]
-        normalized[proj] = arr
-        max_len = max(max_len, len(arr))
-
-    if not normalized:
-        normalized = {"default-project": [0.0]}
-
-    for proj, arr in list(normalized.items()):
-        if len(arr) < max_len:
-            normalized[proj] = arr + [0.0] * (max_len - len(arr))
+    raw_projects: dict[str, list[float] | float] = {
+        proj: list(series) for proj, series in req.hourly_tpm_by_project.items()
+    }
+    normalized, max_len = _pad_series_matrix(raw_projects)
 
     siloed_by_proj: dict[str, int] = {}
     for proj in sorted(normalized):
-        sorted_proj = sorted(normalized[proj])
-        p_tpm = percentile(sorted_proj, pct)
+        p_tpm = percentile(sorted(normalized[proj]), pct)
         siloed_by_proj[proj] = math.ceil(p_tpm / gsu_cap) if p_tpm > 0 else 0
 
     siloed_total = sum(siloed_by_proj.values())
-
     combined_series = sorted(
         sum(normalized[proj][i] for proj in normalized) for i in range(max_len)
     )
@@ -600,9 +552,9 @@ def evaluate_folder_pooling(
 
     stranded_saved = max(0, siloed_total - pooled_gsus)
     diversity = round(siloed_total / pooled_gsus, 2) if pooled_gsus > 0 else 1.0
-    monthly_savings = stranded_saved * float(gsu_monthly_price_usd)
+    monthly_savings = stranded_saved * req.gsu_monthly_price_usd
 
-    spec = resolve_model_family(model)
+    spec = record.family_spec
     if spec.supports_folder_rhpt:
         notes = [
             "Place spoke projects as direct children of a single flat Prod-GenAI Folder "
@@ -614,18 +566,18 @@ def evaluate_folder_pooling(
         ]
     else:
         notes = [
-            f"Folder-Level RHPT is 1P Gemini-only and unsupported for {model}; realize these "
+            f"Folder-Level RHPT is 1P Gemini-only and unsupported for {norm_model}; realize these "
             "pooling savings by consolidating traffic into a central BU-segmented hub project "
             "with gateway-enforced per-BU weighted burndown token buckets.",
             "3P Claude Provisioned Throughput uses 30s/60s dual enforcement buckets with no "
             "1-week term and Standard PayGo spillover (Priority PayGo is 1P-only).",
-            "Monitor unweighted publisher/online_serving/token_count grouped by model_id, "
-            "location, request_type, and type, applying client-side burndown weights "
+            f"Monitor unweighted {spec.monitoring_metric} grouped by model_id, location, "
+            "request_type, and type, applying client-side burndown weights "
             "(1.0x input, 0.1x cache read, 1.25x 5m / 2.0x 1h cache write, 5.0x output).",
         ]
 
     return FolderPoolingReport(
-        model=model,
+        model=norm_model,
         percentile_target=pct,
         project_count=len(normalized),
         siloed_gsus_by_project=siloed_by_proj,
@@ -639,50 +591,36 @@ def evaluate_folder_pooling(
     )
 
 
-# The scorecard takes no model, so it weighs tokens at the standard 1P burndown rates.
-_KPI_CACHED_WEIGHT = 0.10
-_KPI_OUTPUT_WEIGHT = 4.0
-
-
-def compute_finops_kpis(
-    total_amortized_cost_usd: float = 24_500.0,
-    uncached_input_tokens: int = 1_200_000_000,
-    cached_input_tokens: int = 3_800_000_000,
-    delivered_output_tokens: int = 420_000_000,
-    thinking_tokens: int = 180_000_000,
-    retry_and_judge_tokens: int = 95_000_000,
-    verified_outcomes: int = 140_000,
-    hourly_reserved_burndown_capacity: float = 72_540_000.0,
-    weekly_consumed_burndown_tokens: float = 6_950_000_000.0,
-) -> FinOpsKpiScorecard:
+def compute_finops_kpis(req: FinOpsKpiRequest) -> FinOpsKpiScorecard:
     """Compute the 5 standardized FinOps for AI KPIs (bridging CPVO to bq-eval)."""
-    cost = max(0.0, float(total_amortized_cost_usd))
-    u_in = max(0, int(uncached_input_tokens))
-    c_in = max(0, int(cached_input_tokens))
-    out_tok = max(0, int(delivered_output_tokens))
-    think_tok = max(0, int(thinking_tokens))
-    retry_tok = max(0, int(retry_and_judge_tokens))
-    outcomes = max(1, int(verified_outcomes))
+    cached_w = GEMINI_1P_FLASH_SPEC.standard_cached_read_weight
+    out_w = GEMINI_1P_FLASH_SPEC.standard_output_weight
+
+    u_in = req.uncached_input_tokens
+    c_in = req.cached_input_tokens
+    out_tok = req.delivered_output_tokens
+    think_tok = req.thinking_tokens
+    retry_tok = req.retry_and_judge_tokens
 
     weighted_burndown = (
-        float(u_in)
-        + (float(c_in) * _KPI_CACHED_WEIGHT)
-        + (float(out_tok + think_tok + retry_tok) * _KPI_OUTPUT_WEIGHT)
+        float(u_in) + (float(c_in) * cached_w) + (float(out_tok + think_tok + retry_tok) * out_w)
     )
-    cpwt_1m = (cost / (weighted_burndown / 1_000_000.0)) if weighted_burndown > 0 else 0.0
-    cpvo = cost / outcomes
+    cpwt_1m = (
+        (req.total_amortized_cost_usd / (weighted_burndown / 1_000_000.0))
+        if weighted_burndown > 0
+        else 0.0
+    )
+    cpvo = req.total_amortized_cost_usd / req.verified_outcomes
 
     total_raw = u_in + c_in + out_tok + think_tok + retry_tok
     ter_ratio = (out_tok / total_raw) if total_raw > 0 else 0.0
 
     total_prompt = u_in + c_in
-    csr_pct = (
-        (c_in / total_prompt) * (1.0 - _KPI_CACHED_WEIGHT) * 100.0 if total_prompt > 0 else 0.0
-    )
+    csr_pct = (c_in / total_prompt) * (1.0 - cached_w) * 100.0 if total_prompt > 0 else 0.0
 
-    weekly_reserved_capacity = max(1.0, float(hourly_reserved_burndown_capacity) * 168.0)
+    weekly_reserved_capacity = req.hourly_reserved_burndown_capacity * HOURS_PER_WEEK
     ecur_168h_pct = min(
-        100.0, (max(0.0, float(weekly_consumed_burndown_tokens)) / weekly_reserved_capacity) * 100.0
+        100.0, (req.weekly_consumed_burndown_tokens / weekly_reserved_capacity) * 100.0
     )
 
     return FinOpsKpiScorecard(
@@ -692,7 +630,7 @@ def compute_finops_kpis(
         ter_pct=round(ter_ratio * 100.0, 2),
         csr_pct=round(csr_pct, 2),
         ecur_168h_pct=round(ecur_168h_pct, 2),
-        total_amortized_cost_usd=round(cost, 2),
+        total_amortized_cost_usd=round(req.total_amortized_cost_usd, 2),
         total_weighted_burndown_tokens=round(weighted_burndown, 2),
-        verified_outcomes=outcomes,
+        verified_outcomes=req.verified_outcomes,
     )

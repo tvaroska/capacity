@@ -23,12 +23,12 @@ from capacity import core
 from capacity.api import app as api_app
 from capacity.cli import app as cli_app
 from capacity.cli_formatters import load_sparse_from_trace_file, parse_folder_map
-from capacity.models import OptimizeRequest, SelfHostedAuditRequest
+from capacity.model_families import infer_lifecycle_track
+from capacity.models import OptimizeRequest, SelfHostedAuditRequest, SeriesKey
 from capacity.scenario import (
     ModelInventoryAnnotation,
     ShowcaseScenario,
     compile_scenario_from_telemetry,
-    infer_lifecycle_track,
     load_showcase_scenario,
 )
 from tests.conftest import FakeMonitoringClient, make_time_series
@@ -57,7 +57,7 @@ class _FakeAPICallError(GoogleAPICallError):
 
 
 def test_patch_target_appears_once_and_tests_import_no_private_capacity_names() -> None:
-    target = "capacity.core.monitoring_v3.MetricServiceAsyncClient"
+    target = "capacity.core.create_monitoring_client"
     hits = [
         path.name
         for path in sorted(TESTS_DIR.glob("*.py"))
@@ -65,7 +65,7 @@ def test_patch_target_appears_once_and_tests_import_no_private_capacity_names() 
         if target in line and path.name != "test_refactor_cutpoints.py"
     ]
     assert hits == ["conftest.py"], f"Patch target duplicated across: {hits}"
-    assert "_build_filter" not in core.__all__
+    assert not hasattr(core, "__all__")
 
     private_imports: list[str] = []
     for path in sorted(TESTS_DIR.glob("*.py")):
@@ -160,8 +160,8 @@ def test_mapping_shaped_trace_file_and_unsupported_structure(tmp_path: Path) -> 
     sparse, total_mins = load_sparse_from_trace_file(mapping_trace, days=1, by_region=True)
     assert total_mins == 1_440
     assert set(sparse) == {
-        "claims/gemini-3.8-flash@us-central1",
-        "wealth/gemini-4-argon@europe-west4",
+        SeriesKey(model="gemini-3.8-flash", region="us-central1", folder="claims"),
+        SeriesKey(model="gemini-4-argon", region="europe-west4", folder="wealth"),
     }
 
     res = runner.invoke(
@@ -184,22 +184,21 @@ def test_all_cli_json_format_branches_return_valid_json() -> None:
         (["demo", "--format", "json"], "finops_kpis"),
         (["recommend", "--demo", "--format", "json"], "models"),
         (["recommend", "--demo", "--mode", "self-hosted", "--format", "json"], "models"),
-        (["optimize", "--format", "json"], "commitment"),
+        (["optimize", "--demo", "--format", "json"], "commitment"),
         (
             [
                 "optimize",
+                "--demo",
                 "--mode",
                 "self-hosted",
-                "--model",
-                "llama-3.3-70b-fp8",
                 "--format",
                 "json",
             ],
             "optimal_reserved_replicas",
         ),
         (["gateway", "--gsus", "10", "--format", "json"], "litellm_config_yaml"),
-        (["schedule", "--gsus", "10", "--format", "json"], "jobs"),
-        (["chargeback", "--gsus", "10", "--format", "json"], "tenants"),
+        (["schedule", "--demo", "--gsus", "10", "--format", "json"], "jobs"),
+        (["chargeback", "--demo", "--gsus", "10", "--format", "json"], "tenants"),
         (
             [
                 "collect",
@@ -310,6 +309,14 @@ def test_nan_and_infinity_rejected_across_models_scenario_and_cli(
     demo_res = runner.invoke(cli_app, ["demo", "--scenario-file", str(scen_path)])
     assert demo_res.exit_code == 1
     assert demo_res.output.startswith("Error: ")
+
+    api_res = client.post(
+        "/api/v1/optimize",
+        content=f'{{"tpm_series": [{json_token}]}}',
+        headers={"Content-Type": "application/json"},
+    )
+    assert api_res.status_code == 422
+    assert isinstance(api_res.json()["detail"], list)
 
 
 def test_recommend_html_out_writes_scorecard_with_recommended_models(tmp_path: Path) -> None:
