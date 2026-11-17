@@ -543,7 +543,6 @@ __all__ = [
     "LocalTraceAdapter",
     "TelemetryPort",
     "UnknownModelError",
-    "_build_filter",
     "build_demo_throughput",
     "check_gcp_project_access",
     "fetch_inventory_telemetry",

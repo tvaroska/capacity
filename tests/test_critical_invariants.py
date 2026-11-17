@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import math
 import random
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from google.cloud import monitoring_v3
@@ -37,41 +37,28 @@ from capacity.finops import (
     schedule_residual_capacity,
 )
 from capacity.models import DeadlineJobSpec, OptimizeRequest
-from capacity.telemetry_parsers import _normalize_epoch_seconds
 from capacity.telemetry_parsers import parse_inference_server_telemetry as parse
+from tests.conftest import FakeMonitoringClient
 
 GSU_TPM = 120_900
 PROMPT = 'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"}'
 
 
-class _NoSeries:
-    def __aiter__(self) -> _NoSeries:
-        return self
-
-    async def __anext__(self) -> None:
-        raise StopAsyncIteration
-
-
 @pytest.mark.asyncio
-async def test_every_live_query_sums_series_server_side() -> None:
+async def test_every_live_query_sums_series_server_side(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     """CRITICAL #3: multi-region series are summed per minute before any percentile."""
-    requests: list[dict[str, Any]] = []
+    fake = patch_monitoring_client(())
+    await fetch_throughput("demo-project", 1, models=["gemini-3.8-flash", "claude-sonnet-4-6"])
+    await fetch_throughput("demo-project", 1, mode="self-hosted")
 
-    class _Client:
-        async def list_time_series(self, request: dict[str, Any]) -> _NoSeries:
-            requests.append(request)
-            return _NoSeries()
-
-    with patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_Client()):
-        await fetch_throughput("demo-project", 1, models=["gemini-3.8-flash", "claude-sonnet-4-6"])
-        await fetch_throughput("demo-project", 1, mode="self-hosted")
-
-    for request in requests:
+    for request in fake.requests:
         agg = request["aggregation"]
         assert agg.cross_series_reducer == monitoring_v3.Aggregation.Reducer.REDUCE_SUM
         assert agg.per_series_aligner == monitoring_v3.Aggregation.Aligner.ALIGN_SUM
         assert agg.alignment_period.seconds == 60
-    assert [list(request["aggregation"].group_by_fields) for request in requests] == [
+    assert [list(request["aggregation"].group_by_fields) for request in fake.requests] == [
         GROUP_BY_FIELDS,
         GROUP_BY_FIELDS,
         PARTNER_GROUP_BY_FIELDS,
@@ -409,6 +396,15 @@ def test_prometheus_counter_handling(guard: str, scrape: str, tpm: int) -> None:
 
 
 def test_epoch_is_read_in_seconds_milliseconds_or_nanoseconds() -> None:
-    assert _normalize_epoch_seconds(1_762_600_000) == 1_762_600_000
-    assert _normalize_epoch_seconds(1_762_600_000_000) == 1_762_600_000
-    assert _normalize_epoch_seconds(1_762_600_000_000_000_000) == 1_762_600_000
+    by_unit = [
+        parse(
+            f'{{"timestamp": {stamp}, "prompt_tokens": 60000}}\n'
+            f'{{"timestamp": {stamp + step}, "prompt_tokens": 120000}}'
+        ).tpm_series
+        for stamp, step in (
+            (1_762_600_000, 60),
+            (1_762_600_000_000, 60_000),
+            (1_762_600_000_000_000_000, 60_000_000_000),
+        )
+    ]
+    assert by_unit == [[60_000.0, 120_000.0]] * 3

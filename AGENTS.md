@@ -1,6 +1,6 @@
 # AGENTS.md — Capacity (`<HOME>/projects/capacity`)
 
-Canonical operating spine for **Capacity** (`capacity`, `v0.3.0`) — an enterprise AI capacity planner, sub-second micro-burst & model-tier prefix-cache simulator, multi-gateway configuration generator (`LiteLLM`, `Envoy AI Gateway`, `GKE Inference Gateway epp`), Newsvendor hybrid commitment optimizer, 3-Tier Residual Capacity Scheduler, and FinOps FOCUS 1.2 Two-Pool Chargeback Showcase across **Managed Gemini Platform GSUs** and **Self-Hosted GPU/TPU Replicas**.
+Canonical operating spine for **Capacity** (`capacity`, `v0.3.1`) — an enterprise AI capacity planner, sub-second micro-burst & model-tier prefix-cache simulator, multi-gateway configuration generator (`LiteLLM`, `Envoy AI Gateway`, `GKE Inference Gateway epp`), Newsvendor hybrid commitment optimizer, 3-Tier Residual Capacity Scheduler, and FinOps FOCUS 1.2 Two-Pool Chargeback Showcase across **Managed Gemini Platform GSUs** and **Self-Hosted GPU/TPU Replicas**.
 
 Read [`CRITICAL.md`](CRITICAL.md) for hard invariants, [`DECISIONS.md`](DECISIONS.md) for Architectural Decision Records (`ADR-001`–`ADR-008`), [`.stitch/DESIGN.md`](.stitch/DESIGN.md) for the GM3 Light Tier-2 Showcase visual contract, and [`docs/roadmap.md`](docs/roadmap.md) for the product roadmap.
 
@@ -27,22 +27,16 @@ Read [`CRITICAL.md`](CRITICAL.md) for hard invariants, [`DECISIONS.md`](DECISION
 
 ## 2. Canonical Verification Gate
 
-Always run the canonical prefix-matchable test runner from the parent workspace:
+Always run the canonical prefix-matchable test runner from the parent workspace (which delegates to [`scripts/gate.sh`](scripts/gate.sh)):
 
 ```bash
 <HOME>/projects/bin/proj-test capacity
 ```
 
-Or run `ast-grep`, `ruff`, `mypy`, `pytest`, and the offline `Level 3` receipt verifier directly inside the repository:
+Or run the exact same gate script directly inside the repository (mirrored by [`cloudbuild.yaml`](cloudbuild.yaml)):
 
 ```bash
-uv lock --check
-uv run --no-sync ast-grep scan --rule specs/ast.rules.yaml
-uv run --no-sync ruff check --no-cache capacity tests benchmarks
-uv run --no-sync ruff format --check --no-cache capacity tests benchmarks
-uv run --no-sync mypy capacity tests benchmarks
-uv run --no-sync pytest -v
-uv run --no-sync python -m benchmarks.run_l3_benchmark --offline
+./scripts/gate.sh
 ```
 
-> **Gotchas:** Use `uv lock --check` (never `--offline`, which fails split Python-marker resolution). Always run `ruff format` **before** `uv run --no-sync python -m benchmarks.run_l3_benchmark --live` so formatting does not change the SHA-256 of the 6 hashed engine modules (`burst.py`, `capacity.py`, `finops.py`, `forecasting.py`, `gateway.py`, `self_hosted.py`), then copy the new `receipt_sha256` prefix and any changed Track B figure into `README.md`. Run `git add -N` on new files before `proj-test capacity` so `tests/test_repo_hygiene.py` (`git ls-files`) scans them prior to commit.
+> **Gotchas:** `scripts/gate.sh` runs `uv lock --check --offline --no-config`, `ast-grep`, `ruff check`, `ruff format --check`, `mypy`, and `pytest` (including the deterministic Track-A receipt replay) once each. Comment or formatting edits no longer invalidate [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json); when cutting a release after intentional physics/benchmark changes, run `uv run --no-sync python -m benchmarks.run_l3_benchmark --live`, verify with `--offline --check-source-hash`, and refresh the `receipt_sha256` prefix and any changed figures in [`README.md`](README.md). Note that [`tests/test_repo_hygiene.py`](tests/test_repo_hygiene.py) walks the repository directory tree directly (`rglob`), so untracked non-hidden files are scanned automatically before `git add`.

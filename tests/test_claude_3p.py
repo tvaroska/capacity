@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
-import types
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -36,59 +32,15 @@ from capacity.model_families import (
     resolve_model_family,
 )
 from capacity.telemetry_parsers import parse_inference_server_telemetry
+from tests.conftest import (
+    FakeAsyncCache,
+    FakeMonitoringClient,
+    load_generated_burndown_logger,
+    make_time_series,
+)
 
 runner = CliRunner()
 client = TestClient(api_app)
-
-
-class _AsyncItems:
-    def __init__(self, items: list[SimpleNamespace]) -> None:
-        self._items = items
-        self._i = 0
-
-    def __aiter__(self) -> _AsyncItems:
-        return self
-
-    async def __anext__(self) -> SimpleNamespace:
-        if self._i >= len(self._items):
-            raise StopAsyncIteration
-        val = self._items[self._i]
-        self._i += 1
-        return val
-
-
-def _partner_ts(
-    model: str,
-    loc: str,
-    req_type: str,
-    token_type: str,
-    pts: list[tuple[datetime, int]],
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        resource=SimpleNamespace(labels={"model_id": model, "location": loc}),
-        metric=SimpleNamespace(labels={"request_type": req_type, "type": token_type}),
-        points=[
-            SimpleNamespace(
-                interval=SimpleNamespace(end_time=dt),
-                value=SimpleNamespace(int64_value=v, double_value=0.0),
-            )
-            for dt, v in pts
-        ],
-    )
-
-
-def _pt_ts(model: str, loc: str, req_type: str, pts: list[tuple[datetime, int]]) -> SimpleNamespace:
-    return SimpleNamespace(
-        resource=SimpleNamespace(labels={"model_id": model, "location": loc}),
-        metric=SimpleNamespace(labels={"request_type": req_type}),
-        points=[
-            SimpleNamespace(
-                interval=SimpleNamespace(end_time=dt),
-                value=SimpleNamespace(int64_value=v, double_value=0.0),
-            )
-            for dt, v in pts
-        ],
-    )
 
 
 def test_claude_gsu_capacities_and_unknown_guard() -> None:
@@ -206,56 +158,66 @@ def test_claude_prefix_cache_tiers_and_explicit_cache_control() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models() -> None:
+async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     t0 = datetime(2026, 11, 12, 14, 0, tzinfo=UTC)
-    captured_filters: list[str] = []
-
     claude_series = [
-        _partner_ts("claude-sonnet-4-6", "us-east5", "dedicated", "input", [(t0, 10_000)]),
-        _partner_ts("claude-sonnet-4-6", "us-east5", "dedicated", "cache_read", [(t0, 5_000)]),
-        _partner_ts("claude-sonnet-4-6", "us-east5", "dedicated", "cache_write_5m", [(t0, 4_000)]),
-        _partner_ts("claude-sonnet-4-6", "us-east5", "dedicated", "cache_write_1h", [(t0, 1_000)]),
-        _partner_ts("claude-sonnet-4-6", "us-east5", "dedicated", "output", [(t0, 2_000)]),
+        make_time_series(
+            "claude-sonnet-4-6", "us-east5", "dedicated", [(t0, 10_000)], metric_type="input"
+        ),
+        make_time_series(
+            "claude-sonnet-4-6", "us-east5", "dedicated", [(t0, 5_000)], metric_type="cache_read"
+        ),
+        make_time_series(
+            "claude-sonnet-4-6",
+            "us-east5",
+            "dedicated",
+            [(t0, 4_000)],
+            metric_type="cache_write_5m",
+        ),
+        make_time_series(
+            "claude-sonnet-4-6",
+            "us-east5",
+            "dedicated",
+            [(t0, 1_000)],
+            metric_type="cache_write_1h",
+        ),
+        make_time_series(
+            "claude-sonnet-4-6", "us-east5", "dedicated", [(t0, 2_000)], metric_type="output"
+        ),
     ]
     gemini_series = [
-        _pt_ts("gemini-3.8-flash", "us-central1", "dedicated", [(t0, 120_900)]),
+        make_time_series("gemini-3.8-flash", "us-central1", "dedicated", [(t0, 120_900)]),
     ]
 
-    class _FakeMonitoringClient:
-        async def list_time_series(self, request: dict[str, Any]) -> _AsyncItems:
-            flt = request["filter"]
-            captured_filters.append(flt)
-            if PARTNER_TOKEN_METRIC in flt:
-                return _AsyncItems(claude_series)
-            if PT_METRIC in flt:
-                return _AsyncItems(gemini_series if '"dedicated"' in flt else [])
-            return _AsyncItems([])
+    def _route(request: dict[str, Any]) -> list[SimpleNamespace]:
+        flt = request["filter"]
+        if PARTNER_TOKEN_METRIC in flt:
+            return claude_series
+        if PT_METRIC in flt and '"dedicated"' in flt:
+            return gemini_series
+        return []
 
-    with patch(
-        "capacity.core.monitoring_v3.MetricServiceAsyncClient",
-        return_value=_FakeMonitoringClient(),
-    ):
-        sparse_claude, _ = await fetch_throughput("demo-proj", days=1, models=["claude-sonnet-4-6"])
+    fake = patch_monitoring_client(_route)
+    sparse_claude, _ = await fetch_throughput("demo-proj", days=1, models=["claude-sonnet-4-6"])
 
     # Expected: 10000*1.0 + 5000*0.1 + 4000*1.25 + 1000*2.0 + 2000*5.0 = 27,500
     minute = t0 - timedelta(minutes=1)
     assert sparse_claude == {"claude-sonnet-4-6": {minute: 27_500}}
-    assert len(captured_filters) == 1
-    assert PARTNER_TOKEN_METRIC in captured_filters[0]
+    assert len(fake.requests) == 1
+    assert PARTNER_TOKEN_METRIC in fake.requests[0]["filter"]
 
-    captured_filters.clear()
-    with patch(
-        "capacity.core.monitoring_v3.MetricServiceAsyncClient",
-        return_value=_FakeMonitoringClient(),
-    ):
-        sparse_mixed, _ = await fetch_throughput(
-            "demo-proj", days=1, models=["gemini-3.8-flash", "claude-sonnet-4-6"]
-        )
+    fake.requests.clear()
+    sparse_mixed, _ = await fetch_throughput(
+        "demo-proj", days=1, models=["gemini-3.8-flash", "claude-sonnet-4-6"]
+    )
 
     assert sparse_mixed["gemini-3.8-flash"][minute] == 120_900
     assert sparse_mixed["claude-sonnet-4-6"][minute] == 27_500
-    assert any(PT_METRIC in f for f in captured_filters)
-    assert any(PARTNER_TOKEN_METRIC in f for f in captured_filters)
+    filters = [r["filter"] for r in fake.requests]
+    assert any(PT_METRIC in f for f in filters)
+    assert any(PARTNER_TOKEN_METRIC in f for f in filters)
 
 
 def test_parse_anthropic_messages_jsonl_additive_usage_and_cache_writes() -> None:
@@ -291,7 +253,7 @@ def test_parse_anthropic_messages_jsonl_additive_usage_and_cache_writes() -> Non
 
 
 @pytest.mark.asyncio
-async def test_claude_gateway_bundle_yaml_cel_and_executable_callback(tmp_path: Path) -> None:
+async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
     bundle = generate_gateway_bundle(
         model="claude-sonnet-4-6",
         project_id="hub-genai-prod",
@@ -326,46 +288,9 @@ async def test_claude_gateway_bundle_yaml_cel_and_executable_callback(tmp_path: 
     assert "5.0" in cel_entry["cel"]
     assert "200000" not in cel_entry["cel"]
 
-    # Compile and execute generated callback against Anthropic usage payload
-    fake_litellm = types.ModuleType("litellm")
-    fake_litellm_integrations = types.ModuleType("litellm.integrations")
-    fake_custom_logger = types.ModuleType("litellm.integrations.custom_logger")
-
-    class _BaseCustomLogger:
-        pass
-
-    fake_custom_logger.CustomLogger = _BaseCustomLogger  # type: ignore[attr-defined]
-
-    cb_file = tmp_path / "litellm_burndown_callback.py"
-    cb_file.write_text(bundle.litellm_burndown_callback_py, encoding="utf-8")
-    mod_spec = importlib.util.spec_from_file_location("claude_cb_mod", cb_file)
-    assert mod_spec is not None and mod_spec.loader is not None
-    cb_mod = importlib.util.module_from_spec(mod_spec)
-
-    with patch.dict(
-        sys.modules,
-        {
-            "litellm": fake_litellm,
-            "litellm.integrations": fake_litellm_integrations,
-            "litellm.integrations.custom_logger": fake_custom_logger,
-        },
-    ):
-        mod_spec.loader.exec_module(cb_mod)
-
-    cb = cb_mod.BurndownAndTrafficTypeLogger(time_fn=lambda: 1_763_000_000.0)
-
-    class _MemCache:
-        def __init__(self) -> None:
-            self.store: dict[str, float] = {}
-
-        async def async_get_cache(self, key: str) -> float:
-            return self.store.get(key, 0.0)
-
-        async def async_increment(self, key: str, value: float = 1.0, ttl: int = 120) -> float:
-            self.store[key] = self.store.get(key, 0.0) + value
-            return self.store[key]
-
-    cache = _MemCache()
+    logger_cls = load_generated_burndown_logger(bundle.litellm_burndown_callback_py)
+    cb = logger_cls(time_fn=lambda: 1_763_000_000.0)
+    cache = FakeAsyncCache()
     api_key = SimpleNamespace(team_id="bu-a", max_budget_tpm=5_000.0)
     resp = SimpleNamespace(
         usage={

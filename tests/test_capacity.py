@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -29,7 +26,6 @@ from capacity.capacity import (
 from capacity.cli import app as cli_app
 from capacity.core import (
     GROUP_BY_FIELDS,
-    _build_filter,
     build_demo_throughput,
     fetch_throughput,
     holts_linear_trend,
@@ -53,48 +49,10 @@ from capacity.self_hosted import (
     parse_inference_server_telemetry,
     size_disaggregated_prefill_decode,
 )
+from tests.conftest import FakeMonitoringClient, make_time_series
 
 runner = CliRunner()
 client = TestClient(fastapi_app)
-
-
-class _AsyncSeriesIterator:
-    def __init__(self, items: list[SimpleNamespace]) -> None:
-        self._items = list(items)
-        self._idx = 0
-
-    def __aiter__(self) -> _AsyncSeriesIterator:
-        return self
-
-    async def __anext__(self) -> SimpleNamespace:
-        if self._idx >= len(self._items):
-            raise StopAsyncIteration
-        item = self._items[self._idx]
-        self._idx += 1
-        return item
-
-
-def _make_fake_ts(
-    model_id: str,
-    location: str,
-    request_type: str,
-    points: list[tuple[datetime, int]],
-    endpoint_id: str | None = None,
-) -> SimpleNamespace:
-    labels = {"model_id": model_id, "location": location}
-    if endpoint_id is not None:
-        labels["endpoint_id"] = endpoint_id
-    return SimpleNamespace(
-        resource=SimpleNamespace(labels=labels),
-        metric=SimpleNamespace(labels={"request_type": request_type}),
-        points=[
-            SimpleNamespace(
-                interval=SimpleNamespace(end_time=dt),
-                value=SimpleNamespace(int64_value=val, double_value=0.0),
-            )
-            for dt, val in points
-        ],
-    )
 
 
 def test_normalize_model_id_strips_suffixes_and_prefixes() -> None:
@@ -175,39 +133,33 @@ def test_holts_linear_trend_forecasting() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_throughput_regional_bucketing_and_folder_map() -> None:
+async def test_fetch_throughput_regional_bucketing_and_folder_map(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     t0 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
     fake_dedicated = [
-        _make_fake_ts("gemini-3.8-flash", "us-central1", "dedicated", [(t0, 100_000)]),
-        _make_fake_ts("gemini-3.8-flash", "europe-west4", "dedicated", [(t0, 50_000)]),
+        make_time_series("gemini-3.8-flash", "us-central1", "dedicated", [(t0, 100_000)]),
+        make_time_series("gemini-3.8-flash", "europe-west4", "dedicated", [(t0, 50_000)]),
     ]
     fake_shared = [
-        _make_fake_ts("gemini-3.8-flash", "us-central1", "shared", [(t0, 20_900)]),
+        make_time_series("gemini-3.8-flash", "us-central1", "shared", [(t0, 20_900)]),
     ]
-
-    captured_requests: list[dict[str, Any]] = []
-
-    class _FakeClient:
-        async def list_time_series(self, request: dict[str, Any]) -> _AsyncSeriesIterator:
-            captured_requests.append(request)
-            if '"dedicated"' in request["filter"]:
-                return _AsyncSeriesIterator(fake_dedicated)
-            return _AsyncSeriesIterator(fake_shared)
-
-    with patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_FakeClient()):
-        sparse_reg, total_mins = await fetch_throughput(
-            ["demo-project"],
-            days=1,
-            by_region=True,
-            folder_map={"demo-project": "retail-banking"},
-        )
+    fake = patch_monitoring_client(
+        lambda req: fake_dedicated if '"dedicated"' in req["filter"] else fake_shared
+    )
+    sparse_reg, total_mins = await fetch_throughput(
+        ["demo-project"],
+        days=1,
+        by_region=True,
+        folder_map={"demo-project": "retail-banking"},
+    )
 
     assert total_mins == 1440
     minute = t0 - timedelta(minutes=1)
     assert sparse_reg["retail-banking/gemini-3.8-flash@us-central1"][minute] == 120_900
     assert sparse_reg["retail-banking/gemini-3.8-flash@europe-west4"][minute] == 50_000
-    assert len(captured_requests) == 2
-    agg = captured_requests[0]["aggregation"]
+    assert len(fake.requests) == 2
+    agg = fake.requests[0]["aggregation"]
     assert list(agg.group_by_fields) == GROUP_BY_FIELDS
 
     resp = build_response(
@@ -226,10 +178,12 @@ async def test_fetch_throughput_regional_bucketing_and_folder_map() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_throughput_self_hosted_mode() -> None:
+async def test_fetch_throughput_self_hosted_mode(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     t0 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
     fake_preds = [
-        _make_fake_ts(
+        make_time_series(
             "llama-3.3-70b-fp8",
             "us-central1",
             "prediction",
@@ -237,19 +191,14 @@ async def test_fetch_throughput_self_hosted_mode() -> None:
             endpoint_id="llama-3.3-70b-fp8",
         )
     ]
-
-    class _FakeClient:
-        async def list_time_series(self, request: dict[str, Any]) -> _AsyncSeriesIterator:
-            return _AsyncSeriesIterator(fake_preds)
-
-    with patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_FakeClient()):
-        sparse, total_mins = await fetch_throughput(
-            "demo-project",
-            days=1,
-            by_region=True,
-            mode="self-hosted",
-            tokens_per_prediction=2_000,
-        )
+    patch_monitoring_client(fake_preds)
+    sparse, total_mins = await fetch_throughput(
+        "demo-project",
+        days=1,
+        by_region=True,
+        mode="self-hosted",
+        tokens_per_prediction=2_000,
+    )
 
     assert total_mins == 1440
     assert sparse["llama-3.3-70b-fp8@us-central1"][t0 - timedelta(minutes=1)] == 400_000
@@ -726,30 +675,18 @@ def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) ->
     assert "admitted_edf_pt" in res_sched.stdout
 
 
-def test_percentile_demo_and_filter_helpers() -> None:
+@pytest.mark.asyncio
+async def test_percentile_demo_and_region_filter_query(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     assert percentile([], 50) == 0
     assert percentile([10, 20, 30, 40, 50], 50) == 30
-    flt = _build_filter("my.metric", ["us-central1", "us-east5"], extra='a = "b"')
-    assert 'resource.labels.location = one_of("us-central1", "us-east5")' in flt
+    fake = patch_monitoring_client(())
+    await fetch_throughput("demo-project", days=1, regions=["us-central1", "us-east5"])
+    assert (
+        'resource.labels.location = one_of("us-central1", "us-east5")'
+        in (fake.requests[0]["filter"])
+    )
     demo_gsu, mins = build_demo_throughput(days=7, by_region=True, mode="gsu")
     assert mins == 10080
     assert "gemini-3.8-flash@us-central1" in demo_gsu
-
-
-def test_adr005_repository_hygiene() -> None:
-    repo_root = Path(__file__).resolve().parents[1]
-    assert not (repo_root / ".github" / "workflows").exists()
-    assert (repo_root / "cloudbuild.yaml").exists()
-
-    forbidden_prefix = "/" + "usr/local/" + "google"
-    forbidden_pattern = re.compile(
-        rf"({re.escape(forbidden_prefix)}|\bgo/[a-z0-9_-]+|\bb/\d{{6,}})",
-        re.IGNORECASE,
-    )
-    skip_dirs = {".git", ".venv", "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache"}
-    for path in repo_root.rglob("*"):
-        if not path.is_file() or skip_dirs.intersection(path.parts):
-            continue
-        if path.suffix in (".py", ".md", ".yaml", ".yml", ".toml"):
-            content = path.read_text(encoding="utf-8", errors="ignore")
-            assert not forbidden_pattern.search(content), f"ADR-005 violation in {path}"

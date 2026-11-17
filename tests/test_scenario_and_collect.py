@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -25,6 +27,7 @@ from capacity.scenario import (
     load_showcase_scenario,
 )
 from capacity.telemetry_parsers import parse_inference_server_telemetry
+from tests.conftest import FakeMonitoringClient, make_time_series
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 runner = CliRunner()
@@ -208,33 +211,25 @@ def test_scenario_rejects_unknown_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_check_gcp_project_access_distinguishes_disabled_api_vs_iam() -> None:
-    class _EmptyPager:
-        def __aiter__(self) -> _EmptyPager:
-            return self
-
-        async def __anext__(self) -> object:
-            raise StopAsyncIteration
-
+async def test_check_gcp_project_access_distinguishes_disabled_api_vs_iam(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     class _TypedPermissionDenied(PermissionDenied):
         def __init__(self, msg: str) -> None:
             Exception.__init__(self, msg)
             self.message = msg
 
-    class _FakeClient:
-        async def list_metric_descriptors(self, request: dict[str, Any]) -> _EmptyPager:
-            name = request["name"]
-            if name.endswith("proj-ok"):
-                return _EmptyPager()
-            if name.endswith("proj-disabled"):
-                raise _TypedPermissionDenied("Cloud Monitoring API has not been used in project")
-            raise _TypedPermissionDenied("Permission monitoring.metricDescriptors.list denied")
+    def _descriptors(request: dict[str, Any]) -> list[object]:
+        name = request["name"]
+        if name.endswith("proj-ok"):
+            return []
+        if name.endswith("proj-disabled"):
+            raise _TypedPermissionDenied("Cloud Monitoring API has not been used in project")
+        raise _TypedPermissionDenied("Permission monitoring.metricDescriptors.list denied")
 
     fake_creds = SimpleNamespace(service_account_email="auditor@example.iam.gserviceaccount.com")
-    with (
-        patch("google.auth.default", return_value=(fake_creds, "proj-ok")),
-        patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_FakeClient()),
-    ):
+    patch_monitoring_client(descriptors_handler=_descriptors)
+    with patch("google.auth.default", return_value=(fake_creds, "proj-ok")):
         rep = await check_gcp_project_access(["proj-ok", "proj-disabled", "proj-noiam"])
 
     assert rep["authenticated"] is True
@@ -246,39 +241,22 @@ async def test_check_gcp_project_access_distinguishes_disabled_api_vs_iam() -> N
 
 
 @pytest.mark.asyncio
-async def test_fetch_inventory_telemetry_converts_dedicated_limit_and_429s() -> None:
-    class _Pager:
-        def __init__(self, items: list[Any]) -> None:
-            self._it = iter(items)
-
-        def __aiter__(self) -> _Pager:
-            return self
-
-        async def __anext__(self) -> Any:
-            try:
-                return next(self._it)
-            except StopIteration:
-                raise StopAsyncIteration from None
-
-    limit_ts = SimpleNamespace(
-        resource=SimpleNamespace(labels={"model_id": "gemini-3.8-flash-001", "location": "global"}),
-        metric=SimpleNamespace(labels={}),
-        points=[SimpleNamespace(value=SimpleNamespace(int64_value=0, double_value=40_300.0))],
+async def test_fetch_inventory_telemetry_converts_dedicated_limit_and_429s(
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
+    t0 = datetime(2026, 11, 10, 12, 0, tzinfo=UTC)
+    limit_ts = make_time_series("gemini-3.8-flash-001", "global", "dedicated", [(t0, 0, 40_300.0)])
+    inv_ts = make_time_series(
+        "gemini-3.8-flash-001",
+        "global",
+        "shared",
+        [(t0, 250)],
+        response_code="429",
     )
-    inv_ts = SimpleNamespace(
-        resource=SimpleNamespace(labels={"model_id": "gemini-3.8-flash-001", "location": "global"}),
-        metric=SimpleNamespace(labels={"response_code": "429", "request_type": "shared"}),
-        points=[SimpleNamespace(value=SimpleNamespace(int64_value=250, double_value=0.0))],
+    patch_monitoring_client(
+        lambda req: [limit_ts] if "dedicated_token_limit" in req["filter"] else [inv_ts]
     )
-
-    class _Client:
-        async def list_time_series(self, request: dict[str, Any]) -> _Pager:
-            if "dedicated_token_limit" in request["filter"]:
-                return _Pager([limit_ts])
-            return _Pager([inv_ts])
-
-    with patch("capacity.core.monitoring_v3.MetricServiceAsyncClient", return_value=_Client()):
-        inv = await fetch_inventory_telemetry("demo-project", days=3, by_region=True)
+    inv = await fetch_inventory_telemetry("demo-project", days=3, by_region=True)
 
     assert inv["gemini-3.8-flash@global"]["contracted_gsus"] == 20
     assert inv["gemini-3.8-flash@global"]["http_429_count"] == 250

@@ -1,58 +1,66 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Every module in capacity/ is pure sizing/FinOps maths unless it is one of the adapters ignored
-# below, so a new module is covered without editing this file. tests/test_isolation_guard.py
-# holds the same rule in Python; tests/test_repo_hygiene.py runs every example listed here.
+# Every module under capacity/ (including sub-folders) is pure sizing/FinOps maths unless it is a
+# listed driving/cloud adapter below. tests/test_isolation_guard.py holds the twin AST classifier
+# in Python, and tests/test_repo_hygiene.py executes every invalid/valid example listed here.
 
 id: library-never-imports-examples
 language: Python
 severity: error
-message: "Hexagonal violation: capacity/ engine must never import examples/ or benchmarks/."
+message: "Hexagonal violation: capacity/ modules must never import examples/ or benchmarks/."
 files:
   - "capacity/**/*.py"
 metadata:
-  test_path: "capacity/probe.py"
+  test_path: "capacity/engine/probe.py"
   invalid_examples:
     - "import examples"
+    - "import math, examples"
     - "from examples.demo_profile import load"
     - "import benchmarks"
+    - "import os, benchmarks.trace_backtest"
+    - "from benchmarks import trace_backtest"
   valid_examples:
     - "from capacity.models import ModelRecommendation"
+    - "import examples_helper"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+(examples|benchmarks)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(examples|benchmarks)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+(examples|benchmarks)(\\b|\\.)"
+      regex: "(?s)^from\\s+(examples|benchmarks)(\\b|\\.)"
 ---
 id: core-math-never-imports-driving-ports
 language: Python
 severity: error
-message: "Hexagonal violation: only api.py, cli.py and cli_formatters.py may import FastAPI, Typer or Uvicorn."
+message: "Hexagonal violation: only api.py and CLI modules may import FastAPI, Typer or Uvicorn."
 files:
   - "capacity/**/*.py"
 ignores:
   - "capacity/api.py"
   - "capacity/cli.py"
   - "capacity/cli_formatters.py"
+  - "capacity/cli/**"
 metadata:
-  test_path: "capacity/finops.py"
+  test_path: "capacity/engine/finops.py"
   invalid_examples:
     - "import fastapi"
+    - "import math, fastapi"
     - "from typer import Typer"
     - "import uvicorn"
+    - "from fastapi.responses import JSONResponse"
   valid_examples:
     - "from capacity.models import FocusChargebackReport"
+    - "import fastapi_like_helper"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|typer|uvicorn)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
+      regex: "(?s)^from\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
 ---
 id: domain-math-never-imports-gcp-adapter
 language: Python
 severity: error
-message: "Hexagonal violation: pure modules never import google.cloud or the capacity adapters (core, api, cli)."
+message: "Hexagonal violation: pure modules never import Google Cloud SDKs, driving/cloud adapters, or dynamic imports."
 files:
   - "capacity/**/*.py"
 ignores:
@@ -60,32 +68,50 @@ ignores:
   - "capacity/cli.py"
   - "capacity/cli_formatters.py"
   - "capacity/core.py"
+  - "capacity/cli/**"
+  - "capacity/telemetry/cloud_monitoring.py"
 metadata:
-  test_path: "capacity/capacity.py"
+  test_path: "capacity/engine/probe.py"
   invalid_examples:
     - "from google.cloud import monitoring_v3"
     - "from google import cloud"
+    - "from google.auth.exceptions import DefaultCredentialsError"
+    - "from google.api_core.exceptions import PermissionDenied"
     - "from capacity.core import fetch_throughput"
     - "import capacity.core"
+    - "import math, capacity.core"
     - "from capacity import core"
     - "from capacity import finops, core"
     - "from . import core"
+    - "from .. import core"
+    - "from ... import core"
+    - "from .. import (\n    finops,\n    core,\n)"
     - "from .core import fetch_throughput"
+    - "from ..core import fetch_throughput"
+    - "from ...core import fetch_throughput"
     - "from capacity import api"
+    - "__import__('capacity.core')"
+    - "importlib.import_module('capacity.core')"
   valid_examples:
     - "from capacity.forecasting import holts_linear_trend"
     - "from capacity import finops"
+    - "from . import burst"
+    - "from .. import finops"
     - "from capacity.coreutils import helper"
+    - "from ..coreutils import helper"
 rule:
   any:
     - kind: import_statement
-      regex: "^import\\s+(google\\.cloud|capacity\\.(core|api|cli|cli_formatters))(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_formatters))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "^from\\s+(google\\.cloud|(capacity)?\\.(core|api|cli|cli_formatters))(\\b|\\.)"
+      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_formatters))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(capacity|\\.)\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_formatters)\\b"
+      regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_formatters)\\b"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?cloud\\b"
+      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?(cloud|auth|api_core)\\b"
+    - pattern: __import__($$$)
+    - pattern: importlib.import_module($$$)
+    - pattern: import_module($$$)
 ---
 id: no-subprocess-shell-true
 language: Python

@@ -29,3 +29,29 @@ Implemented milestones and completed passes moved from [`../roadmap.md`](../road
 - [x] **Pass G — Parameterized Scenario Contract (`--scenario-file`), Dual Collector (`capacity collect`), `gemini-4-carbon` Lifecycle Rules & Bundled Agent Skill (`v0.3.0`):**
   - [x] Added [`capacity/scenario.py`](../../capacity/scenario.py) (`ShowcaseScenario`, `load_showcase_scenario`, `audit_scenario_public_safety` `--strict-public-check`, `load_orders_overlay`, and `compile_scenario_from_telemetry`), [`examples/scenarios/multi_tenant_enterprise.json`](../../examples/scenarios/multi_tenant_enterprise.json), [`examples/orders_overlay.yaml`](../../examples/orders_overlay.yaml), [`examples/bigquery_inference_request_export.sql`](../../examples/bigquery_inference_request_export.sql), and [`skills/capacity/SKILL.md`](../../skills/capacity/SKILL.md).
   - [x] Registered `gemini-4-carbon` (`500` TPS/GSU, `2,048` token-boundary floor, Short-Term GA guidance), enforced `50`-GSU (`10s -> 1s`) zero-spillover step continuity in [`capacity/burst.py`](../../capacity/burst.py), added dynamic `Forecast+{hours}h` table headers in [`capacity/cli_formatters.py`](../../capacity/cli_formatters.py), extended [`capacity/telemetry_parsers.py`](../../capacity/telemetry_parsers.py) for `Observability 2.0` (`aiplatform.googleapis.com/inference_request`) JSONL logs + sub-second burst peaks, and added 3-state `--check-auth` + `dedicated_token_limit`/`model_invocation_count` inventory collection in [`capacity/core.py`](../../capacity/core.py).
+
+## v0.3.1 (Milestone 1 - P0)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-17.*
+
+- [x] **P0.1 The benchmark is checked on behaviour, not on file bytes**
+  - Today a test compares a hash of six engine files, so a comment edit forces a live benchmark run and hand edits to the README.
+  - Keep the replay of the committed trace as the check on every run. Move the hash comparison to a release-time check that is off by default. Record the commit id in the receipt. Add tests that a damaged receipt and a drifted replay are rejected. Amend `ADR-008`.
+  - Files: `benchmarks/run_l3_benchmark.py`, `tests/test_l3_receipt.py`, `DECISIONS.md`, `AGENTS.md`.
+  - Done when: a comment edit in `capacity/burst.py` leaves the suite green, and a changed burndown weight still fails it.
+- [x] **P0.2 The architecture guards follow a move into sub-folders**
+  - Both guards assume every module sits directly in `capacity/`. After a move, moved modules are no longer scanned.
+  - Scan sub-folders. Name the adapter files once, by folder where possible. Resolve relative imports from the file's real package. Assert that every file is classified exactly once. Add the new import spellings to the guard's own examples.
+  - Files: `tests/test_isolation_guard.py`, `specs/ast.rules.yaml`.
+  - Done when: a probe module in a sub-folder that imports the Cloud Monitoring adapter fails both guards.
+- [x] **P0.3 Shared test fixtures**
+  - Add `tests/conftest.py` with one fake Cloud Monitoring client that owns the patch target (repeated in 9 places today), one time-series builder, one cache fake and one loader for the generated gateway callback (it is loaded three different ways today).
+  - Remove the second leak scanner in `tests/test_capacity.py`. Test through public functions where a private name is imported today, and take the private name out of `__all__` in `capacity/core.py`.
+  - Done when: the patch target string appears once in `tests/`.
+- [x] **P0.4 Tests where the refactor will cut**
+  - Cover what has no test today: Cloud Monitoring errors (missing credentials, permission denied, API error) through to exit code 1 on the command line and HTTP 502 on the API; `--folder-map` parsing; trace files shaped as a mapping; the `--format json` branches; scenario compilation from live series; rejection of NaN and infinity; `recommend --html-out`; the `collect` paths with `--check-auth` and with a live project; the lifecycle class of a model id.
+  - Files: `tests/`, exercising `capacity/core.py`, `capacity/cli.py`, `capacity/cli_formatters.py` and `capacity/scenario.py`.
+- [x] **P0.5 One definition of the gate**
+  - Put the gate in one script in the repository and call it from `AGENTS.md`, the workspace runner and `cloudbuild.yaml`. Run the `ast-grep` scan, the format check and the benchmark replay once, not twice.
+  - Correct the two outdated notes in `AGENTS.md`: the lock check does run offline, and the hygiene test walks the directory.
+  - Done when: the three places run the same script.

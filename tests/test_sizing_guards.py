@@ -15,6 +15,7 @@ from capacity.cli import app as cli_app
 from capacity.core import UnknownModelError, build_demo_throughput
 from capacity.gateway import generate_gateway_bundle
 from capacity.self_hosted import resolve_self_hosted_profile
+from tests.conftest import load_generated_burndown_logger
 
 client = TestClient(api_app)
 runner = CliRunner()
@@ -116,7 +117,9 @@ def test_generated_gateway_configs_parse_and_compile() -> None:
     assert len(list(yaml.safe_load_all(bundle.litellm_config_yaml))) == 1
     assert len(list(yaml.safe_load_all(bundle.envoy_ai_gateway_yaml))) == 2
     assert len(list(yaml.safe_load_all(bundle.gke_epp_inference_pool_yaml))) == 3
-    compile(bundle.litellm_burndown_callback_py, "litellm_burndown_callback.py", "exec")
+    assert load_generated_burndown_logger(bundle.litellm_burndown_callback_py).__name__ == (
+        "BurndownAndTrafficTypeLogger"
+    )
 
 
 @pytest.mark.parametrize(

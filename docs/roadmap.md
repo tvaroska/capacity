@@ -4,9 +4,9 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 
 ## Where we are
 
-`v0.3.0` is public and its gate is green (`252` tests). A review of architecture and code quality on 2026-11-17 found the calculations sound and the code around them repeated. The command line, the web API and the web page each connect the calculations in their own way. Facts about models and the sample numbers are typed in several places. The page keeps its own copy of numbers and rules. The review listed 14 defects. In most of them the same input gives a different answer depending on the entry point.
+`v0.3.1` is tagged on `main` and its gate (`./scripts/gate.sh`) is green (`287` tests; Milestone 1 / `P0` complete). A review of architecture and code quality on 2026-11-17 found the calculations sound and the code around them repeated. The command line, the web API and the web page each connect the calculations in their own way. Facts about models and the sample numbers are typed in several places. The page keeps its own copy of numbers and rules. The review listed 14 defects. In most of them the same input gives a different answer depending on the entry point.
 
-The four milestones below remove the causes in order and come before the unscheduled feature extensions. File paths are as of `v0.3.0`; Milestone 3 (`P2`) moves them.
+The remaining three milestones below remove the causes in order and come before the unscheduled feature extensions. File paths are as of `v0.3.1`; Milestone 3 (`P2`) moves them.
 
 Decisions taken by the owner on 2026-11-17:
 
@@ -21,36 +21,11 @@ Decisions taken by the owner on 2026-11-17:
 
 | # | Milestone | Done when | Size (rough) |
 | :--- | :--- | :--- | :--- |
-| 1 | `v0.3.1` — Gates ready for change (`P0`) | A comment edit in an engine file keeps the suite green, a module moved into a sub-folder is still scanned, and one script defines the gate | 1 to 2 days |
 | 2 | `v0.4.0` — Tidy in place, then one path from request to result (`P1`) | 13 of the 14 known defects are fixed (the last one goes with `P3.2`), and the command line, the API and the page call one function per operation | 1.5 to 2 weeks |
 | 3 | `v0.5.0` — Folders by job (`P2`) | The guard states one rule per folder and the gate is green | 2 to 4 days |
 | 4 | `v0.6.0` — The page shows only what the engine computed (`P3`) | No number or rule is typed in a template or in the browser script | 3 to 5 days |
 
 Each milestone ends in a tagged release: Milestone 1 (`P0`) a patch release with no change in behaviour, Milestones 2 to 4 (`P1` to `P3`) a minor release each. Milestone 2 (`P1`) may ship in two releases, one per part.
-
-## Milestone 1 — `v0.3.1`: Gates ready for change (`P0`)
-
-- [ ] **P0.1 The benchmark is checked on behaviour, not on file bytes**
-  - Today a test compares a hash of six engine files, so a comment edit forces a live benchmark run and hand edits to the README.
-  - Keep the replay of the committed trace as the check on every run. Move the hash comparison to a release-time check that is off by default. Record the commit id in the receipt. Add tests that a damaged receipt and a drifted replay are rejected. Amend `ADR-008`.
-  - Files: `benchmarks/run_l3_benchmark.py`, `tests/test_l3_receipt.py`, `DECISIONS.md`, `AGENTS.md`.
-  - Done when: a comment edit in `capacity/burst.py` leaves the suite green, and a changed burndown weight still fails it.
-- [ ] **P0.2 The architecture guards follow a move into sub-folders**
-  - Both guards assume every module sits directly in `capacity/`. After a move, moved modules are no longer scanned.
-  - Scan sub-folders. Name the adapter files once, by folder where possible. Resolve relative imports from the file's real package. Assert that every file is classified exactly once. Add the new import spellings to the guard's own examples.
-  - Files: `tests/test_isolation_guard.py`, `specs/ast.rules.yaml`.
-  - Done when: a probe module in a sub-folder that imports the Cloud Monitoring adapter fails both guards.
-- [ ] **P0.3 Shared test fixtures**
-  - Add `tests/conftest.py` with one fake Cloud Monitoring client that owns the patch target (repeated in 9 places today), one time-series builder, one cache fake and one loader for the generated gateway callback (it is loaded three different ways today).
-  - Remove the second leak scanner in `tests/test_capacity.py`. Test through public functions where a private name is imported today, and take the private name out of `__all__` in `capacity/core.py`.
-  - Done when: the patch target string appears once in `tests/`.
-- [ ] **P0.4 Tests where the refactor will cut**
-  - Cover what has no test today: Cloud Monitoring errors (missing credentials, permission denied, API error) through to exit code 1 on the command line and HTTP 502 on the API; `--folder-map` parsing; trace files shaped as a mapping; the `--format json` branches; scenario compilation from live series; rejection of NaN and infinity; `recommend --html-out`; the `collect` paths with `--check-auth` and with a live project; the lifecycle class of a model id.
-  - Files: `tests/`, exercising `capacity/core.py`, `capacity/cli.py`, `capacity/cli_formatters.py` and `capacity/scenario.py`.
-- [ ] **P0.5 One definition of the gate**
-  - Put the gate in one script in the repository and call it from `AGENTS.md`, the workspace runner and `cloudbuild.yaml`. Run the `ast-grep` scan, the format check and the benchmark replay once, not twice.
-  - Correct the two outdated notes in `AGENTS.md`: the lock check does run offline, and the hygiene test walks the directory.
-  - Done when: the three places run the same script.
 
 ## Milestone 2 — `v0.4.0`: Tidy in place, then one path from request to result (`P1`)
 
@@ -100,7 +75,7 @@ Part A (`P1.1` to `P1.7`) fixes 11 of the 14 defects without new structure. Part
 - [ ] **P1.9 Every operation takes a checked request and returns a typed result**
   - Each operation is one function that takes its request model and looks the model up itself, as optimisation and the gateway bundle already do.
   - The capacity mode moves into the request, so the API accepts self-hosted chargeback as the command line does.
-  - Data fields (series, tenants, jobs, projects) become required. An empty request is rejected. Defaults remain only for prices and percentiles.
+  - Data fields (series, tenants, jobs, projects) become required. An empty request is rejected. Defaults remain only for prices and percentiles. Also sanitize non-finite float inputs in FastAPI `RequestValidationError` responses so raw `NaN`/`Infinity` HTTP bodies answer `422` instead of crashing `JSONResponse`.
   - The command line takes its defaults from the same request models, so `optimize`, `schedule` and `chargeback` run on sample data today when no file is given, and the README quick start uses that. Decide when this task starts whether they then need an explicit sample switch, as `recommend --demo` has, or an input file from `examples/`.
   - Remove the helper that unpacks requests, the defaults repeated in function signatures, the reflection tests that keep the two in step, and the silent re-clamping inside the calculations.
   - Files: `capacity/finops.py`, `capacity/burst.py`, `capacity/self_hosted.py`, `capacity/gateway.py`, `capacity/capacity.py`, `capacity/models.py`, `capacity/api.py`, `capacity/cli.py`, `tests/test_request_contract.py`.
@@ -273,4 +248,5 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
 ## Shipped
 
 - **v0.2.0-v0.3.0 (Passes A-G + 3P Claude):** Phase 1 (v0.2.0) and Phase 2 (v0.3.0) dual-mode GSU/vLLM sizing, 1P Gemini + 3P Claude burndown and prefix-cache physics, LiteLLM/Envoy/GKE gateway generator, disaggregated prefill/decode sizer, 3-Tier EDF scheduler, FOCUS 1.2 chargeback, --scenario-file and capacity collect, GM3 Light workbench, and L3 Azure/SSE benchmark — [archive](archive/roadmap-history.md#v020-v030-passes-a-g-3p-claude)
+- **v0.3.1 (Milestone 1 - P0):** A comment edit in an engine file keeps the suite green, a module moved into a sub-folder is still scanned, and one script defines the gate — [archive](archive/roadmap-history.md#v031-milestone-1---p0)
 

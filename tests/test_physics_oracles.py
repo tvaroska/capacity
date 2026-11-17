@@ -26,6 +26,7 @@ from capacity.self_hosted import (
     parse_inference_server_telemetry,
     size_disaggregated_prefill_decode,
 )
+from tests.conftest import FakeAsyncCache, load_generated_burndown_logger
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 client = TestClient(api_app)
@@ -193,25 +194,9 @@ async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> No
     assert len(pool_doc["spec"]["selector"]["app"]) <= 63
     assert len(obj_doc["metadata"]["name"]) <= 63
 
-    ns: dict[str, Any] = {}
-    exec(compile(bundle.litellm_burndown_callback_py, "cb.py", "exec"), ns)  # noqa: S102
-    logger = ns["BurndownAndTrafficTypeLogger"](time_fn=lambda: 1_762_880_010.0)
-
-    class _FakeRedis:
-        def __init__(self) -> None:
-            self.store: dict[str, float] = {}
-            self.increments: list[tuple[str, float]] = []
-
-        async def async_get_cache(self, k: str) -> float | None:
-            return self.store.get(k)
-
-        async def async_increment(self, k: str, v: float, ttl: int = 120) -> float:
-            _ = ttl
-            self.increments.append((k, v))
-            self.store[k] = self.store.get(k, 0.0) + v
-            return self.store[k]
-
-    redis = _FakeRedis()
+    logger_cls = load_generated_burndown_logger(bundle.litellm_burndown_callback_py)
+    logger = logger_cls(time_fn=lambda: 1_762_880_010.0)
+    redis = FakeAsyncCache()
     key_obj = SimpleNamespace(team_id="claims", max_budget_tpm=200_000.0)
 
     # Client spoofs metadata=0.0; callback must ignore client metadata and use Redis!

@@ -2,52 +2,24 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
-from types import SimpleNamespace
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
 from capacity.capacity import compute_recommendations
 from capacity.core import CloudMonitoringAdapter
 from capacity.forecasting import LocalTraceAdapter, TelemetryPort
-
-
-class _AsyncItems:
-    def __init__(self, items: list[SimpleNamespace]) -> None:
-        self._items = items
-        self._i = 0
-
-    def __aiter__(self) -> _AsyncItems:
-        return self
-
-    async def __anext__(self) -> SimpleNamespace:
-        if self._i >= len(self._items):
-            raise StopAsyncIteration
-        val = self._items[self._i]
-        self._i += 1
-        return val
-
-
-def _ts(model: str, loc: str, req_type: str, pts: list[tuple[datetime, int]]) -> SimpleNamespace:
-    return SimpleNamespace(
-        resource=SimpleNamespace(labels={"model_id": model, "location": loc}),
-        metric=SimpleNamespace(labels={"request_type": req_type}),
-        points=[
-            SimpleNamespace(
-                interval=SimpleNamespace(end_time=dt),
-                value=SimpleNamespace(int64_value=v, double_value=0.0),
-            )
-            for dt, v in pts
-        ],
-    )
+from tests.conftest import FakeMonitoringClient, make_time_series
 
 
 @pytest.mark.port
 @pytest.mark.asyncio
 @pytest.mark.parametrize("adapter_kind", ["local", "cloud"])
-async def test_telemetry_port_adapters_satisfy_identical_contract(adapter_kind: str) -> None:
+async def test_telemetry_port_adapters_satisfy_identical_contract(
+    adapter_kind: str,
+    patch_monitoring_client: Callable[..., FakeMonitoringClient],
+) -> None:
     t0 = datetime(2026, 11, 3, 12, 0, tzinfo=UTC)
     t1 = datetime(2026, 11, 4, 12, 0, tzinfo=UTC)
 
@@ -69,29 +41,25 @@ async def test_telemetry_port_adapters_satisfy_identical_contract(adapter_kind: 
         )
     else:
         dedicated = [
-            _ts("gemini-3.8-flash", "us-central1", "dedicated", [(t0, 200_000), (t1, 300_000)])
+            make_time_series(
+                "gemini-3.8-flash", "us-central1", "dedicated", [(t0, 200_000), (t1, 300_000)]
+            )
         ]
-        shared = [_ts("gemini-3.8-flash", "us-central1", "shared", [(t0, 41_800), (t1, 62_700)])]
-
-        class _FakeMonitoringClient:
-            async def list_time_series(self, request: dict[str, Any]) -> _AsyncItems:
-                if '"dedicated"' in request["filter"]:
-                    return _AsyncItems(dedicated)
-                return _AsyncItems(shared)
-
+        shared = [
+            make_time_series(
+                "gemini-3.8-flash", "us-central1", "shared", [(t0, 41_800), (t1, 62_700)]
+            )
+        ]
+        patch_monitoring_client(lambda req: dedicated if '"dedicated"' in req["filter"] else shared)
         port = CloudMonitoringAdapter()
         assert isinstance(port, TelemetryPort)
-        with patch(
-            "capacity.core.monitoring_v3.MetricServiceAsyncClient",
-            return_value=_FakeMonitoringClient(),
-        ):
-            sparse, total_mins = await port.fetch_series(
-                project=["banking-host-01"],
-                days=2,
-                regions=["us-central1"],
-                by_region=True,
-                folder_map={"banking-host-01": "wealth"},
-            )
+        sparse, total_mins = await port.fetch_series(
+            project=["banking-host-01"],
+            days=2,
+            regions=["us-central1"],
+            by_region=True,
+            folder_map={"banking-host-01": "wealth"},
+        )
 
     assert total_mins == 2_880
     assert list(sparse.keys()) == ["wealth/gemini-3.8-flash@us-central1"]
