@@ -90,6 +90,11 @@ metadata:
     - "from ..core import fetch_throughput"
     - "from ...core import fetch_throughput"
     - "from capacity import api"
+    - "import capacity.telemetry.cloud_monitoring"
+    - "from capacity.telemetry import cloud_monitoring"
+    - "from capacity.telemetry.cloud_monitoring import CloudMonitoringAdapter"
+    - "from ..telemetry import cloud_monitoring"
+    - "from ..telemetry.cloud_monitoring import CloudMonitoringAdapter"
     - "__import__('capacity.core')"
     - "importlib.import_module('capacity.core')"
   valid_examples:
@@ -99,14 +104,18 @@ metadata:
     - "from .. import finops"
     - "from capacity.coreutils import helper"
     - "from ..coreutils import helper"
+    - "from capacity.telemetry import port"
+    - "from ..telemetry import port"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_formatters))(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_formatters|telemetry\\.cloud_monitoring))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_formatters))(\\b|\\.)"
+      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_formatters|(telemetry\\.)?cloud_monitoring))(\\b|\\.)"
     - kind: import_from_statement
       regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_formatters)\\b"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+((capacity\\.|\\.+\\s*)telemetry|\\.+)+\\s+import\\s+(.*[\\s,(])?cloud_monitoring\\b"
     - kind: import_from_statement
       regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?(cloud|auth|api_core)\\b"
     - pattern: __import__($$$)

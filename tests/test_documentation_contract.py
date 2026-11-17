@@ -47,7 +47,7 @@ def test_governance_and_adr_tradeoff_honesty_contract() -> None:
     # Ensure internal review-panel shorthand never leaks into public roadmap docs
     assert "-15 Blocker" not in roadmap
     assert "-20 Blocker" not in roadmap
-    assert "Phase 1" in roadmap and "Phase 2" in roadmap
+    assert "## Milestones at a glance" in roadmap and "## Shipped" in roadmap
     assert "--mode self-hosted" in readme
     assert "FOCUS 1.2" in readme
     assert "LiteLLM" in readme

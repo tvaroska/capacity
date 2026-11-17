@@ -200,6 +200,16 @@ def test_all_cli_json_format_branches_return_valid_json() -> None:
         (["gateway", "--gsus", "10", "--format", "json"], "litellm_config_yaml"),
         (["schedule", "--gsus", "10", "--format", "json"], "jobs"),
         (["chargeback", "--gsus", "10", "--format", "json"], "tenants"),
+        (
+            [
+                "collect",
+                "--logs-file",
+                str(REPO_ROOT / "examples/otel_genai_spans.jsonl"),
+                "--format",
+                "json",
+            ],
+            "gsu_sizing",
+        ),
     ]
     for argv, expected_key in commands:
         res = runner.invoke(cli_app, argv)

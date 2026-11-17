@@ -14,7 +14,7 @@ Decisions taken by the owner on 2026-11-17:
 2. The offline HTML file is a snapshot. Its sliders need not work (`P3.2`).
 3. `recommend --html-out` shows no sample data (`P1.1`).
 4. Import paths may change (`P2.1`).
-5. The file hash on the benchmark becomes a release-time check (`P0.1`).
+5. The file hash on the benchmark is a release-time check (shipped in `v0.3.1` / `P0.1`).
 6. Self-hosted sample card: no preference was given, so the request default applies, 6 replicas and 48 GPUs (`P1.4`).
 
 ## Milestones at a glance
@@ -25,7 +25,7 @@ Decisions taken by the owner on 2026-11-17:
 | 3 | `v0.5.0` — Folders by job (`P2`) | The guard states one rule per folder and the gate is green | 2 to 4 days |
 | 4 | `v0.6.0` — The page shows only what the engine computed (`P3`) | No number or rule is typed in a template or in the browser script | 3 to 5 days |
 
-Each milestone ends in a tagged release: Milestone 1 (`P0`) a patch release with no change in behaviour, Milestones 2 to 4 (`P1` to `P3`) a minor release each. Milestone 2 (`P1`) may ship in two releases, one per part.
+Each remaining milestone (`P1` to `P3`) ends in a minor tagged release; Milestone 2 (`P1`) may ship in two releases, one per part.
 
 ## Milestone 2 — `v0.4.0`: Tidy in place, then one path from request to result (`P1`)
 
@@ -41,8 +41,9 @@ Part A (`P1.1` to `P1.7`) fixes 11 of the 14 defects without new structure. Part
   - Done when: one render test per case asserts engine values, not phrases.
 - [ ] **P1.2 Trace input has one clock and one window rule**
   - A plain list of minutes is turned into a dated series in four places with two start hours. The same list forecasts 467,000 through `--trace-file` and 400,000 through a scenario file. A trace file shaped as a mapping can report a duty cycle above 100%.
+  - Round fractional TPM consistently in `--trace-file` (`round(float(v))` instead of `int(float(v))` truncation in `capacity/cli_formatters.py`) to match `--vllm-file` and scenario series.
   - Files: `capacity/forecasting.py`, `capacity/cli.py`, `capacity/cli_formatters.py`, `capacity/portal.py`.
-  - Done when: one list gives one forecast through every entry point, and a duty cycle never exceeds 100%.
+  - Done when: one list gives one forecast through every entry point, fractional TPM rounds the same way everywhere, and a duty cycle never exceeds 100%.
 - [ ] **P1.3 Small fixes**
   - `optimize --mode self-hosted` works without `--model`. Today the default is a managed model id.
   - Scenario compilation fails on an unknown model and no longer assumes a default model and capacity (`capacity/scenario.py`).
@@ -59,10 +60,11 @@ Part A (`P1.1` to `P1.7`) fixes 11 of the 14 defects without new structure. Part
   - Files: `capacity/self_hosted.py`, `capacity/burst.py`, `capacity/gateway.py`, `capacity/finops.py`, `capacity/api.py`, `capacity/cli.py`, `capacity/portal.py`, `capacity/scenario.py`.
 - [ ] **P1.6 Dead code and start-up time**
   - Load the Cloud Monitoring SDK only when a command needs it. Every command pays about half a second for it today.
+  - Load `.env` in the command-line entry point and at server start rather than when `capacity.cli` or `capacity.api` is imported, so an untracked local `.env` cannot change test results.
   - Delete the fallback for a missing SDK (it cannot run, because the SDK is a required dependency), the function that only forwards to another, and the re-export lists that keep old import paths alive.
   - Move the body of the `collect` command out of the formatter module into a module of its own. `capacity/cli.py` is at the 800-line cap, so one more line fails the gate. Free room in it before other `P1` tasks add to it, for example by moving the text reports of `demo`, `gateway` and `schedule` beside the other formatters.
-  - Files: `capacity/core.py`, `capacity/self_hosted.py`, `capacity/cli.py`, `capacity/cli_formatters.py`.
-  - Done when: `capacity demo` starts without importing the SDK.
+  - Files: `capacity/core.py`, `capacity/self_hosted.py`, `capacity/cli.py`, `capacity/cli_formatters.py`, `capacity/api.py`.
+  - Done when: importing the command line or the API neither loads the SDK nor reads `.env`.
 - [ ] **P1.7 Complexity rules on, as a ratchet**
   - Switch on the complexity lint rules that are listed as debt, with ceilings set to today's worst values. Lower the ceilings as functions are split. Remove the five entries from `tests/standards_debt.json`.
   - Files: `pyproject.toml`, `tests/standards_debt.json`.
@@ -121,9 +123,9 @@ capacity/
 ## Milestone 4 — `v0.6.0`: The page shows only what the engine computed (`P3`)
 
 - [ ] **P3.1 One typed, display-ready object for the page**
-  - It carries every card, table, label and control default. The renderer turns it into HTML and escapes everything in one place.
+  - It carries every card, table, label and control default. The renderer turns it into HTML and escapes everything in one place, including the default page `<title>` (`Multi-Gateway & FOCUS 1.2` in `capacity/portal.py`, which currently emits a bare `&` when `scenario is None`).
   - Files: `capacity/portal.py`, `capacity/portal_sections.py`, `capacity/portal_template.py`.
-  - Done when: no template holds a number, and a test renders a hand-made object.
+  - Done when: no template holds a number, every text slot is escaped in one place, and a test renders a hand-made object.
 - [ ] **P3.2 No formulas in the browser**
   - Today the first change to a control on a scenario page replaces the server's numbers with ones from the script's own tables, which do not know the scenario.
   - The offline file is a snapshot: its controls are disabled or removed. The served page sends control changes to the API and shows the answer. This needs one new route for the burst window at a fixed number of GSUs.
@@ -131,7 +133,7 @@ capacity/
   - Files: `capacity/portal_scripts.py`, `capacity/api.py`, `capacity/models.py`, `DECISIONS.md`.
   - Done when: the script holds no capacity, threshold or weight.
 - [ ] **P3.3 HTML, CSS and JavaScript as files**
-  - Keep them as real files inside the package and join them at render time, so the export stays one file. Extend the identifier scan to `.js` and `.css`.
+  - Keep them as real files inside the package and join them at render time, so the export stays one file. Align the stylesheet font-family fallback stack with `.stitch/DESIGN.md`, and extend the identifier scan to `.js` and `.css`.
   - Files: `capacity/portal_template.py`, `capacity/portal_scripts.py`, `tests/test_repo_hygiene.py`.
 - [ ] **P3.4 Page tests on values**
   - Send hostile text through every scenario text field. Render once per combination of page sections and assert engine values.
@@ -139,7 +141,7 @@ capacity/
 
 ## Unscheduled backlog
 
-Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only the 23 scheduled milestone tasks above. Promote an item into a milestone (`- [ ]`) when scheduling it.
+Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only the 18 scheduled milestone tasks above. Promote an item into a milestone (`- [ ]`) when scheduling it.
 
 ### Review follow-ups (`U1`–`U12`)
 
@@ -168,13 +170,12 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
   - This changes the JSON output and may move benchmark figures.
   - Files: `capacity/burst.py`, `capacity/finops.py`, `capacity/self_hosted.py`, `capacity/gateway.py`, `DECISIONS.md`.
   - Done when: the decision is recorded; if it is yes, no calculation rounds a value it returns or builds a sentence.
-- **U5 Start-up and serving**
-  - The environment file is loaded when the command line or the API is imported, so an untracked local file can change test results. Load it in the command-line entry point and at server start.
+- **U5 Serving and zero-padded percentiles**
   - `serve` hands the scenario path to the API through an environment variable, and the file is read and the page recomputed on every request. Load it once, or when the file changes.
   - The recommendations route does its sizing on the server's event loop. The other sizing routes already run in the thread pool.
   - Zero padding builds a list as long as the whole window for every series. The percentiles can be computed from the count of zeros.
   - Files: `capacity/api.py`, `capacity/cli.py`, `capacity/capacity.py`.
-  - Done when: importing the command line or the API reads no file, the scenario page is computed once per scenario, and no sizing runs on the event loop.
+  - Done when: the scenario page is computed once per scenario, and no sizing runs on the event loop.
 - **U6 Names that say what they hold** *(changes output)*
   - The forecast fields are named for 24 hours and hold any horizon. The telemetry snapshot, its parser and its route are named after one inference server and also carry the request logs of managed models. The page has five names: portal, showcase, workbench, scorecard and web calculator.
   - Renaming a response field or a route changes the API. Do it together with `P1.9`, which already changes the API.
@@ -197,7 +198,7 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
   - The test thresholds are loose: the gap to the oracle may reach 8.0 where the committed value is 3.34, and nothing compares the product arm with buying no commitment.
   - The live harness is one closure of about 150 lines, and the benchmark entry point returns three different shapes depending on a text argument.
   - The receipt's digest is stored beside the data it covers, so it catches an accidental edit and nothing more. `ADR-008` calls the receipt tamper-evident.
-  - If the file hash stays as a release-time check (`P0.1`), it should cover the files that decide the numbers: the model family rules, the request models, the gateway callback and the benchmark code.
+  - Extend the release-time source hash (`--check-source-hash`) to cover all files that decide the numbers: the model family rules, the request models, the gateway callback and the benchmark code.
   - Files: `benchmarks/live_sse_harness.py`, `benchmarks/trace_backtest.py`, `benchmarks/run_l3_benchmark.py`, `benchmarks/prepare_corpus.py`, `tests/test_l3_receipt.py`, `README.md`, `DECISIONS.md`.
   - Done when: two live runs give the same figures, the gate replays both halves, and the README and `ADR-008` describe each arm and the oracle as what they are.
 - **U9 Gate extras**
@@ -239,6 +240,7 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
 - **Per-Turn Model Routing & Multi-Backend Proxy Recipes ([`capacity/gateway.py`](../capacity/gateway.py)):** Model per-turn tier switching (`gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-4-argon`) alongside gateway session affinity and `thought_signature` preservation checks.
 - **Multi-Node Cloud Redis & Envoy Global Rate-Limit Service Integration Suite:** Extend [`benchmarks/live_sse_harness.py`](../benchmarks/live_sse_harness.py) with an optional Docker Compose Envoy AI Gateway + `envoyproxy/ratelimit` + Valkey cluster testbench for `>2,000 RPS` load testing.
 - **RDMA / NIXL KV-Cache Transfer Latency Modeling ([`capacity/self_hosted.py`](../capacity/self_hosted.py)):** Incorporate inter-node KV-block transfer bandwidth overhead into disaggregated Prefill/Decode pool sizing for `>128K` context prompts.
+- **Stateless MCP `2026-07-28` Adapter (`SEP-2640` Skills + `ui://` MCP Apps):** Expose the post-`P1.9` typed operations over stateless Streamable HTTP MCP, bundle [`skills/capacity/SKILL.md`](../skills/capacity/SKILL.md) via `io.modelcontextprotocol/skills` (`SEP-2640`) for hosted AI clients, and serve self-contained HTML scorecards (`portal.py --html-out`) as `ui://` MCP Apps.
 
 ### Showcase presentation gates
 

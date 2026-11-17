@@ -33,6 +33,7 @@ def test_l3_corpus_manifest_and_receipt_integrity() -> None:
     assert RECEIPT_PATH.is_file(), "Run `python -m benchmarks.run_l3_benchmark --live` first"
     receipt = run_benchmark(mode="offline")
     assert receipt["receipt_sha256"] == compute_receipt_digest(receipt)
+    assert re.fullmatch(r"[0-9a-f]{40}", receipt["git_commit"])
     assert receipt["corpus_gzip_sha256"] == actual_gz_sha
 
     track_a = receipt["track_a_empirical_trace_backtest"]

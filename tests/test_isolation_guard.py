@@ -27,6 +27,14 @@ ADAPTER_SPECS: tuple[str, ...] = (
     "cli_formatters.py",
     "core.py",
 )
+# Future cloud adapter location (`P2`); blocked ahead of the folder move without weakening `ADAPTER_SPECS` file checks.
+FUTURE_ADAPTER_MODULES: tuple[str, ...] = ("capacity.telemetry.cloud_monitoring",)
+
+
+def _adapter_spec_to_module_prefix(spec: str) -> str:
+    stem = spec.rstrip("/").removesuffix(".py").replace("/", ".")
+    return f"capacity.{stem}"
+
 
 FORBIDDEN_IN_PURE_MODULES: tuple[str, ...] = (
     "fastapi",
@@ -35,11 +43,8 @@ FORBIDDEN_IN_PURE_MODULES: tuple[str, ...] = (
     "google.cloud",
     "google.auth",
     "google.api_core",
-    "capacity.api",
-    "capacity.cli",
-    "capacity.cli_formatters",
-    "capacity.core",
-    "capacity.telemetry.cloud_monitoring",
+    *(_adapter_spec_to_module_prefix(spec) for spec in ADAPTER_SPECS),
+    *FUTURE_ADAPTER_MODULES,
     "examples",
     "benchmarks",
 )
@@ -170,6 +175,14 @@ def test_every_module_is_classified_once_and_pure_modules_stay_isolated() -> Non
         ("capacity/engine/nested/probe.py", "from ...core import fetch_throughput"),
         ("capacity/engine/probe.py", "from ... import anything"),
         ("capacity/engine/probe.py", "from capacity import api"),
+        ("capacity/engine/probe.py", "import capacity.telemetry.cloud_monitoring"),
+        ("capacity/engine/probe.py", "from capacity.telemetry import cloud_monitoring"),
+        ("capacity/engine/probe.py", "from ..telemetry import cloud_monitoring"),
+        (
+            "capacity/engine/probe.py",
+            "from ..telemetry.cloud_monitoring import CloudMonitoringAdapter",
+        ),
+        ("capacity/telemetry/port.py", "from . import cloud_monitoring"),
         ("capacity/engine/probe.py", "from google import cloud"),
         ("capacity/engine/probe.py", "from google.cloud import monitoring_v3"),
         ("capacity/engine/probe.py", "from google.auth.exceptions import DefaultCredentialsError"),
@@ -231,6 +244,8 @@ def test_subfolder_probe_importing_cloud_adapter_fails_both_guards(tmp_path: Pat
         "from ..core import fetch_throughput\n",
         "from .. import core\n",
         "import math, capacity.core\n",
+        "from ..telemetry import cloud_monitoring\n",
+        "from capacity.telemetry import cloud_monitoring\n",
         "from google.cloud import monitoring_v3\n",
     ):
         probe_file.write_text(bad_import, encoding="utf-8")
@@ -248,6 +263,13 @@ def test_subfolder_probe_importing_cloud_adapter_fails_both_guards(tmp_path: Pat
         assert res.returncode == 1, f"ast-grep missed subfolder violation {bad_import!r}"
 
 
+def test_ast_rules_ignores_cover_adapter_specs() -> None:
+    raw = AST_RULES_PATH.read_text(encoding="utf-8")
+    for spec in ADAPTER_SPECS:
+        expected = f"capacity/{spec}**" if spec.endswith("/") else f"capacity/{spec}"
+        assert f'"{expected}"' in raw, f"specs/ast.rules.yaml ignores missing {expected}"
+
+
 def test_importing_the_maths_loads_no_port_and_no_cloud_sdk() -> None:
     """A static scan cannot see what a package `__init__` drags in; an import can."""
     pure, _ = _classify_modules()
@@ -259,7 +281,8 @@ def test_importing_the_maths_loads_no_port_and_no_cloud_sdk() -> None:
         + "".join(f"import {mod}\n" for mod in modules)
         + "print(sorted(m for m in sys.modules if m.split('.')[0] in "
         "{'fastapi', 'typer', 'uvicorn', 'grpc'} or m.startswith("
-        "('google.cloud', 'capacity.core', 'capacity.api', 'capacity.cli'))))"
+        "('google.cloud', 'capacity.core', 'capacity.api', 'capacity.cli', "
+        "'capacity.telemetry.cloud_monitoring'))))"
     )
     result = subprocess.run(  # noqa: S603
         [sys.executable, "-B", "-c", probe],

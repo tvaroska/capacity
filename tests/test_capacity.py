@@ -61,7 +61,7 @@ def test_normalize_model_id_strips_suffixes_and_prefixes() -> None:
     assert normalize_model_id("gemini-3.1-pro-preview-05-06") == "gemini-3.1-pro"
     assert normalize_model_id("gemini-3.8-flash-rc1") == "gemini-3.8-flash"
     assert normalize_model_id("gemini-4-argon-qcd") == "gemini-4-argon"
-    assert normalize_model_id("gemini-4.0-pro-ga") == "gemini-4.0-pro"
+    assert normalize_model_id("gemini-4-carbon-ga") == "gemini-4-carbon"
     assert normalize_model_id("gemini-3.5-flash-exp-0827") == "gemini-3.5-flash"
     assert (
         normalize_model_id("publishers/google/models/gemini-3.8-flash-001@us-central1")
@@ -81,7 +81,7 @@ def test_default_gsu_config_and_env_override(monkeypatch: pytest.MonkeyPatch) ->
         ("gemini-3.5-flash-lite", 241800),
         ("gemini-3.8-flash", 120900),
         ("gemini-4-argon", 30000),
-        ("gemini-4.0-pro", 30000),
+        ("gemini-4-carbon", 30000),
     ):
         assert DEFAULT_GSU_CONFIG[required_model] == expected_tpm
         assert find_capacity(f"{required_model}-001") == expected_tpm
