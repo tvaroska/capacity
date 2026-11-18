@@ -14,33 +14,32 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from capacity.api import app as api_app
-from capacity.burst import (
+from capacity.cli import app as cli_app
+from capacity.contract.common import SeriesKey, UnknownModelError
+from capacity.contract.requests import (
+    FolderPoolingRequest,
+    GatewayConfigRequest,
+    MicroBurstRequest,
+    ModelTierPrefixCacheRequest,
+    VllmParseRequest,
+)
+from capacity.engine.burst import (
     compute_weighted_burndown_tokens,
     evaluate_micro_burst_window,
     evaluate_model_tier_prefix_cache,
 )
-from capacity.capacity import require_capacity
-from capacity.cli import app as cli_app
-from capacity.core import PARTNER_TOKEN_METRIC, PT_METRIC, fetch_throughput
-from capacity.finops import evaluate_folder_pooling
-from capacity.gateway import generate_gateway_bundle
-from capacity.model_families import (
+from capacity.engine.catalog import (
     CLAUDE_GSU_CONFIG,
     DEFAULT_GSU_CONFIG,
     is_partner_claude,
     normalize_model_id,
     resolve_model_family,
 )
-from capacity.models import (
-    FolderPoolingRequest,
-    GatewayConfigRequest,
-    MicroBurstRequest,
-    ModelTierPrefixCacheRequest,
-    SeriesKey,
-    UnknownModelError,
-    VllmParseRequest,
-)
-from capacity.telemetry_parsers import parse_inference_server_telemetry
+from capacity.engine.pooling import evaluate_folder_pooling
+from capacity.engine.sizing import require_capacity
+from capacity.gateway.bundle import generate_gateway_bundle
+from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.telemetry.cloud_monitoring import PARTNER_TOKEN_METRIC, PT_METRIC, fetch_throughput
 from tests.conftest import (
     FakeAsyncCache,
     FakeMonitoringClient,

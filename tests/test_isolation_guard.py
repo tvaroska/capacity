@@ -1,9 +1,20 @@
-"""Package isolation guard (`Rule 0` / `STD-ARCH` / `STD-PORT`).
+"""Folder-level architectural isolation guard (`P2.3` / `ADR-005`).
 
-Every module under `capacity/` (including sub-packages) is pure sizing or FinOps maths unless it is
-classified as an adapter. Pure modules may not import a driving port (FastAPI, Typer, Uvicorn),
-Google Cloud SDKs, the adapter modules, dynamic imports, or `examples/` and `benchmarks/`, however
-the import is spelt.
+Enforces one explicit import rule per folder across Ports, Adapters and Contracts:
+- `contract/`: imports only stdlib, `pydantic`, and `capacity.contract`.
+- `engine/`: imports only stdlib, `capacity.contract`, and `capacity.engine`.
+- `ingest/`: imports only stdlib, `capacity.contract`, `capacity.engine`, and `capacity.ingest`.
+- `telemetry/` (except `cloud_monitoring.py`): imports only stdlib, `capacity.contract`,
+  `capacity.engine`, and `capacity.telemetry.{port,local}`.
+- `telemetry/cloud_monitoring.py`: the sole module allowed to import `google.*` Cloud SDKs.
+- `gateway/`: imports only stdlib, `yaml` (`litellm` optional in callback), `capacity.contract`,
+  `capacity.engine`, and `capacity.gateway`.
+- `showcase/{evaluate,sample_data}.py`: orchestrates scenario evaluation over `contract`, `engine`,
+  `gateway`, `telemetry.local`, and `yaml`.
+- `showcase/` renderer modules (`renderer`, `sections`, `template`, `scripts`, `view`): import zero
+  calculations — only stdlib, `capacity.contract`, and sibling renderer modules.
+- `cli/` and `api.py`: driving ports — may import any `capacity.*` module plus `fastapi`, `typer`,
+  `uvicorn`, and `dotenv`, while still delegating `google.*` SDK calls to `cloud_monitoring.py`.
 """
 
 from __future__ import annotations
@@ -12,6 +23,7 @@ import ast
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -20,37 +32,95 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 CAPACITY_DIR = REPO_ROOT / "capacity"
 AST_RULES_PATH = REPO_ROOT / "specs" / "ast.rules.yaml"
 
-# Named once: entries ending with '/' classify whole sub-folders; bare paths classify single files.
-ADAPTER_SPECS: tuple[str, ...] = (
-    "api.py",
-    "cli.py",
-    "cli_collect.py",
-    "cli_formatters.py",
-    "core.py",
-)
-# Future cloud adapter location (`P2`); blocked ahead of the folder move without weakening `ADAPTER_SPECS` file checks.
-FUTURE_ADAPTER_MODULES: tuple[str, ...] = ("capacity.telemetry.cloud_monitoring",)
-
-
-def _adapter_spec_to_module_prefix(spec: str) -> str:
-    stem = spec.rstrip("/").removesuffix(".py").replace("/", ".")
-    return f"capacity.{stem}"
-
-
-FORBIDDEN_IN_PURE_MODULES: tuple[str, ...] = (
-    "fastapi",
-    "typer",
-    "uvicorn",
-    "google.cloud",
-    "google.auth",
-    "google.api_core",
-    *(_adapter_spec_to_module_prefix(spec) for spec in ADAPTER_SPECS),
-    *FUTURE_ADAPTER_MODULES,
-    "examples",
-    "benchmarks",
-)
 DYNAMIC_IMPORT = "<dynamic import>"
 ESCAPED_RELATIVE_IMPORT = "<escaped relative import>"
+STDLIB_ROOTS: frozenset[str] = sys.stdlib_module_names
+
+SHOWCASE_EVAL_FILES: frozenset[str] = frozenset(
+    {
+        "showcase/__init__.py",
+        "showcase/evaluate.py",
+        "showcase/sample_data.py",
+    }
+)
+
+
+@dataclass(frozen=True)
+class FolderRule:
+    name: str
+    allowed_capacity_prefixes: tuple[str, ...]
+    allowed_third_party_roots: frozenset[str] = frozenset()
+    forbidden_capacity_prefixes: tuple[str, ...] = ()
+
+
+FOLDER_RULES: dict[str, FolderRule] = {
+    "root": FolderRule(name="root", allowed_capacity_prefixes=()),
+    "contract": FolderRule(
+        name="contract",
+        allowed_capacity_prefixes=("capacity.contract",),
+        allowed_third_party_roots=frozenset({"pydantic"}),
+    ),
+    "engine": FolderRule(
+        name="engine",
+        allowed_capacity_prefixes=("capacity.contract", "capacity.engine"),
+    ),
+    "ingest": FolderRule(
+        name="ingest",
+        allowed_capacity_prefixes=("capacity.contract", "capacity.engine", "capacity.ingest"),
+    ),
+    "telemetry_pure": FolderRule(
+        name="telemetry_pure",
+        allowed_capacity_prefixes=(
+            "capacity.contract",
+            "capacity.engine",
+            "capacity.telemetry.port",
+            "capacity.telemetry.local",
+        ),
+        forbidden_capacity_prefixes=("capacity.telemetry.cloud_monitoring",),
+    ),
+    "cloud_monitoring": FolderRule(
+        name="cloud_monitoring",
+        allowed_capacity_prefixes=(
+            "capacity.contract",
+            "capacity.engine",
+            "capacity.telemetry.port",
+        ),
+        allowed_third_party_roots=frozenset({"google"}),
+    ),
+    "gateway": FolderRule(
+        name="gateway",
+        allowed_capacity_prefixes=("capacity.contract", "capacity.engine", "capacity.gateway"),
+        allowed_third_party_roots=frozenset({"yaml", "litellm"}),
+    ),
+    "showcase_eval": FolderRule(
+        name="showcase_eval",
+        allowed_capacity_prefixes=(
+            "capacity.contract",
+            "capacity.engine",
+            "capacity.gateway",
+            "capacity.telemetry.local",
+            "capacity.showcase.evaluate",
+            "capacity.showcase.sample_data",
+        ),
+        allowed_third_party_roots=frozenset({"yaml"}),
+        forbidden_capacity_prefixes=("capacity.telemetry.cloud_monitoring",),
+    ),
+    "showcase_renderer": FolderRule(
+        name="showcase_renderer",
+        allowed_capacity_prefixes=("capacity.contract", "capacity.showcase"),
+        forbidden_capacity_prefixes=(
+            "capacity.showcase.evaluate",
+            "capacity.showcase.sample_data",
+        ),
+    ),
+    "driving_port": FolderRule(
+        name="driving_port",
+        allowed_capacity_prefixes=("capacity",),
+        allowed_third_party_roots=frozenset(
+            {"fastapi", "typer", "uvicorn", "dotenv", "pydantic", "yaml"}
+        ),
+    ),
+}
 
 
 def _all_package_modules(root: Path = CAPACITY_DIR) -> list[Path]:
@@ -59,23 +129,30 @@ def _all_package_modules(root: Path = CAPACITY_DIR) -> list[Path]:
     )
 
 
-def _is_adapter(rel_posix: str) -> bool:
-    return any(
-        rel_posix.startswith(spec) if spec.endswith("/") else rel_posix == spec
-        for spec in ADAPTER_SPECS
-    )
+_EXACT_ROLE_MAP: dict[str, str] = {
+    "__init__.py": "root",
+    "api.py": "driving_port",
+    "telemetry/cloud_monitoring.py": "cloud_monitoring",
+    **dict.fromkeys(SHOWCASE_EVAL_FILES, "showcase_eval"),
+}
+_PREFIX_ROLE_MAP: tuple[tuple[str, str], ...] = (
+    ("cli/", "driving_port"),
+    ("contract/", "contract"),
+    ("engine/", "engine"),
+    ("ingest/", "ingest"),
+    ("telemetry/", "telemetry_pure"),
+    ("gateway/", "gateway"),
+    ("showcase/", "showcase_renderer"),
+)
 
 
-def _classify_modules(root: Path = CAPACITY_DIR) -> tuple[list[Path], list[Path]]:
-    pure: list[Path] = []
-    adapters: list[Path] = []
-    for path in _all_package_modules(root):
-        rel = path.relative_to(root).as_posix()
-        if _is_adapter(rel):
-            adapters.append(path)
-        else:
-            pure.append(path)
-    return pure, adapters
+def _classify_rel_path(rel_posix: str) -> str:
+    if rel_posix in _EXACT_ROLE_MAP:
+        return _EXACT_ROLE_MAP[rel_posix]
+    for prefix, role in _PREFIX_ROLE_MAP:
+        if rel_posix.startswith(prefix):
+            return role
+    raise AssertionError(f"Unclassified module path under capacity/: {rel_posix}")
 
 
 def _dotted_module_name(path: Path, repo_root: Path = REPO_ROOT) -> str:
@@ -89,9 +166,9 @@ def _dotted_module_name(path: Path, repo_root: Path = REPO_ROOT) -> str:
 def _import_targets(
     source: str,
     *,
-    module_rel_path: str = "capacity/probe.py",
+    module_rel_path: str = "capacity/engine/probe.py",
 ) -> list[str]:
-    """Every module the imports in `source` can load, resolving relative imports from `module_rel_path`."""
+    """Resolve every absolute or relative import target in `source`."""
     pkg_parts = list(Path(module_rel_path).parent.parts)
     targets: list[str] = []
     for node in ast.walk(ast.parse(source)):
@@ -117,88 +194,117 @@ def _import_targets(
     return targets
 
 
-def _violations(source: str, *, module_rel_path: str = "capacity/probe.py") -> list[str]:
-    return [
-        target
-        for target in _import_targets(source, module_rel_path=module_rel_path)
-        if target in {DYNAMIC_IMPORT, ESCAPED_RELATIVE_IMPORT}
-        or any(target == pfx or target.startswith(f"{pfx}.") for pfx in FORBIDDEN_IN_PURE_MODULES)
-    ]
+def _matches_prefix(target: str, prefix: str) -> bool:
+    return target == prefix or target.startswith(f"{prefix}.")
 
 
-def test_every_module_is_classified_once_and_pure_modules_stay_isolated() -> None:
+def _violations_for_module(source: str, *, module_rel_path: str) -> list[str]:
+    rel_inside_pkg = Path(module_rel_path).relative_to("capacity").as_posix()
+    role = _classify_rel_path(rel_inside_pkg)
+    rule = FOLDER_RULES[role]
+    bad: list[str] = []
+
+    for target in _import_targets(source, module_rel_path=module_rel_path):
+        if target in {DYNAMIC_IMPORT, ESCAPED_RELATIVE_IMPORT}:
+            bad.append(target)
+            continue
+        top = target.split(".", 1)[0]
+        if top in {"examples", "benchmarks"}:
+            bad.append(target)
+            continue
+        if top == "capacity":
+            if target == "capacity":
+                continue
+            if any(_matches_prefix(target, pfx) for pfx in rule.forbidden_capacity_prefixes):
+                bad.append(target)
+            elif not any(_matches_prefix(target, pfx) for pfx in rule.allowed_capacity_prefixes):
+                bad.append(target)
+            continue
+        if top in STDLIB_ROOTS:
+            continue
+        if top not in rule.allowed_third_party_roots:
+            bad.append(target)
+    return bad
+
+
+def test_every_folder_has_one_rule_and_zero_violations() -> None:
     all_files = _all_package_modules()
-    pure, adapters = _classify_modules()
+    seen_roles: set[str] = set()
+    problems: list[str] = []
 
-    assert set(pure).isdisjoint(set(adapters)), "a module cannot be both pure and an adapter"
-    assert set(pure) | set(adapters) == set(all_files), (
-        "every capacity/*.py file must be classified"
-    )
-    assert len(pure) >= 12, "the purity list is default-deny; it should cover most of the package"
-
-    for spec in ADAPTER_SPECS:
-        matched = [
-            p
-            for p in adapters
-            if (
-                p.relative_to(CAPACITY_DIR).as_posix().startswith(spec)
-                if spec.endswith("/")
-                else p.relative_to(CAPACITY_DIR).as_posix() == spec
-            )
-        ]
-        assert matched, f"ADAPTER_SPECS entry matches no real file: {spec}"
-
-    problems = [
-        f"{path.relative_to(REPO_ROOT).as_posix()} imports {target}"
-        for path in pure
-        for target in _violations(
+    for path in all_files:
+        rel_inside = path.relative_to(CAPACITY_DIR).as_posix()
+        role = _classify_rel_path(rel_inside)
+        seen_roles.add(role)
+        rel_repo = path.relative_to(REPO_ROOT).as_posix()
+        for bad_target in _violations_for_module(
             path.read_text(encoding="utf-8"),
-            module_rel_path=path.relative_to(REPO_ROOT).as_posix(),
-        )
-    ]
+            module_rel_path=rel_repo,
+        ):
+            problems.append(f"{rel_repo} ({role}) imports forbidden {bad_target}")
+
+    assert seen_roles == set(FOLDER_RULES), f"Unused folder rules: {set(FOLDER_RULES) - seen_roles}"
     assert not problems, "\n".join(problems)
 
 
+def test_only_cloud_monitoring_imports_google_sdk() -> None:
+    importers = [
+        path.relative_to(CAPACITY_DIR).as_posix()
+        for path in _all_package_modules()
+        if any(
+            t == "google" or t.startswith("google.")
+            for t in _import_targets(
+                path.read_text(encoding="utf-8"),
+                module_rel_path=path.relative_to(REPO_ROOT).as_posix(),
+            )
+        )
+    ]
+    assert importers == ["telemetry/cloud_monitoring.py"]
+
+
 @pytest.mark.parametrize(
     ("module_rel_path", "statement"),
     [
-        ("capacity/probe.py", "from capacity.core import fetch_throughput"),
-        ("capacity/probe.py", "import capacity.core"),
-        ("capacity/probe.py", "import math, capacity.core as adapter"),
-        ("capacity/probe.py", "from capacity import core"),
-        ("capacity/probe.py", "from capacity import finops, core"),
-        ("capacity/probe.py", "from . import core"),
-        ("capacity/probe.py", "from .core import fetch_throughput"),
-        ("capacity/engine/probe.py", "from .. import core"),
-        ("capacity/engine/probe.py", "from .. import (\n    finops,\n    core,\n)"),
-        ("capacity/engine/probe.py", "from ..core import fetch_throughput"),
-        ("capacity/engine/nested/probe.py", "from ... import core"),
-        ("capacity/engine/nested/probe.py", "from ...core import fetch_throughput"),
-        ("capacity/engine/probe.py", "from ... import anything"),
-        ("capacity/engine/probe.py", "from capacity import api"),
-        ("capacity/engine/probe.py", "import capacity.telemetry.cloud_monitoring"),
-        ("capacity/engine/probe.py", "from capacity.telemetry import cloud_monitoring"),
-        ("capacity/engine/probe.py", "from ..telemetry import cloud_monitoring"),
         (
             "capacity/engine/probe.py",
-            "from ..telemetry.cloud_monitoring import CloudMonitoringAdapter",
+            "from capacity.ingest.prometheus import parse_prometheus_metrics",
         ),
+        ("capacity/engine/probe.py", "from capacity.telemetry.port import TelemetryPort"),
+        ("capacity/engine/probe.py", "from ..telemetry import port"),
+        ("capacity/engine/probe.py", "from capacity.gateway.bundle import generate_gateway_bundle"),
+        (
+            "capacity/engine/probe.py",
+            "from capacity.showcase.sample_data import DEMO_OPTIMIZE_SERIES",
+        ),
+        ("capacity/engine/probe.py", "from pydantic import BaseModel"),
+        ("capacity/engine/probe.py", "import yaml"),
+        ("capacity/contract/probe.py", "from capacity.engine.catalog import build_model_catalog"),
+        (
+            "capacity/showcase/renderer.py",
+            "from capacity.engine.catalog import build_model_catalog",
+        ),
+        (
+            "capacity/showcase/renderer.py",
+            "from capacity.showcase.evaluate import evaluate_showcase_scenario",
+        ),
+        ("capacity/showcase/renderer.py", "from . import evaluate"),
+        ("capacity/showcase/sections.py", "from capacity.engine.catalog import normalize_model_id"),
         ("capacity/telemetry/port.py", "from . import cloud_monitoring"),
-        ("capacity/engine/probe.py", "from google import cloud"),
-        ("capacity/engine/probe.py", "from google.cloud import monitoring_v3"),
-        ("capacity/engine/probe.py", "from google.auth.exceptions import DefaultCredentialsError"),
-        ("capacity/engine/probe.py", "from google.api_core.exceptions import PermissionDenied"),
-        ("capacity/engine/probe.py", "import math, fastapi"),
-        ("capacity/engine/probe.py", "from typer import Typer"),
+        ("capacity/telemetry/local.py", "from google.cloud import monitoring_v3"),
+        ("capacity/cli/recommend.py", "from google.cloud import monitoring_v3"),
+        ("capacity/api.py", "from google.cloud import monitoring_v3"),
+        ("capacity/ingest/request_logs.py", "import fastapi"),
+        ("capacity/gateway/bundle.py", "from typer import Typer"),
         ("capacity/engine/probe.py", "import os, benchmarks.trace_backtest"),
-        ("capacity/engine/probe.py", "import importlib\nimportlib.import_module('capacity.core')"),
-        ("capacity/engine/probe.py", "__import__('capacity.core')"),
+        ("capacity/engine/probe.py", "import importlib\nimportlib.import_module('capacity.api')"),
+        ("capacity/engine/probe.py", "__import__('capacity.api')"),
+        ("capacity/engine/probe.py", "from ... import anything"),
     ],
 )
-def test_guard_catches_every_spelling_of_a_forbidden_import(
+def test_folder_guard_catches_every_forbidden_cross_folder_import(
     module_rel_path: str, statement: str
 ) -> None:
-    assert _violations(statement, module_rel_path=module_rel_path), (
+    assert _violations_for_module(statement, module_rel_path=module_rel_path), (
         f"{module_rel_path}: {statement}"
     )
 
@@ -206,53 +312,47 @@ def test_guard_catches_every_spelling_of_a_forbidden_import(
 @pytest.mark.parametrize(
     ("module_rel_path", "statement"),
     [
-        ("capacity/probe.py", "from capacity.models import ModelRecommendation"),
-        ("capacity/probe.py", "from capacity import finops"),
-        ("capacity/probe.py", "from . import burst"),
-        ("capacity/probe.py", "from .forecasting import percentile"),
+        ("capacity/engine/probe.py", "from capacity.contract.requests import OptimizeRequest"),
         ("capacity/engine/probe.py", "from . import burst"),
-        ("capacity/engine/probe.py", "from .. import finops"),
-        ("capacity/engine/probe.py", "from ..forecasting import percentile"),
-        ("capacity/engine/probe.py", "import corelib"),
-        ("capacity/engine/probe.py", "from capacity.coreutils import helper"),
-        ("capacity/engine/probe.py", "# from .. import core"),
-        ("capacity/engine/probe.py", 'text = "import capacity.core"'),
         ("capacity/engine/probe.py", "import math"),
+        ("capacity/showcase/renderer.py", "from capacity.contract.scenario import ShowcaseReport"),
+        ("capacity/showcase/renderer.py", "from .sections import render_sizing_kpis"),
+        ("capacity/telemetry/cloud_monitoring.py", "from google.cloud import monitoring_v3"),
+        (
+            "capacity/cli/recommend.py",
+            "from capacity.telemetry.cloud_monitoring import CloudMonitoringAdapter",
+        ),
+        ("capacity/api.py", "from fastapi import FastAPI"),
     ],
 )
-def test_guard_ignores_clean_imports_comments_and_near_misses(
+def test_folder_guard_allows_declared_folder_dependencies(
     module_rel_path: str, statement: str
 ) -> None:
-    assert not _violations(statement, module_rel_path=module_rel_path), (
+    assert not _violations_for_module(statement, module_rel_path=module_rel_path), (
         f"{module_rel_path}: {statement}"
     )
 
 
-def test_subfolder_probe_importing_cloud_adapter_fails_both_guards(tmp_path: Path) -> None:
+def test_subfolder_probes_fail_both_python_and_ast_grep_guards(tmp_path: Path) -> None:
     ast_grep = Path(sys.executable).parent / "ast-grep"
     if not ast_grep.is_file():
         found = shutil.which("ast-grep")
         assert found is not None, "ast-grep binary required"
         ast_grep = Path(found)
 
-    probe_dir = tmp_path / "capacity" / "engine"
-    probe_dir.mkdir(parents=True)
-    (tmp_path / "capacity" / "__init__.py").write_text("", encoding="utf-8")
-    (probe_dir / "__init__.py").write_text("", encoding="utf-8")
-    probe_file = probe_dir / "probe.py"
-
-    for bad_import in (
-        "from ..core import fetch_throughput\n",
-        "from .. import core\n",
-        "import math, capacity.core\n",
-        "from ..telemetry import cloud_monitoring\n",
-        "from capacity.telemetry import cloud_monitoring\n",
-        "from google.cloud import monitoring_v3\n",
-    ):
+    cases = (
+        ("capacity/engine/probe.py", "from ..telemetry import port\n"),
+        ("capacity/engine/probe.py", "from pydantic import BaseModel\n"),
+        ("capacity/showcase/probe.py", "from . import evaluate\n"),
+        ("capacity/showcase/probe.py", "from ..engine.catalog import build_model_catalog\n"),
+        ("capacity/telemetry/probe.py", "from google.cloud import monitoring_v3\n"),
+        ("capacity/ingest/probe.py", "from ..telemetry import cloud_monitoring\n"),
+    )
+    for rel_path, bad_import in cases:
+        probe_file = tmp_path / rel_path
+        probe_file.parent.mkdir(parents=True, exist_ok=True)
         probe_file.write_text(bad_import, encoding="utf-8")
-        pure, adapters = _classify_modules(tmp_path / "capacity")
-        assert probe_file in pure and probe_file not in adapters
-        assert _violations(bad_import, module_rel_path="capacity/engine/probe.py"), bad_import
+        assert _violations_for_module(bad_import, module_rel_path=rel_path), (rel_path, bad_import)
 
         res = subprocess.run(  # noqa: S603
             [str(ast_grep), "scan", "--rule", str(AST_RULES_PATH), "."],
@@ -261,28 +361,25 @@ def test_subfolder_probe_importing_cloud_adapter_fails_both_guards(tmp_path: Pat
             text=True,
             check=False,
         )
-        assert res.returncode == 1, f"ast-grep missed subfolder violation {bad_import!r}"
+        assert res.returncode == 1, f"ast-grep missed {rel_path}: {bad_import!r}"
+        probe_file.unlink()
 
 
-def test_ast_rules_ignores_cover_adapter_specs() -> None:
-    raw = AST_RULES_PATH.read_text(encoding="utf-8")
-    for spec in ADAPTER_SPECS:
-        expected = f"capacity/{spec}**" if spec.endswith("/") else f"capacity/{spec}"
-        assert f'"{expected}"' in raw, f"specs/ast.rules.yaml ignores missing {expected}"
-
-
-def test_importing_the_maths_loads_no_port_and_no_cloud_sdk() -> None:
-    """A static scan cannot see what a package `__init__` drags in; an import can."""
-    pure, _ = _classify_modules()
-    modules = [
-        _dotted_module_name(path) for path in pure if _dotted_module_name(path) != "capacity"
+def test_importing_non_adapter_modules_loads_no_driving_port_or_cloud_sdk() -> None:
+    """A static scan cannot see what a package `__init__` drags in; a clean subprocess import can."""
+    pure_modules = [
+        _dotted_module_name(path)
+        for path in _all_package_modules()
+        if _classify_rel_path(path.relative_to(CAPACITY_DIR).as_posix())
+        not in {"driving_port", "cloud_monitoring"}
+        and _dotted_module_name(path) != "capacity"
     ]
     probe = (
         "import sys\n"
-        + "".join(f"import {mod}\n" for mod in modules)
+        + "".join(f"import {mod}\n" for mod in pure_modules)
         + "print(sorted(m for m in sys.modules if m.split('.')[0] in "
         "{'fastapi', 'typer', 'uvicorn', 'grpc'} or m.startswith("
-        "('google.cloud', 'capacity.core', 'capacity.api', 'capacity.cli', "
+        "('google.cloud', 'capacity.api', 'capacity.cli', "
         "'capacity.telemetry.cloud_monitoring'))))"
     )
     result = subprocess.run(  # noqa: S603

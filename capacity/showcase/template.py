@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from capacity.portal_scripts import PORTAL_CLIENT_SCRIPT
+from capacity.showcase.scripts import PORTAL_CLIENT_SCRIPT
 
 FAVICON_DATA_URI = (
     "data:image/svg+xml,"

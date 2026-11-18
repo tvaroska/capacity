@@ -10,9 +10,14 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from capacity.capacity import find_capacity
-from capacity.forecasting import DEFAULT_DAYS, filter_and_fold_series
-from capacity.model_families import (
+from capacity.contract.common import (
+    GCP_LOCATION_PATTERN,
+    GCP_PROJECT_ID_PATTERN,
+    MODEL_ID_PATTERN,
+    SeriesKey,
+)
+from capacity.contract.results import GcpAccessCheckReport, GcpProjectAccessStatus
+from capacity.engine.catalog import (
     CLAUDE_3P_SONNET_SPEC,
     GEMINI_1P_FLASH_SPEC,
     SELF_HOSTED_VLLM_SPEC,
@@ -20,14 +25,9 @@ from capacity.model_families import (
     normalize_model_id,
     resolve_model_family,
 )
-from capacity.models import (
-    GCP_LOCATION_PATTERN,
-    GCP_PROJECT_ID_PATTERN,
-    MODEL_ID_PATTERN,
-    GcpAccessCheckReport,
-    GcpProjectAccessStatus,
-    SeriesKey,
-)
+from capacity.engine.sizing import find_capacity
+from capacity.engine.stats import DEFAULT_DAYS
+from capacity.telemetry.port import filter_and_fold_series
 
 PT_METRIC = GEMINI_1P_FLASH_SPEC.monitoring_metric
 DEDICATED_LIMIT_METRIC = "aiplatform.googleapis.com/publisher/online_serving/dedicated_token_limit"

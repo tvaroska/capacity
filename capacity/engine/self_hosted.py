@@ -4,19 +4,16 @@ from __future__ import annotations
 
 import math
 
-from pydantic import Field
-
-from capacity.burst import evaluate_prefix_cache_dilution
-from capacity.forecasting import argmin_convex_int, percentile
-from capacity.model_families import normalize_model_id
-from capacity.models import (
-    DisaggregatedPoolRequest,
+from capacity.contract.common import UnknownModelError
+from capacity.contract.requests import DisaggregatedPoolRequest, SelfHostedAuditRequest
+from capacity.contract.results import (
     DisaggregatedPoolSizing,
-    PrefixCacheAudit,
-    SelfHostedAuditRequest,
-    StrictModel,
-    UnknownModelError,
+    SelfHostedEndpointAudit,
+    SelfHostedProfile,
 )
+from capacity.engine.burst import evaluate_prefix_cache_dilution
+from capacity.engine.catalog import normalize_model_id
+from capacity.engine.stats import argmin_convex_int, percentile
 
 # Standard 30-day billing month in hours (30 * 24).
 HOURS_PER_MONTH = 720.0
@@ -50,33 +47,6 @@ SAFE_KV_UTILIZATION_RATIO = 0.80
 MONOLITHIC_INTERFERENCE_PENALTY = 1.30
 # Nominal request rate assumed for self-hosted replica KV-dilution reporting (ADR-002).
 NOMINAL_SELF_HOSTED_RPS = 1.0
-
-
-class SelfHostedProfile(StrictModel):
-    """Hardware and serving throughput profile for a self-hosted open-weight model replica."""
-
-    profile_id: str
-    model_family: str
-    machine_type: str
-    accelerator_type: str
-    accelerators_per_replica: int = Field(ge=1)
-    tps_per_replica: float = Field(
-        gt=0.0, description="Sustained weighted burndown tokens/sec per replica"
-    )
-    max_kv_cache_tokens: int = Field(
-        gt=0, description="Usable KV-cache token capacity per replica in HBM"
-    )
-    reserved_replica_monthly_usd: float = Field(
-        gt=0.0, description="Monthly cost per 1Y CUD / reserved replica"
-    )
-    on_demand_replica_hourly_usd: float = Field(
-        gt=0.0, description="Hourly cost per elastic burst replica"
-    )
-
-    @property
-    def tpm_per_replica(self) -> int:
-        return round(self.tps_per_replica * 60.0)
-
 
 DEFAULT_SELF_HOSTED_PROFILES: dict[str, SelfHostedProfile] = {
     "llama-3.3-70b-fp8": SelfHostedProfile(
@@ -124,38 +94,6 @@ DEFAULT_SELF_HOSTED_PROFILES: dict[str, SelfHostedProfile] = {
         on_demand_replica_hourly_usd=14.20,
     ),
 }
-
-
-class SelfHostedEndpointAudit(StrictModel):
-    """Comprehensive capacity, KV-cache, quota-lock, and Newsvendor audit for GPU replicas."""
-
-    profile_id: str
-    machine_type: str
-    accelerator_type: str
-    accelerators_per_replica: int
-    tps_per_replica: float
-    tpm_per_replica: int
-    min_replica_count: int
-    max_replica_count: int
-    locked_regional_accelerators: int
-    active_baseline_accelerators: int
-    stranded_quota_accelerators: int
-    observed_accelerator_duty_cycle_pct: float
-    observed_vllm_kv_cache_usage_pct: float
-    observed_vllm_requests_waiting: float
-    duty_cycle_illusion_detected: bool
-    kv_preemption_risk: bool
-    recommended_autoscaler_metric: str
-    optimal_reserved_replicas: int
-    p99_peak_replicas: int
-    breakeven_replica_utilization_pct: float
-    reserved_base_monthly_cost_usd: float
-    elastic_burst_monthly_cost_usd: float
-    total_hybrid_monthly_cost_usd: float
-    all_on_demand_monthly_cost_usd: float
-    p99_static_reserved_monthly_cost_usd: float
-    scale_to_zero_nonprod_savings_usd: float
-    prefix_cache: PrefixCacheAudit
 
 
 def resolve_self_hosted_profile(model_or_profile: str) -> SelfHostedProfile:

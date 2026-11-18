@@ -11,7 +11,7 @@ from unittest.mock import patch
 
 import pytest
 
-MONITORING_PATCH_TARGET = "capacity.core.create_monitoring_client"
+MONITORING_PATCH_TARGET = "capacity.telemetry.cloud_monitoring.create_monitoring_client"
 
 
 class AsyncItems:

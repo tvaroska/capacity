@@ -36,12 +36,22 @@ def compute_engine_code_sha256() -> str:
     """Hash core capacity physics, FinOps, and gateway modules for release-time provenance."""
     h = hashlib.sha256()
     for rel in (
-        "capacity/burst.py",
-        "capacity/finops.py",
-        "capacity/gateway.py",
-        "capacity/self_hosted.py",
-        "capacity/capacity.py",
-        "capacity/forecasting.py",
+        "capacity/engine/burst.py",
+        "capacity/engine/catalog.py",
+        "capacity/engine/chargeback.py",
+        "capacity/engine/commitment.py",
+        "capacity/engine/kpis.py",
+        "capacity/engine/pooling.py",
+        "capacity/engine/scheduler.py",
+        "capacity/engine/self_hosted.py",
+        "capacity/engine/sizing.py",
+        "capacity/engine/stats.py",
+        "capacity/gateway/bundle.py",
+        "capacity/gateway/envoy.py",
+        "capacity/gateway/gke.py",
+        "capacity/gateway/header_policies.py",
+        "capacity/gateway/litellm.py",
+        "capacity/gateway/litellm_burndown_callback.py",
     ):
         h.update(rel.encode("utf-8"))
         h.update((REPO_ROOT / rel).read_bytes())

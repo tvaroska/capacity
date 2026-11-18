@@ -14,11 +14,8 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from capacity.api import app as api_app
-from capacity.burst import evaluate_micro_burst_window, evaluate_prefix_cache_dilution
 from capacity.cli import app as cli_app
-from capacity.finops import optimize_hybrid_commitment, schedule_residual_capacity
-from capacity.gateway import generate_gateway_bundle
-from capacity.models import (
+from capacity.contract.requests import (
     DeadlineJobSpec,
     DisaggregatedPoolRequest,
     GatewayConfigRequest,
@@ -28,9 +25,20 @@ from capacity.models import (
     SelfHostedAuditRequest,
     VllmParseRequest,
 )
-from capacity.portal import render_showcase_portal_html
-from capacity.self_hosted import evaluate_self_hosted_endpoint, size_disaggregated_prefill_decode
-from capacity.telemetry_parsers import load_inference_server_file, parse_inference_server_telemetry
+from capacity.engine.burst import evaluate_micro_burst_window, evaluate_prefix_cache_dilution
+from capacity.engine.commitment import optimize_hybrid_commitment
+from capacity.engine.scheduler import schedule_residual_capacity
+from capacity.engine.self_hosted import (
+    evaluate_self_hosted_endpoint,
+    size_disaggregated_prefill_decode,
+)
+from capacity.gateway.bundle import generate_gateway_bundle
+from capacity.ingest.request_logs import (
+    load_inference_server_file,
+    parse_inference_server_telemetry,
+)
+from capacity.showcase.evaluate import evaluate_showcase_scenario
+from capacity.showcase.renderer import render_showcase_portal_html
 from tests.conftest import FakeAsyncCache, load_generated_burndown_logger
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -313,8 +321,9 @@ def test_security_dos_nan_filter_injection_and_static_html() -> None:
     )
     assert r_inj.status_code == 422
 
-    static_html = render_showcase_portal_html(static_export=True)
-    live_html = render_showcase_portal_html(static_export=False)
+    default_report = evaluate_showcase_scenario()
+    static_html = render_showcase_portal_html(default_report, static_export=True)
+    live_html = render_showcase_portal_html(default_report, static_export=False)
     assert 'href="/docs"' not in static_html
     assert 'href="/docs"' in live_html
     assert "0.0% &rarr; 61.4%" in static_html

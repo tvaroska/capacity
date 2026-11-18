@@ -15,28 +15,27 @@ import pytest
 from google.api_core.exceptions import PermissionDenied
 from typer.testing import CliRunner
 
-from capacity.burst import evaluate_micro_burst_window, evaluate_model_tier_prefix_cache
-from capacity.capacity import require_capacity
 from capacity.cli import app as cli_app
-from capacity.core import check_gcp_project_access, fetch_inventory_telemetry
-from capacity.model_families import resolve_model_family
-from capacity.models import (
+from capacity.contract.common import SeriesKey, UnknownModelError
+from capacity.contract.requests import (
     MicroBurstRequest,
     ModelTierPrefixCacheRequest,
-    SeriesKey,
-    UnknownModelError,
     VllmParseRequest,
 )
-from capacity.portal import render_showcase_portal_html
-from capacity.scenario import (
-    ShowcaseScenario,
+from capacity.contract.scenario import ShowcaseScenario
+from capacity.engine.burst import evaluate_micro_burst_window, evaluate_model_tier_prefix_cache
+from capacity.engine.catalog import resolve_model_family
+from capacity.engine.sizing import require_capacity
+from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.showcase.evaluate import (
     audit_scenario_public_safety,
-    build_default_showcase_scenario,
     compile_scenario_from_telemetry,
     evaluate_showcase_scenario,
     load_showcase_scenario,
 )
-from capacity.telemetry_parsers import parse_inference_server_telemetry
+from capacity.showcase.renderer import render_showcase_portal_html
+from capacity.showcase.sample_data import build_default_showcase_scenario
+from capacity.telemetry.cloud_monitoring import check_gcp_project_access, fetch_inventory_telemetry
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -222,7 +221,7 @@ def test_shipped_enterprise_scenario_renders_clean_and_passes_strict_public_chec
     scenario_path = REPO_ROOT / "examples" / "scenarios" / "multi_tenant_enterprise.json"
     scenario = load_showcase_scenario(scenario_path, strict_public_check=True)
     assert audit_scenario_public_safety(scenario) == []
-    rendered = render_showcase_portal_html(static_export=True, scenario=scenario)
+    rendered = render_showcase_portal_html(evaluate_showcase_scenario(scenario), static_export=True)
     assert "Gemini Platform Capacity, Gateway &amp; FOCUS 1.2 Scorecard" in rendered
     assert "Option A / Option B" in rendered
     assert "Fixed-Term Renewal Cliff" in rendered

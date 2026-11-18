@@ -10,17 +10,17 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from capacity.burst import compute_weighted_burndown_tokens
-from capacity.finops import (
+from capacity.contract.requests import OptimizeRequest, ResidualScheduleRequest
+from capacity.engine.burst import compute_weighted_burndown_tokens
+from capacity.engine.catalog import GEMINI_1P_FLASH_SPEC, refill_window_for_gsus
+from capacity.engine.commitment import (
     MINUTES_PER_MONTH,
     SPILLOVER_MULTIPLIERS,
     optimize_hybrid_commitment,
-    schedule_residual_capacity,
 )
-from capacity.forecasting import holts_linear_trend, percentile
-from capacity.model_families import GEMINI_1P_FLASH_SPEC, refill_window_for_gsus
-from capacity.models import OptimizeRequest, ResidualScheduleRequest
-from capacity.scenario import make_default_deadline_jobs
+from capacity.engine.scheduler import schedule_residual_capacity
+from capacity.engine.stats import holts_linear_trend, percentile
+from capacity.showcase.sample_data import make_default_deadline_jobs
 
 TPM_PER_GSU = 120_900
 TPS_PER_GSU = TPM_PER_GSU / 60.0

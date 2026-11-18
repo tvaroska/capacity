@@ -20,7 +20,7 @@
 | :--- | :--- | :--- | :--- |
 | **1. Sizing from 24x7 averages or per-project `P99`** | `P50 = 0 GSUs` on 8x5 workloads, or `60%+` overnight waste when each project reserves its own peak; self-hosted autoscaling locks `max_replicas * GPUs` upfront. | Business traffic runs `~23.8%` of the 168h week; `accelerator/duty_cycle` stays `<60%` while `vLLM` KV-cache hits `>85%` preemption. | Active-hours **Newsvendor** sizing, **Shared Folder Provisioned Throughput (`RHPT`)** follow-the-sun spoke pooling (`-40%` GSUs), and **Disaggregated Prefill/Decode** replica pools. |
 | **2. Watching 60-second Cloud Monitoring charts** | Sudden HTTP `429` storms fire while 1-minute throughput charts sit calmly below `70%` utilization. | Serving quotas enforce **`1s` (`>=50` GSUs) or `10s` (`<50` GSUs)** token buckets (`+5%` burst credit), and `>200K` context prompts jump from `1x/4x` to **`2.0x` input / `7.5x` output+reasoning** burndown. | Sub-second conserved burst simulator (`illusion_detected`) and exact `<=200K` vs. `>200K` weighted burndown calculator (`capacity optimize`). |
-| **3. Injecting dynamic UUIDs/timestamps at prompt top & round-robin GPU routing** | Prefix cache hit rate collapses to `0%` on block-aligned tiers (multi-turn routing affinity drops from `90%` to `0.77%` in `capacity/burst.py` when proxies strip `thought_signature`; Track B effective cache hit rate drops from `26.84%` to `0.25%`), and `N` replicas dilute hits to `h / N`. | Block-aligned tiers (`4,096`-token blocks, `6,144` floor) invalidate everything after a mutated **Block 0**; stateless load balancers re-prefill identical system prompts across every pod. | Model-tier prefix-cache linter (Block-0 check, Turn-0 dummy-turn anchor, `thought_signature` audit) and `GKE epp` prefix/KV scorer weights. |
+| **3. Injecting dynamic UUIDs/timestamps at prompt top & round-robin GPU routing** | Prefix cache hit rate collapses to `0%` on block-aligned tiers (multi-turn routing affinity drops from `90%` to `0.77%` in `capacity/engine/burst.py` when proxies strip `thought_signature`; Track B effective cache hit rate drops from `26.84%` to `0.25%`), and `N` replicas dilute hits to `h / N`. | Block-aligned tiers (`4,096`-token blocks, `6,144` floor) invalidate everything after a mutated **Block 0**; stateless load balancers re-prefill identical system prompts across every pod. | Model-tier prefix-cache linter (Block-0 check, Turn-0 dummy-turn anchor, `thought_signature` audit) and `GKE epp` prefix/KV scorer weights. |
 | **4. Enforcing LiteLLM raw `tpm_limit` & default router `cooldown_time`** | Reasoning-heavy tenants blow through unweighted quotas, a 1s PT micro-burst `429` blackholes the entire PT deployment for 60s, and Prisma locks Postgres above `500 RPS`. | LiteLLM's native `tpm_limit` counts unweighted 60s raw tokens, and each Uvicorn worker spawns a separate Rust Prisma engine (`pods * workers` connections). | Tag-routed `litellm_config.yaml` (`cooldown_time` matched to `1s`/`10s` buckets + `use_redis_transaction_buffer`), stateful Redis `litellm_burndown_callback.py`, Envoy post-SSE `CEL`, and PgBouncer scale audit. |
 | **5. Sending overnight async jobs to the `0.5x` Batch API** | Enterprise pays a **second variable invoice (`+0.5x`)** while already-paid 24x7 `PT` reservations sit `75%` idle from 8 PM to 6 AM. | Batch API jobs bypass `PT` reservations completely, whereas paced online calls with `X-Vertex-AI-LLM-Request-Type: dedicated` consume idle `PT` at **`$0.00` marginal cost**. | **Batch Double-Payment Auditor** and **3-Tier Residual Capacity Scheduler** (`Tier-0 Revenue > Tier-1 Exact Value-Maximizing EDF > Tier-2 Evergreen Water-Fill`). |
 | **6. Dividing the monthly reservation invoice by raw token counts** | Reasoning agents (`4x-7.5x` decode weight) get subsidized up to `4x` by high-cache RAG teams (`0.1x`), and early adopters get punished `3x` for unallocated corporate headroom. | Raw token counts ignore compute burndown weights and conflate active consumption with unallocated capacity growth buffers. | **FinOps FOCUS 1.2 Two-Pool Chargeback** (*Active Consumed Pool* billed by weighted burndown vs. *Unallocated Idle Pool* held by platform) + **5 FinOps for AI KPIs**. |
@@ -104,7 +104,7 @@ sequenceDiagram
 ### Generated Envoy AI Gateway Post-SSE `CEL` Manifest (`capacity gateway --target envoy`)
 
 ```yaml
-# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.4.0)
+# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.5.0)
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 metadata:
@@ -180,7 +180,7 @@ spec:
 
 > **Window & Reasoning Token Alignment:** Envoy `BackendTrafficPolicy` enforces each business unit's funded share on a per-`Minute` global counter (`2,418,000 TPM / 4 BUs = 604,500`) to isolate noisy-neighbor overage, while sub-second `1s`/`10s` `429` spikes are handled by upstream `PT` buckets plus a matched router `cooldown_time` (`2s`/`5s`). In Envoy AI Gateway's `AIGatewayRoute` metadata, `OutputToken` (`output_tokens` in the `CEL` block) aggregates completion plus reasoning (`thoughts`) tokens reported in Vertex AI's SSE `usage_metadata`.
 
-### The 8 Canonical Header-Pair Routing Policies (`capacity/gateway.py`)
+### The 8 Canonical Header-Pair Routing Policies (`capacity/gateway/header_policies.py`)
 
 Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Request-Type` (when `<unset>` is shown, omit the header from the HTTP request):
 
@@ -197,7 +197,7 @@ Each policy pairs `X-Vertex-AI-LLM-Request-Type` with `X-Vertex-AI-LLM-Shared-Re
 
 ### First-Class 3P Anthropic Claude on Vertex AI Provisioned Throughput
 
-`capacity` models physical differences between **1P Gemini PT** and **3P Anthropic Claude PT** (`claude-3-5-sonnet-v2`, `claude-3-7-sonnet`, `claude-sonnet-4-6`, `claude-opus-4-5`, `claude-opus-4-6`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) via [`capacity/model_families.py`](capacity/model_families.py):
+`capacity` models physical differences between **1P Gemini PT** and **3P Anthropic Claude PT** (`claude-3-5-sonnet-v2`, `claude-3-7-sonnet`, `claude-sonnet-4-6`, `claude-opus-4-5`, `claude-opus-4-6`, `claude-sonnet-5-5`, `claude-opus-5-5`, `claude-haiku-5-5`) via [`capacity/engine/catalog.py`](capacity/engine/catalog.py):
 
 | Physics Dimension | 1P Gemini PT | 3P Anthropic Claude PT (`capacity --model claude-*`) |
 | :--- | :--- | :--- |
@@ -220,7 +220,7 @@ uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 4
 ### 4A. Executive Showcase Scorecard (`capacity demo`) & 5-KPI Definitions
 
 ```text
-=== Capacity v0.4.0 — End-to-End Executive Showcase Scorecard ===
+=== Capacity v0.5.0 — End-to-End Executive Showcase Scorecard ===
 1. FinOps for AI KPIs:    CPVO=$0.1750/outcome | CPWT_1M=$5.6193 | TER=7.4% | CSR=68.4% | ECUR_168h=57.0%
 2. Folder RHPT Pooling:   Siloed=15 GSUs -> Pooled=9 GSUs (Saved=6 GSUs / $12,000/mo)
 3. Batch 0.5x Trap Saved: $11,250.00/mo (Lifts PT utilization 24% -> 67.1%)
@@ -253,7 +253,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 491e80c7efc1...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 4311139a5bfa...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |

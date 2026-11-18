@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 
-from capacity.model_families import (
+from capacity.contract.requests import MicroBurstRequest, ModelTierPrefixCacheRequest
+from capacity.contract.results import MicroBurstAudit, ModelTierPrefixCacheAudit, PrefixCacheAudit
+from capacity.engine.catalog import (
     GEMINI_1S_GSU_THRESHOLD,
     ModelCatalog,
     build_model_catalog,
@@ -12,13 +14,6 @@ from capacity.model_families import (
     refill_window_for_gsus,
     resolve_model_family,
     resolve_model_record,
-)
-from capacity.models import (
-    MicroBurstAudit,
-    MicroBurstRequest,
-    ModelTierPrefixCacheAudit,
-    ModelTierPrefixCacheRequest,
-    PrefixCacheAudit,
 )
 
 # 60-second chart utilization % below which sub-second 429 bursts appear calm (ADR-002).
@@ -77,11 +72,7 @@ def evaluate_micro_burst_window(
     *,
     catalog: ModelCatalog | None = None,
 ) -> MicroBurstAudit:
-    """Evaluate token-bucket enforcement (`1s`/`10s` on 1P Gemini; `30s`/`60s` on 3P Claude).
-
-    Enforces 60-second token conservation: total tokens arriving inside the refill window
-    cannot exceed `sixty_sec_tpm` (`active_peak_tps * refill_window_seconds <= sixty_sec_tpm`).
-    """
+    """Evaluate token-bucket enforcement (`1s`/`10s` on 1P Gemini; `30s`/`60s` on 3P Claude)."""
     cat = catalog if catalog is not None else build_model_catalog()
     record = cat.require(req.model)
     spec = record.family_spec
@@ -148,8 +139,6 @@ def evaluate_micro_burst_window(
         and required_gsus >= GEMINI_1S_GSU_THRESHOLD
         and per_gsu_effective_tps > 0
     ):
-        # Buying >=50 GSUs switches 1P enforcement from the 10s bucket to the 1s bucket, so
-        # zero-spillover sizing must also cover the conserved 1s burst in that regime.
         conserved_1s_tps = (
             min(max(sixty_sec_avg_tps, raw_1s), bounded_tpm) if bounded_tpm > 0.0 else raw_1s
         )

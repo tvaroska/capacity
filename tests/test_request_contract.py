@@ -13,9 +13,9 @@ from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from capacity import models
 from capacity.api import app as api_app
 from capacity.cli import app as cli_app
+from capacity.contract import common
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 client = TestClient(api_app)
@@ -110,8 +110,8 @@ def test_schedule_accepts_200_jobs_and_rejects_201() -> None:
 
 
 def test_requests_that_expand_to_a_huge_matrix_are_rejected() -> None:
-    too_many = {f"t{i}": 1.0 for i in range(models.MAX_SERIES_KEYS + 1)}
-    too_long = {"a": [1.0] * (models.MAX_HOURLY_POINTS + 1)}
+    too_many = {f"t{i}": 1.0 for i in range(common.MAX_SERIES_KEYS + 1)}
+    too_long = {"a": [1.0] * (common.MAX_HOURLY_POINTS + 1)}
     wide_and_long = {f"t{i}": 1.0 for i in range(999)} | {"long": [1.0] * 2_000}
     for tenants in (too_many, too_long, wide_and_long):
         resp = client.post("/api/v1/chargeback", json={"hourly_consumed_tpm_by_tenant": tenants})

@@ -11,12 +11,13 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from capacity.api import app as api_app
-from capacity.capacity import compute_recommendations, require_capacity
 from capacity.cli import app as cli_app
-from capacity.forecasting import build_demo_throughput
-from capacity.gateway import generate_gateway_bundle
-from capacity.models import GatewayConfigRequest, SeriesKey, UnknownModelError
-from capacity.self_hosted import resolve_self_hosted_profile
+from capacity.contract.common import SeriesKey, UnknownModelError
+from capacity.contract.requests import GatewayConfigRequest
+from capacity.engine.self_hosted import resolve_self_hosted_profile
+from capacity.engine.sizing import compute_recommendations, require_capacity
+from capacity.gateway.bundle import generate_gateway_bundle
+from capacity.telemetry.local import build_demo_throughput
 from tests.conftest import load_generated_burndown_logger
 
 client = TestClient(api_app)

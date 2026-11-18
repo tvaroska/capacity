@@ -1,101 +1,10 @@
-"""Pydantic wire models for capacity recommendations, micro-burst, Newsvendor, and FOCUS 1.2."""
+"""Typed Pydantic v2 response and audit models returned by `capacity` operations."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from importlib.metadata import PackageNotFoundError, version
-from typing import Annotated, Any, Literal, Self
+from pydantic import Field
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
-
-try:
-    PACKAGE_VERSION = version("capacity")
-except PackageNotFoundError:  # pragma: no cover
-    PACKAGE_VERSION = "0.4.0"
-
-# Interpolated into generated YAML/Kubernetes manifests and Cloud Monitoring filters;
-# reject quotes, newlines, spaces, or injection tokens at validation boundaries.
-GCP_PROJECT_ID_PATTERN = r"^[a-z][a-z0-9-]{4,28}[a-z0-9]$"
-GCP_LOCATION_PATTERN = r"^[a-z][a-z0-9-]{0,62}$"
-MODEL_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9.@/_-]{0,127}$"
-K8S_NAME_PATTERN = r"^[a-z0-9]([a-z0-9.-]{0,61}[a-z0-9])?$"
-
-BoundedTpmFloat = Annotated[float, Field(ge=0.0, le=1e11, allow_inf_nan=False)]
-FiniteNonNegFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
-FinitePosFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
-
-# Size bounds: one request must not be able to make the service compute for seconds.
-MAX_HOURLY_POINTS = 8_784  # hours in a leap year
-MAX_SERIES_POINTS = 60_480  # 42 days of 1-minute buckets or 7 days of 10-second buckets
-MAX_SERIES_KEYS = 1_000  # tenants or projects in one request
-MAX_SERIES_CELLS = 1_000_000  # keys times the longest series: the padded matrix
-HourlyTpmSeries = Annotated[list[BoundedTpmFloat], Field(max_length=MAX_HOURLY_POINTS)]
-SpilloverTier = Literal["priority", "standard", "flex"]
-CapacityModeLiteral = Literal["gsu", "self-hosted"]
-
-DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR: tuple[float, ...] = (
-    600_000.0,
-    400_000.0,
-    300_000.0,
-    250_000.0,
-    200_000.0,
-    350_000.0,
-    900_000.0,
-    1_800_000.0,
-)
-
-
-class UnknownModelError(ValueError):
-    """Raised when a model or self-hosted profile has no known capacity, instead of guessing."""
-
-
-@dataclass(frozen=True, order=True)
-class SeriesKey:
-    """Typed telemetry series identifier replacing ad-hoc `folder/model@region` string splitting."""
-
-    model: str
-    region: str | None = None
-    folder: str | None = None
-
-    @classmethod
-    def parse(cls, raw: str, *, by_region: bool = True) -> SeriesKey:
-        cleaned = raw.strip()
-        if "@" in cleaned:
-            model_part, reg_raw = cleaned.split("@", 1)
-            region: str | None = reg_raw if by_region else None
-        else:
-            model_part = cleaned
-            region = "global" if by_region else None
-
-        if "/" in model_part and not model_part.startswith("publishers/"):
-            folder_part, model_id = model_part.split("/", 1)
-            folder: str | None = folder_part or None
-        else:
-            folder, model_id = None, model_part
-        return cls(model=model_id, region=region, folder=folder)
-
-    def format(self, *, by_region: bool = True) -> str:
-        prefix = f"{self.folder}/" if self.folder else ""
-        if by_region:
-            loc = self.region or "global"
-            return f"{prefix}{self.model}@{loc}"
-        return f"{prefix}{self.model}"
-
-
-class StrictModel(BaseModel):
-    """Base wire model: a field the schema does not define is an error, never ignored."""
-
-    model_config = ConfigDict(extra="forbid")
-
-
-def _reject_oversized_matrix(series_by_key: dict[str, Any]) -> None:
-    longest = max((len(v) for v in series_by_key.values() if isinstance(v, list)), default=1)
-    cells = len(series_by_key) * max(1, longest)
-    if cells > MAX_SERIES_CELLS:
-        raise ValueError(
-            f"{len(series_by_key)} series padded to {longest} points is {cells:,} cells; "
-            f"the limit is {MAX_SERIES_CELLS:,}"
-        )
+from capacity.contract.common import CapacityModeLiteral, StrictModel
 
 
 class PercentileDetail(StrictModel):
@@ -220,15 +129,6 @@ class MicroBurstAudit(StrictModel):
     gsus_required_for_zero_spillover: int
 
 
-class MicroBurstRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    provisioned_gsus: int = Field(default=10, ge=0, le=100_000)
-    sixty_sec_tpm: BoundedTpmFloat
-    peak_1s_tps: BoundedTpmFloat
-    peak_10s_tps: BoundedTpmFloat | None = None
-    peak_30s_tps: BoundedTpmFloat | None = None
-
-
 class PrefixCacheAudit(StrictModel):
     """Prefix-cache dilution audit comparing round-robin load balancing vs sticky routing."""
 
@@ -279,19 +179,6 @@ class ModelTierPrefixCacheAudit(StrictModel):
     remediation_steps: list[str]
 
 
-class ModelTierPrefixCacheRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    total_input_tokens: int = Field(default=18_000, ge=1, le=2_000_000)
-    static_prefix_tokens: int = Field(default=14_000, ge=0, le=2_000_000)
-    output_tokens: int = Field(default=800, ge=0, le=200_000)
-    thoughts_tokens: int = Field(default=400, ge=0, le=200_000)
-    dynamic_header_offset_tokens: int | None = Field(default=120, ge=0, le=2_000_000)
-    single_turn_request: bool = False
-    dummy_turn_anchor_applied: bool = False
-    strip_thought_signatures: bool = False
-    num_replicas: int = Field(default=8, ge=1, le=1_024)
-
-
 class HybridCommitmentRecommendation(StrictModel):
     """Newsvendor quantile optimizer result for hybrid Base PT + Spillover sizing."""
 
@@ -320,42 +207,6 @@ class HybridCommitmentRecommendation(StrictModel):
     savings_vs_p99_pt_pct: float
 
 
-class OptimizeRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    tpm_series: list[BoundedTpmFloat] = Field(min_length=1, max_length=MAX_SERIES_POINTS)
-    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
-    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
-    spillover_tier: SpilloverTier = "priority"
-    fsp_discount_pct: float = Field(default=0.0, ge=0.0, le=50.0, allow_inf_nan=False)
-    active_duty_cycle_pct: float = Field(
-        default=100.0,
-        gt=0.0,
-        le=100.0,
-        allow_inf_nan=False,
-        description="Percentage of the 168h week represented by tpm_series (100 for 24x7 series)",
-    )
-    sixty_sec_tpm: BoundedTpmFloat | None = None
-    peak_1s_tps: BoundedTpmFloat | None = None
-    peak_10s_tps: BoundedTpmFloat | None = None
-    peak_30s_tps: BoundedTpmFloat | None = None
-    total_input_tokens: int = Field(default=20_000, ge=0, le=2_000_000)
-    output_tokens: int = Field(default=1_000, ge=0, le=200_000)
-    thoughts_tokens: int = Field(default=500, ge=0, le=200_000)
-    cached_tokens: int = Field(default=16_000, ge=0, le=2_000_000)
-    cache_write_5m_tokens: int = Field(default=0, ge=0, le=2_000_000)
-    cache_write_1h_tokens: int = Field(default=0, ge=0, le=2_000_000)
-    shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
-    baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
-    num_round_robin_endpoints: int = Field(default=8, ge=1, le=1_024)
-    requests_per_second: float | None = Field(
-        default=None,
-        gt=0.0,
-        le=100_000.0,
-        allow_inf_nan=False,
-        description="Rate for prefix-cache GSU counts; taken from the trace peak if omitted",
-    )
-
-
 class OptimizeResponse(StrictModel):
     model: str
     normalized_model: str
@@ -368,26 +219,91 @@ class OptimizeResponse(StrictModel):
     prefix_cache: PrefixCacheAudit
 
 
-class SelfHostedAuditRequest(StrictModel):
-    profile: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
-    tpm_series: list[BoundedTpmFloat] = Field(min_length=1, max_length=MAX_SERIES_POINTS)
-    min_replica_count: int = Field(default=2, ge=0, le=10_000)
-    max_replica_count: int = Field(default=6, ge=1, le=10_000)
-    observed_accelerator_duty_cycle_pct: float = Field(
-        default=52.0, ge=0.0, le=100.0, allow_inf_nan=False
+class SelfHostedProfile(StrictModel):
+    """Hardware and serving throughput profile for a self-hosted open-weight model replica."""
+
+    profile_id: str
+    model_family: str
+    machine_type: str
+    accelerator_type: str
+    accelerators_per_replica: int = Field(ge=1)
+    tps_per_replica: float = Field(
+        gt=0.0, description="Sustained weighted burndown tokens/sec per replica"
     )
-    observed_vllm_kv_cache_usage_pct: float = Field(
-        default=91.5, ge=0.0, le=100.0, allow_inf_nan=False
+    max_kv_cache_tokens: int = Field(
+        gt=0, description="Usable KV-cache token capacity per replica in HBM"
     )
-    observed_vllm_requests_waiting: FiniteNonNegFloat = 14.0
-    total_input_tokens: int = Field(default=20_000, ge=0, le=2_000_000)
-    shared_prefix_ratio: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
-    baseline_cache_hit_rate: float = Field(default=0.80, ge=0.0, le=1.0, allow_inf_nan=False)
+    reserved_replica_monthly_usd: float = Field(
+        gt=0.0, description="Monthly cost per 1Y CUD / reserved replica"
+    )
+    on_demand_replica_hourly_usd: float = Field(
+        gt=0.0, description="Hourly cost per elastic burst replica"
+    )
+
+    @property
+    def tpm_per_replica(self) -> int:
+        return round(self.tps_per_replica * 60.0)
 
 
-class VllmParseRequest(StrictModel):
-    raw_content: str = Field(max_length=5_000_000)
-    default_model: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
+class SelfHostedEndpointAudit(StrictModel):
+    """Comprehensive capacity, KV-cache, quota-lock, and Newsvendor audit for GPU replicas."""
+
+    profile_id: str
+    machine_type: str
+    accelerator_type: str
+    accelerators_per_replica: int
+    tps_per_replica: float
+    tpm_per_replica: int
+    min_replica_count: int
+    max_replica_count: int
+    locked_regional_accelerators: int
+    active_baseline_accelerators: int
+    stranded_quota_accelerators: int
+    observed_accelerator_duty_cycle_pct: float
+    observed_vllm_kv_cache_usage_pct: float
+    observed_vllm_requests_waiting: float
+    duty_cycle_illusion_detected: bool
+    kv_preemption_risk: bool
+    recommended_autoscaler_metric: str
+    optimal_reserved_replicas: int
+    p99_peak_replicas: int
+    breakeven_replica_utilization_pct: float
+    reserved_base_monthly_cost_usd: float
+    elastic_burst_monthly_cost_usd: float
+    total_hybrid_monthly_cost_usd: float
+    all_on_demand_monthly_cost_usd: float
+    p99_static_reserved_monthly_cost_usd: float
+    scale_to_zero_nonprod_savings_usd: float
+    prefix_cache: PrefixCacheAudit
+
+
+class VllmTelemetrySnapshot(StrictModel):
+    """Normalized telemetry extracted from Prometheus scrapes, OTel spans, or inference logs."""
+
+    source_format: str
+    model: str
+    tpm_series: list[float]
+    prompt_tokens_total: int
+    cached_tokens_total: int
+    cache_write_5m_tokens_total: int = 0
+    cache_write_1h_tokens_total: int = 0
+    completion_tokens_total: int
+    thoughts_tokens_total: int = 0
+    weighted_burndown_tokens_total: float
+    observed_kv_cache_usage_pct: float
+    observed_requests_waiting: float
+    observed_cache_hit_rate: float
+    hourly_consumed_tpm_by_tenant: dict[str, list[float]]
+    total_requests: int = 0
+    spillover_requests: int = 0
+    http_429_count: int = 0
+    peak_1s_burndown_tps: float = 0.0
+    peak_10s_burndown_tps: float = 0.0
+    peak_30s_burndown_tps: float = 0.0
+    minute_tpm_by_model_region: dict[str, list[float]] = Field(default_factory=dict)
+    requests_by_model_region: dict[str, int] = Field(default_factory=dict)
+    spillover_by_model_region: dict[str, int] = Field(default_factory=dict)
+    http_429_by_model_region: dict[str, int] = Field(default_factory=dict)
 
 
 class TenantChargebackRow(StrictModel):
@@ -419,29 +335,6 @@ class FocusChargebackReport(StrictModel):
     tenants: list[TenantChargebackRow]
 
 
-class ChargebackRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    mode: CapacityModeLiteral = "gsu"
-    provisioned_gsus: int = Field(default=10, ge=1, le=100_000)
-    gsu_monthly_price_usd: FinitePosFloat | None = Field(
-        default=None,
-        description="Monthly price per GSU or GPU replica (defaults to 2,000 GSU or profile price)",
-    )
-    hourly_consumed_tpm_by_tenant: dict[str, HourlyTpmSeries | BoundedTpmFloat] = Field(
-        min_length=1,
-        max_length=MAX_SERIES_KEYS,
-    )
-    tenant_raw_token_weights: dict[str, FinitePosFloat] | None = Field(
-        default=None, max_length=MAX_SERIES_KEYS
-    )
-    async_batch_waterfill_tpm: BoundedTpmFloat = 0.0
-
-    @model_validator(mode="after")
-    def _bounded_work(self) -> Self:
-        _reject_oversized_matrix(self.hourly_consumed_tpm_by_tenant)
-        return self
-
-
 class BatchScavengerAudit(StrictModel):
     """Batch API (0.5x) Double-Payment Trap vs $0 Online PT Scavenging Audit."""
 
@@ -459,24 +352,6 @@ class BatchScavengerAudit(StrictModel):
     double_payment_waste_avoided_usd: float
     effective_utilization_after_scavenging_pct: float
     recommended_header_policy: str
-
-
-class BatchScavengerRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
-    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
-    daytime_active_utilization_pct: float = Field(
-        default=24.0, ge=0.0, le=100.0, allow_inf_nan=False
-    )
-    batch_monthly_burndown_tokens: FiniteNonNegFloat = 45_000_000_000.0
-    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
-
-
-class DeadlineJobSpec(StrictModel):
-    job_id: str
-    value_usd: FinitePosFloat
-    burndown_tokens: FinitePosFloat
-    deadline_hour: int = Field(ge=1, le=168)
 
 
 class ScheduledDeadlineJob(StrictModel):
@@ -507,32 +382,6 @@ class ResidualScheduleReport(StrictModel):
     jobs: list[ScheduledDeadlineJob]
 
 
-class ResidualScheduleRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
-    safety_headroom_ratio: float = Field(default=0.85, gt=0.1, le=1.0, allow_inf_nan=False)
-    revenue_tpm_by_hour: list[BoundedTpmFloat] = Field(
-        default_factory=lambda: list(DEFAULT_OVERNIGHT_REVENUE_TPM_BY_HOUR),
-        min_length=1,
-        max_length=168,
-    )
-    deadline_jobs: list[DeadlineJobSpec] = Field(max_length=200)
-    evergreen_backfill_tokens: FiniteNonNegFloat = 250_000_000.0
-    paygo_per_1m_burndown_tokens_usd: FinitePosFloat = 0.50
-
-    @model_validator(mode="after")
-    def _job_ids_are_unique(self) -> Self:
-        # Admission is tracked by job_id: a repeated id would admit both jobs on one budget.
-        seen: set[str] = set()
-        for job in self.deadline_jobs:
-            if job.job_id in seen:
-                raise ValueError(
-                    f"Duplicate job_id {job.job_id!r}: every deadline job needs its own id"
-                )
-            seen.add(job.job_id)
-        return self
-
-
 class FolderPoolingReport(StrictModel):
     """Shared Folder RHPT Pooling vs Siloed Per-Project PT Stranding Audit."""
 
@@ -549,21 +398,6 @@ class FolderPoolingReport(StrictModel):
     governance_notes: list[str]
 
 
-class FolderPoolingRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    percentile_target: int = Field(default=90, ge=1, le=100)
-    gsu_monthly_price_usd: FinitePosFloat = 2_000.0
-    hourly_tpm_by_project: dict[str, HourlyTpmSeries] = Field(
-        min_length=1,
-        max_length=MAX_SERIES_KEYS,
-    )
-
-    @model_validator(mode="after")
-    def _bounded_work(self) -> Self:
-        _reject_oversized_matrix(self.hourly_tpm_by_project)
-        return self
-
-
 class FinOpsKpiScorecard(StrictModel):
     """5 Standardized FinOps for AI Unit Economics KPIs (with bq-eval CPVO bridge)."""
 
@@ -576,18 +410,6 @@ class FinOpsKpiScorecard(StrictModel):
     total_amortized_cost_usd: float
     total_weighted_burndown_tokens: float
     verified_outcomes: int
-
-
-class FinOpsKpiRequest(StrictModel):
-    total_amortized_cost_usd: FinitePosFloat = 24_500.0
-    uncached_input_tokens: int = Field(default=1_200_000_000, ge=0)
-    cached_input_tokens: int = Field(default=3_800_000_000, ge=0)
-    delivered_output_tokens: int = Field(default=420_000_000, ge=0)
-    thinking_tokens: int = Field(default=180_000_000, ge=0)
-    retry_and_judge_tokens: int = Field(default=95_000_000, ge=0)
-    verified_outcomes: int = Field(default=140_000, ge=1)
-    hourly_reserved_burndown_capacity: FinitePosFloat = 72_540_000.0
-    weekly_consumed_burndown_tokens: FiniteNonNegFloat = 6_950_000_000.0
 
 
 class DisaggregatedPoolSizing(StrictModel):
@@ -609,15 +431,6 @@ class DisaggregatedPoolSizing(StrictModel):
     ttft_headroom_pct: float
     tpot_headroom_pct: float
     recommendation: str
-
-
-class DisaggregatedPoolRequest(StrictModel):
-    profile: str = Field(default="llama-3.3-70b-fp8", pattern=MODEL_ID_PATTERN)
-    peak_qps: float = Field(default=18.0, gt=0.0, le=100_000.0, allow_inf_nan=False)
-    avg_input_tokens: int = Field(default=6_400, ge=1, le=2_000_000)
-    avg_output_tokens: int = Field(default=450, ge=1, le=200_000)
-    target_ttft_ms: float = Field(default=350.0, gt=0.0, le=60_000.0, allow_inf_nan=False)
-    target_tpot_ms: float = Field(default=25.0, gt=0.0, le=10_000.0, allow_inf_nan=False)
 
 
 class GatewayHeaderPolicy(StrictModel):
@@ -664,16 +477,3 @@ class GatewayConfigBundle(StrictModel):
     litellm_burndown_callback_py: str
     envoy_ai_gateway_yaml: str
     gke_epp_inference_pool_yaml: str
-
-
-class GatewayConfigRequest(StrictModel):
-    model: str = Field(default="gemini-3.8-flash", pattern=MODEL_ID_PATTERN)
-    project_id: str = Field(default="prod-genai-pt-host", pattern=GCP_PROJECT_ID_PATTERN)
-    location: str = Field(default="global", pattern=GCP_LOCATION_PATTERN)
-    provisioned_gsus: int = Field(default=20, ge=1, le=100_000)
-    target_rps: int = Field(default=650, ge=1, le=1_000_000)
-    concurrent_sse_streams: int = Field(default=400, ge=0, le=1_000_000)
-    pods: int = Field(default=12, ge=1, le=10_000)
-    uvicorn_workers_per_pod: int = Field(default=4, ge=1, le=128)
-    self_hosted_model: str = Field(default="llama-3.3-70b-fp8", pattern=K8S_NAME_PATTERN)
-    business_unit_shares: int = Field(default=4, ge=1, le=1_000)

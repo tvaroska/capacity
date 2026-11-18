@@ -10,32 +10,9 @@ from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
 from capacity.api import app as fastapi_app
-from capacity.burst import (
-    compute_weighted_burndown_tokens,
-    evaluate_micro_burst_window,
-    evaluate_model_tier_prefix_cache,
-    evaluate_prefix_cache_dilution,
-)
-from capacity.capacity import (
-    build_response,
-    compute_recommendations,
-    find_capacity,
-    load_gsu_config,
-)
 from capacity.cli import app as cli_app
-from capacity.core import GROUP_BY_FIELDS, fetch_throughput
-from capacity.finops import (
-    compute_finops_kpis,
-    compute_focus_chargeback,
-    evaluate_batch_scavenger_economics,
-    evaluate_folder_pooling,
-    optimize_hybrid_commitment,
-    schedule_residual_capacity,
-)
-from capacity.forecasting import build_demo_throughput, holts_linear_trend, percentile
-from capacity.gateway import audit_litellm_scaling, generate_gateway_bundle
-from capacity.model_families import DEFAULT_GSU_CONFIG, normalize_model_id
-from capacity.models import (
+from capacity.contract.common import PACKAGE_VERSION, SeriesKey
+from capacity.contract.requests import (
     BatchScavengerRequest,
     ChargebackRequest,
     DeadlineJobSpec,
@@ -48,15 +25,43 @@ from capacity.models import (
     OptimizeRequest,
     ResidualScheduleRequest,
     SelfHostedAuditRequest,
-    SeriesKey,
     VllmParseRequest,
 )
-from capacity.self_hosted import (
+from capacity.engine.burst import (
+    compute_weighted_burndown_tokens,
+    evaluate_micro_burst_window,
+    evaluate_model_tier_prefix_cache,
+    evaluate_prefix_cache_dilution,
+)
+from capacity.engine.catalog import DEFAULT_GSU_CONFIG, normalize_model_id
+from capacity.engine.chargeback import compute_focus_chargeback
+from capacity.engine.commitment import optimize_hybrid_commitment
+from capacity.engine.kpis import compute_finops_kpis
+from capacity.engine.pooling import evaluate_folder_pooling
+from capacity.engine.scheduler import (
+    evaluate_batch_scavenger_economics,
+    schedule_residual_capacity,
+)
+from capacity.engine.self_hosted import (
     DEFAULT_SELF_HOSTED_PROFILES,
     evaluate_self_hosted_endpoint,
     size_disaggregated_prefill_decode,
 )
-from capacity.telemetry_parsers import load_inference_server_file, parse_inference_server_telemetry
+from capacity.engine.sizing import (
+    build_response,
+    compute_recommendations,
+    find_capacity,
+    load_gsu_config,
+)
+from capacity.engine.stats import holts_linear_trend, percentile
+from capacity.gateway.bundle import generate_gateway_bundle
+from capacity.gateway.litellm import audit_litellm_scaling
+from capacity.ingest.request_logs import (
+    load_inference_server_file,
+    parse_inference_server_telemetry,
+)
+from capacity.telemetry.cloud_monitoring import GROUP_BY_FIELDS, fetch_throughput
+from capacity.telemetry.local import build_demo_throughput
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 runner = CliRunner()
@@ -735,7 +740,9 @@ def test_scavenger_residual_scheduler_folder_pooling_and_kpis(tmp_path: Path) ->
     res_demo = runner.invoke(cli_app, ["demo", "--html-out", str(html_out)])
     assert res_demo.exit_code == 0
     assert html_out.is_file()
-    assert "Capacity Showcase Workbench (v0.4.0)" in html_out.read_text(encoding="utf-8")
+    assert f"Capacity Showcase Workbench (v{PACKAGE_VERSION})" in html_out.read_text(
+        encoding="utf-8"
+    )
 
     res_gw = runner.invoke(cli_app, ["gateway", "--target", "litellm", "--gsus", "20"])
     assert res_gw.exit_code == 0

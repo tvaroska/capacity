@@ -6,13 +6,13 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
-from typing import Literal
 
-from capacity.models import UnknownModelError
-
-PublisherName = Literal["google", "anthropic", "self_hosted"]
-ModelFamilyName = Literal["gemini_1p", "claude_3p", "self_hosted_vllm"]
-LifecycleTrack = Literal["long_term_ga", "short_term_ga", "preview", "legacy_sunset"]
+from capacity.contract.common import (
+    LifecycleTrack,
+    ModelFamilyName,
+    PublisherName,
+    UnknownModelError,
+)
 
 ENV_PREFIX = "GSU_CAPACITY_"
 # 1P Gemini switches from the 10-second bucket to the 1-second bucket at 50 GSUs (ADR-002).

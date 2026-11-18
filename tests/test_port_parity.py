@@ -7,10 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 
-from capacity.capacity import compute_recommendations
-from capacity.core import CloudMonitoringAdapter
-from capacity.forecasting import LocalTraceAdapter, TelemetryPort
-from capacity.models import SeriesKey
+from capacity.contract.common import SeriesKey
+from capacity.engine.sizing import compute_recommendations
+from capacity.telemetry.cloud_monitoring import CloudMonitoringAdapter
+from capacity.telemetry.local import LocalTraceAdapter
+from capacity.telemetry.port import TelemetryPort
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 

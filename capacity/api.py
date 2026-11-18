@@ -12,63 +12,61 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import Field
 
-from capacity.burst import evaluate_model_tier_prefix_cache
-from capacity.capacity import evaluate_gsu_optimization, recommend_capacity
-from capacity.finops import (
-    compute_finops_kpis,
-    compute_focus_chargeback,
-    evaluate_batch_scavenger_economics,
-    evaluate_folder_pooling,
-    schedule_residual_capacity,
-)
-from capacity.forecasting import (
-    DEFAULT_DAYS,
-    DEFAULT_PERCENTILES,
-    LocalTraceAdapter,
-    TelemetryPort,
-)
-from capacity.gateway import generate_gateway_bundle
-from capacity.models import (
+from capacity.contract.common import (
     GCP_LOCATION_PATTERN,
     GCP_PROJECT_ID_PATTERN,
     MODEL_ID_PATTERN,
     PACKAGE_VERSION,
-    BatchScavengerAudit,
+    UnknownModelError,
+)
+from capacity.contract.requests import (
     BatchScavengerRequest,
     ChargebackRequest,
     DisaggregatedPoolRequest,
-    DisaggregatedPoolSizing,
     FinOpsKpiRequest,
+    FolderPoolingRequest,
+    GatewayConfigRequest,
+    ModelTierPrefixCacheRequest,
+    OptimizeRequest,
+    ResidualScheduleRequest,
+    SelfHostedAuditRequest,
+    VllmParseRequest,
+)
+from capacity.contract.results import (
+    BatchScavengerAudit,
+    DisaggregatedPoolSizing,
     FinOpsKpiScorecard,
     FocusChargebackReport,
     FolderPoolingReport,
-    FolderPoolingRequest,
     GatewayConfigBundle,
-    GatewayConfigRequest,
     ModelTierPrefixCacheAudit,
-    ModelTierPrefixCacheRequest,
-    OptimizeRequest,
     OptimizeResponse,
     RecommendationResponse,
     ResidualScheduleReport,
-    ResidualScheduleRequest,
-    SelfHostedAuditRequest,
-    UnknownModelError,
-    VllmParseRequest,
-)
-from capacity.portal import render_showcase_portal_html
-from capacity.scenario import (
-    ShowcaseReport,
-    ShowcaseScenario,
-    evaluate_showcase_scenario,
-    load_showcase_scenario,
-)
-from capacity.self_hosted import (
     SelfHostedEndpointAudit,
+    VllmTelemetrySnapshot,
+)
+from capacity.contract.scenario import ShowcaseReport, ShowcaseScenario
+from capacity.engine.burst import evaluate_model_tier_prefix_cache
+from capacity.engine.chargeback import compute_focus_chargeback
+from capacity.engine.kpis import compute_finops_kpis
+from capacity.engine.pooling import evaluate_folder_pooling
+from capacity.engine.scheduler import (
+    evaluate_batch_scavenger_economics,
+    schedule_residual_capacity,
+)
+from capacity.engine.self_hosted import (
     evaluate_self_hosted_endpoint,
     size_disaggregated_prefill_decode,
 )
-from capacity.telemetry_parsers import VllmTelemetrySnapshot, parse_inference_server_telemetry
+from capacity.engine.sizing import evaluate_gsu_optimization
+from capacity.engine.stats import DEFAULT_DAYS, DEFAULT_PERCENTILES
+from capacity.gateway.bundle import generate_gateway_bundle
+from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.showcase.evaluate import evaluate_showcase_scenario, load_showcase_scenario
+from capacity.showcase.renderer import render_showcase_portal_html
+from capacity.telemetry.local import LocalTraceAdapter
+from capacity.telemetry.port import TelemetryPort, recommend_capacity
 
 app = FastAPI(
     title="Capacity - AI Capacity, Multi-Gateway & FOCUS 1.2 FinOps Showcase",
@@ -113,7 +111,7 @@ def index() -> HTMLResponse:
     scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
     scenario = load_showcase_scenario(scenario_path) if scenario_path else None
     report = evaluate_showcase_scenario(scenario)
-    return HTMLResponse(content=render_showcase_portal_html(static_export=False, report=report))
+    return HTMLResponse(content=render_showcase_portal_html(report, static_export=False))
 
 
 @app.get("/healthz")
@@ -152,7 +150,7 @@ async def get_recommendations(
     if demo:
         source = LocalTraceAdapter()
     else:
-        from capacity.core import CloudMonitoringAdapter
+        from capacity.telemetry.cloud_monitoring import CloudMonitoringAdapter
 
         source = CloudMonitoringAdapter()
     try:

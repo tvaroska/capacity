@@ -4,9 +4,7 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 
 ## Where we are
 
-`v0.4.0` is tagged on `main` and its gate (`./scripts/gate.sh`) is green (`287` tests; Milestones 1 and 2 / `P0`–`P1` complete). Thirteen of the 14 defects from the 2026-11-17 architecture review are resolved, and the command line, the API and the page call one typed function per operation backed by one model catalog. The remaining defect (the browser script holding its own tables and replacing the page's numbers) goes with `P3.2` in Milestone 4 (`v0.6.0`).
-
-The remaining two milestones below move modules into folders by job (`v0.5.0` / `P2`) and remove numbers and rules from templates and browser JavaScript (`v0.6.0` / `P3`).
+`v0.5.0` is tagged on `main` and its gate (`./scripts/gate.sh`) is green (`277` tests; Milestones 1–3 / `P0`–`P2` complete). Every module lives in a job-scoped folder (`contract/`, `engine/`, `ingest/`, `telemetry/`, `gateway/`, `showcase/`, `cli/`, `api.py`) guarded by one rule per folder. The remaining milestone below (`v0.6.0` / `P3`) removes numbers and rules from templates and browser JavaScript.
 
 Decisions taken by the owner on 2026-11-17:
 
@@ -21,38 +19,9 @@ Decisions taken by the owner on 2026-11-17:
 
 | # | Milestone | Done when | Size (rough) |
 | :--- | :--- | :--- | :--- |
-| 3 | `v0.5.0` — Folders by job (`P2`) | The guard states one rule per folder and the gate is green | 2 to 4 days |
 | 4 | `v0.6.0` — The page shows only what the engine computed (`P3`) | No number or rule is typed in a template or in the browser script | 3 to 5 days |
 
 Each remaining milestone (`P2` to `P3`) ends in a minor tagged release.
-
-## Milestone 3 — `v0.5.0`: Folders by job (`P2`)
-
-Target layout across Ports, Adapters and Contracts:
-
-```text
-capacity/
-  contract/    requests, results, scenario schema
-  engine/      sizing, burst, commitment, chargeback, scheduler, pooling, kpis,
-               self_hosted, stats, catalog
-  ingest/      prometheus, request_logs, trace_files
-  telemetry/   port, local, cloud_monitoring
-  gateway/     litellm, envoy, gke, header_policies, callback template
-  showcase/    evaluate (scenario to report), sample data, page renderer, assets/
-  cli/         one module per command, output formatting
-  api.py
-```
-
-- [ ] **P2.1 Move modules into folders by job**
-  - Move with `git mv`. Old import paths are not kept: no re-export modules.
-  - Update the imports in `tests/` and `benchmarks/`, the entry points in `pyproject.toml`, `Dockerfile` and `capacity/cli.py`, the lint exemption for the gateway callback, and the path the gateway generator reads the callback from.
-  - Done when: the gate is green and the README blocks are unchanged.
-- [ ] **P2.2 Split the modules that hold several jobs**
-  - `finops` into commitment, chargeback, scheduler, pooling and KPIs. `forecasting` into maths, port and local adapter. `models` into requests and results. The command line into one module per command.
-  - Done when: no module exists only to keep another one under the line cap.
-- [ ] **P2.3 The guard states one rule per folder**
-  - The engine imports only the contract. One file imports the cloud SDK. The page renderer imports no calculation. The command line and the API may import anything.
-  - Files: `specs/ast.rules.yaml`, `tests/test_isolation_guard.py`, the repository map in `AGENTS.md`, `ADR-005` in `DECISIONS.md`, and the links in `docs/`.
 
 ## Milestone 4 — `v0.6.0`: The page shows only what the engine computed (`P3`)
 
@@ -168,13 +137,13 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
 ### Next horizons (`v0.7.0+` feature extensions)
 
 - **Zero-Privilege Hosted Web Mode (`AUTH_MODE=user` Bring-Your-Own-Bearer-Token on Cloud Run):** Run `capacity serve` on Cloud Run under a zero-IAM service account (`AUTH_MODE=user`, server-side ADC disabled) where visitors browse offline scenarios or pass a short-lived `Authorization: Bearer` token so live Cloud Monitoring queries execute strictly under the caller's own GCP identity and quota.
-- **Read-Only GCE GPU/TPU Supply Advisory (`--mode self-hosted` Placement Bridge):** Pair self-hosted replica sizing ([`capacity/self_hosted.py`](../capacity/self_hosted.py)) with read-only GCE Capacity Advisory REST checks (`regions/{r}/advice/calendarMode` with `100%/75%/50%/25%` split planning plus alpha `regions/{r}/advice/capacity` for `SPOT` obtainability/uptime and `FLEX_START` estimated queue wait, omitting `guestAccelerators` on built-in GPU families `G2/G4/A2/A3/A4/A4X` and respecting `87h`/`720h` Calendar lead times).
-- **Sub-Second `10s`-Bucket Occupancy Guard in `optimize_hybrid_commitment` ([`capacity/finops.py`](../capacity/finops.py)):** Surfaced by the consolidated 7-day Azure trace backtest ([`benchmarks/results/l3_receipt.json`](../benchmarks/results/l3_receipt.json)): when highly bursty `10s` coding arrivals plus light weekend traffic hold sub-second 168h bucket occupancy (`37.02%`) below the `42.55%` PT-vs-Priority break-even threshold, coupling `optimize_hybrid_commitment` directly to empirical `10s` bucket fill factors can close the remaining `3.34%` gap to the `L2` hindsight bound while preserving an optional explicit SLA floor.
-- **ADK Prefix-Cache Reference Patterns ([`capacity/burst.py`](../capacity/burst.py)):** Capture concrete ADK runtime patterns (`instruction=""` + fixed `static_instruction` + `ContextCacheConfig(min_tokens=4096)`, trailing `<system-reminder>` callbacks, transient user-turn memory injection, and reclaim-thresholded tool output pruning to prevent Block 0 cache thrash).
-- **Per-Turn Model Routing & Multi-Backend Proxy Recipes ([`capacity/gateway.py`](../capacity/gateway.py)):** Model per-turn tier switching (`gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-4-argon`) alongside gateway session affinity and `thought_signature` preservation checks.
+- **Read-Only GCE GPU/TPU Supply Advisory (`--mode self-hosted` Placement Bridge):** Pair self-hosted replica sizing ([`capacity/engine/self_hosted.py`](../capacity/engine/self_hosted.py)) with read-only GCE Capacity Advisory REST checks (`regions/{r}/advice/calendarMode` with `100%/75%/50%/25%` split planning plus alpha `regions/{r}/advice/capacity` for `SPOT` obtainability/uptime and `FLEX_START` estimated queue wait, omitting `guestAccelerators` on built-in GPU families `G2/G4/A2/A3/A4/A4X` and respecting `87h`/`720h` Calendar lead times).
+- **Sub-Second `10s`-Bucket Occupancy Guard in `optimize_hybrid_commitment` ([`capacity/engine/commitment.py`](../capacity/engine/commitment.py)):** Surfaced by the consolidated 7-day Azure trace backtest ([`benchmarks/results/l3_receipt.json`](../benchmarks/results/l3_receipt.json)): when highly bursty `10s` coding arrivals plus light weekend traffic hold sub-second 168h bucket occupancy (`37.02%`) below the `42.55%` PT-vs-Priority break-even threshold, coupling `optimize_hybrid_commitment` directly to empirical `10s` bucket fill factors can close the remaining `3.34%` gap to the `L2` hindsight bound while preserving an optional explicit SLA floor.
+- **ADK Prefix-Cache Reference Patterns ([`capacity/engine/burst.py`](../capacity/engine/burst.py)):** Capture concrete ADK runtime patterns (`instruction=""` + fixed `static_instruction` + `ContextCacheConfig(min_tokens=4096)`, trailing `<system-reminder>` callbacks, transient user-turn memory injection, and reclaim-thresholded tool output pruning to prevent Block 0 cache thrash).
+- **Per-Turn Model Routing & Multi-Backend Proxy Recipes ([`capacity/gateway/bundle.py`](../capacity/gateway/bundle.py)):** Model per-turn tier switching (`gemini-3.5-flash-lite` -> `gemini-3.8-flash` -> `gemini-4-argon`) alongside gateway session affinity and `thought_signature` preservation checks.
 - **Multi-Node Cloud Redis & Envoy Global Rate-Limit Service Integration Suite:** Extend [`benchmarks/live_sse_harness.py`](../benchmarks/live_sse_harness.py) with an optional Docker Compose Envoy AI Gateway + `envoyproxy/ratelimit` + Valkey cluster testbench for `>2,000 RPS` load testing.
-- **RDMA / NIXL KV-Cache Transfer Latency Modeling ([`capacity/self_hosted.py`](../capacity/self_hosted.py)):** Incorporate inter-node KV-block transfer bandwidth overhead into disaggregated Prefill/Decode pool sizing for `>128K` context prompts.
-- **Stateless MCP `2026-07-28` Adapter (`SEP-2640` Skills + `ui://` MCP Apps):** Expose the post-`P1.9` typed operations over stateless Streamable HTTP MCP, bundle [`skills/capacity/SKILL.md`](../skills/capacity/SKILL.md) via `io.modelcontextprotocol/skills` (`SEP-2640`) for hosted AI clients, and serve self-contained HTML scorecards (`portal.py --html-out`) as `ui://` MCP Apps.
+- **RDMA / NIXL KV-Cache Transfer Latency Modeling ([`capacity/engine/self_hosted.py`](../capacity/engine/self_hosted.py)):** Incorporate inter-node KV-block transfer bandwidth overhead into disaggregated Prefill/Decode pool sizing for `>128K` context prompts.
+- **Stateless MCP `2026-07-28` Adapter (`SEP-2640` Skills + `ui://` MCP Apps):** Expose the post-`P1.9` typed operations over stateless Streamable HTTP MCP, bundle [`skills/capacity/SKILL.md`](../skills/capacity/SKILL.md) via `io.modelcontextprotocol/skills` (`SEP-2640`) for hosted AI clients, and serve self-contained HTML scorecards (`showcase/renderer.py --html-out`) as `ui://` MCP Apps.
 
 ### Showcase presentation gates
 
@@ -186,4 +155,5 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
 - **v0.2.0-v0.3.0 (Passes A-G + 3P Claude):** Phase 1 (v0.2.0) and Phase 2 (v0.3.0) dual-mode GSU/vLLM sizing, 1P Gemini + 3P Claude burndown and prefix-cache physics, LiteLLM/Envoy/GKE gateway generator, disaggregated prefill/decode sizer, 3-Tier EDF scheduler, FOCUS 1.2 chargeback, --scenario-file and capacity collect, GM3 Light workbench, and L3 Azure/SSE benchmark — [archive](archive/roadmap-history.md#v020-v030-passes-a-g-3p-claude)
 - **v0.3.1 (Milestone 1 - P0):** A comment edit in an engine file keeps the suite green, a module moved into a sub-folder is still scanned, and one script defines the gate — [archive](archive/roadmap-history.md#v031-milestone-1---p0)
 - **v0.4.0 (Milestone 2 - P1):** Unified model catalog, single request-to-result path across CLI/API/workbench, typed `ShowcaseReport` and `SeriesKey`, lazy Cloud Monitoring SDK and `.env` loading, and complexity lint ratchet — [archive](archive/roadmap-history.md#v040-milestone-2---p1-tidy-in-place-then-one-path-from-request-to-result)
+- **Milestone 3 — `v0.5.0`: Folders by job (`P2`):** The guard states one rule per folder and the gate is green — [archive](archive/roadmap-history.md#milestone-3---v050-folders-by-job-p2)
 

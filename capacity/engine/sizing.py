@@ -6,36 +6,33 @@ import math
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 
-from capacity.burst import (
+from capacity.contract.common import CapacityModeLiteral, SeriesKey
+from capacity.contract.requests import MicroBurstRequest, OptimizeRequest
+from capacity.contract.results import (
+    ModelRecommendation,
+    OptimizeResponse,
+    PercentileDetail,
+    RecommendationResponse,
+)
+from capacity.engine.burst import (
     compute_weighted_burndown_tokens,
     evaluate_micro_burst_window,
     evaluate_prefix_cache_dilution,
 )
-from capacity.finops import optimize_hybrid_commitment
-from capacity.forecasting import (
-    DEFAULT_PERCENTILES,
-    SparseSeriesMap,
-    TelemetryPort,
-    holts_linear_trend,
-    percentile,
-)
-from capacity.model_families import (
+from capacity.engine.catalog import (
     DEFAULT_GSU_CONFIG,
     ModelCatalog,
     build_model_catalog,
     normalize_model_id,
 )
-from capacity.models import (
-    CapacityModeLiteral,
-    MicroBurstRequest,
-    ModelRecommendation,
-    OptimizeRequest,
-    OptimizeResponse,
-    PercentileDetail,
-    RecommendationResponse,
-    SeriesKey,
+from capacity.engine.commitment import optimize_hybrid_commitment
+from capacity.engine.self_hosted import DEFAULT_SELF_HOSTED_PROFILES
+from capacity.engine.stats import (
+    DEFAULT_PERCENTILES,
+    SparseSeriesMap,
+    holts_linear_trend,
+    percentile,
 )
-from capacity.self_hosted import DEFAULT_SELF_HOSTED_PROFILES
 
 # ADR-002: without sub-second gateway logs, the peak is assumed at this multiple of the mean.
 ASSUMED_PEAK_TO_MEAN_RATIO = 1.9
@@ -238,38 +235,6 @@ def build_response(
         forecast_hours=forecast_steps,
         requested_percentiles=pcts,
         models=recs,
-    )
-
-
-async def recommend_capacity(
-    source: TelemetryPort,
-    *,
-    project: str | Sequence[str],
-    days: int,
-    percentiles: Sequence[int] | None = None,
-    models: Sequence[str] | None = None,
-    regions: Sequence[str] | None = None,
-    active_only: bool = False,
-    by_region: bool = False,
-    folder_map: Mapping[str, str] | None = None,
-    forecast_steps: int = 24,
-    mode: CapacityModeLiteral = "gsu",
-) -> RecommendationResponse:
-    """Read throughput through a telemetry port and size it: the one path CLI and API share."""
-    sparse, total_minutes = await source.fetch_series(
-        project, days, models, regions, by_region=by_region, folder_map=folder_map, mode=mode
-    )
-    label = project if isinstance(project, str) else ",".join(project)
-    return build_response(
-        label,
-        days,
-        sparse,
-        total_minutes,
-        percentiles,
-        active_only=active_only,
-        by_region=by_region,
-        forecast_steps=forecast_steps,
-        mode=mode,
     )
 
 

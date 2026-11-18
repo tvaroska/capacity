@@ -18,7 +18,7 @@ from benchmarks.run_l3_benchmark import (
     compute_receipt_digest,
     run_benchmark,
 )
-from capacity import model_families
+from capacity.engine import catalog
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -84,10 +84,10 @@ def test_changed_burndown_weight_fails_behavioural_replay(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     mutated_flash = dataclasses.replace(
-        model_families.GEMINI_1P_FLASH_SPEC,
+        catalog.GEMINI_1P_FLASH_SPEC,
         standard_output_weight=4.5,
     )
-    monkeypatch.setattr(model_families, "GEMINI_1P_FLASH_SPEC", mutated_flash)
+    monkeypatch.setattr(catalog, "GEMINI_1P_FLASH_SPEC", mutated_flash)
 
     with pytest.raises(ValueError, match="Offline Track-A replay drifted"):
         run_benchmark(mode="offline")

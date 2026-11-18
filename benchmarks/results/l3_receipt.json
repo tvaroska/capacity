@@ -1,11 +1,11 @@
 {
   "schema_version": "capacity.l3_receipt.v1",
-  "generated_at_utc": "2026-11-17T23:46:41Z",
+  "generated_at_utc": "2026-11-18T00:42:48Z",
   "environment": {
     "python": "3.13.15"
   },
-  "git_commit": "dcaeebbc974af37b8fc6605a0bbd4d83cad518e2",
-  "engine_code_sha256": "f3ade6b4e8fbd9825482b1472c0abcebd46d24e234f07c86aa37c6ca42b6234f",
+  "git_commit": "1e0e0f9d5d9ae494cfd26b1887ac0fbd0e04f263",
+  "engine_code_sha256": "3452a632067eddd690d80e87a2b462095016c585982e1819f264bf76a54ec71b",
   "corpus_file": "benchmarks/corpora/azure_llm_trace_10k.jsonl.gz",
   "corpus_gzip_sha256": "471ea3916fd27b98c3b38de5b4044d54ff4ace95b0e030354b6e3644bea325a7",
   "track_a_empirical_trace_backtest": {
@@ -79,16 +79,16 @@
         "burndown_accounting_drift_pct": 40.3101,
         "peer_pt_starvation_events": 62,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 390.99
+        "p95_sse_stream_latency_ms": 413.15
       },
       "stateless_rr_stripped": {
         "requests_sent": 500,
         "http_200_streams": 500,
         "router_blackhole_drop_rate_pct": 0.0,
-        "burndown_accounting_drift_pct": 51.3082,
+        "burndown_accounting_drift_pct": 51.3085,
         "peer_pt_starvation_events": 144,
         "effective_prefix_cache_hit_pct": 0.25,
-        "p95_sse_stream_latency_ms": 447.53
+        "p95_sse_stream_latency_ms": 464.27
       },
       "capacity_two_phase_gateway": {
         "requests_sent": 500,
@@ -97,9 +97,9 @@
         "burndown_accounting_drift_pct": 0.0,
         "peer_pt_starvation_events": 0,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 473.68
+        "p95_sse_stream_latency_ms": 475.28
       }
     }
   },
-  "receipt_sha256": "491e80c7efc1c197e139233654af408cefcc23a337e518a2e35b2634e9706d5b"
+  "receipt_sha256": "4311139a5bfa5ca1a544aca45a74864d1084d7631d5ad374e589a24bc81c4b8f"
 }

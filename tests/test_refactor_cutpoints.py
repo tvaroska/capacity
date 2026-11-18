@@ -19,18 +19,18 @@ from google.auth.exceptions import DefaultCredentialsError
 from pydantic import ValidationError
 from typer.testing import CliRunner
 
-from capacity import core
 from capacity.api import app as api_app
 from capacity.cli import app as cli_app
-from capacity.cli_formatters import load_sparse_from_trace_file, parse_folder_map
-from capacity.model_families import infer_lifecycle_track
-from capacity.models import OptimizeRequest, SelfHostedAuditRequest, SeriesKey
-from capacity.scenario import (
-    ModelInventoryAnnotation,
-    ShowcaseScenario,
+from capacity.contract.common import SeriesKey
+from capacity.contract.requests import OptimizeRequest, SelfHostedAuditRequest
+from capacity.contract.scenario import ModelInventoryAnnotation, ShowcaseScenario
+from capacity.engine.catalog import infer_lifecycle_track
+from capacity.ingest.trace_files import load_sparse_from_trace_file, parse_folder_map
+from capacity.showcase.evaluate import (
     compile_scenario_from_telemetry,
     load_showcase_scenario,
 )
+from capacity.telemetry import cloud_monitoring
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -57,7 +57,7 @@ class _FakeAPICallError(GoogleAPICallError):
 
 
 def test_patch_target_appears_once_and_tests_import_no_private_capacity_names() -> None:
-    target = "capacity.core.create_monitoring_client"
+    target = "capacity.telemetry.cloud_monitoring.create_monitoring_client"
     hits = [
         path.name
         for path in sorted(TESTS_DIR.glob("*.py"))
@@ -65,7 +65,7 @@ def test_patch_target_appears_once_and_tests_import_no_private_capacity_names() 
         if target in line and path.name != "test_refactor_cutpoints.py"
     ]
     assert hits == ["conftest.py"], f"Patch target duplicated across: {hits}"
-    assert not hasattr(core, "__all__")
+    assert not hasattr(cloud_monitoring, "__all__")
 
     private_imports: list[str] = []
     for path in sorted(TESTS_DIR.glob("*.py")):
@@ -249,6 +249,7 @@ def test_compile_scenario_from_live_series_and_lifecycle_tracks() -> None:
     )
     assert compiled.burst_and_cache.default_model == "claude-sonnet-4-6"
     assert compiled.burst_and_cache.provisioned_gsus == 12
+    assert compiled.finops.commitment is not None
     assert compiled.finops.commitment.spillover_tier == "standard"
     ann = compiled.gsu_sizing.inventory_annotations
     assert ann["gemini-4-carbon-001@us-central1"].lifecycle_track == "short_term_ga"

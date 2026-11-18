@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "capacity"
-version = "0.4.0"
+version = "0.5.0"
 description = "Stateless trace compiler for Google Cloud Provisioned Throughput and vLLM: sub-second burndown gateways, $0 night backfill, and FOCUS 1.2 two-pool chargeback."
 readme = "README.md"
 license = "Apache-2.0"
@@ -70,7 +70,7 @@ max-statements = 140
 "**/tests/**/*.py" = ["S101", "ANN", "E501"]
 "**/benchmarks/**/*.py" = ["S311"]
 # LiteLLM hands its hooks untyped objects, so the generated callback takes `Any`.
-"**/capacity/litellm_burndown_callback.py" = ["ANN401"]
+"**/capacity/gateway/litellm_burndown_callback.py" = ["ANN401"]
 
 [tool.mypy]
 python_version = "3.12"

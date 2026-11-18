@@ -12,16 +12,20 @@ from typing import Any, Self
 import pytest
 from typer.testing import CliRunner
 
-from capacity import core
-from capacity.capacity import compute_recommendations
 from capacity.cli import app as cli_app
-from capacity.core import fetch_throughput
-from capacity.finops import compute_focus_chargeback
-from capacity.forecasting import build_demo_throughput, minute_list_to_sparse
-from capacity.model_families import build_model_catalog
-from capacity.models import ChargebackRequest, SeriesKey, VllmParseRequest
-from capacity.scenario import ScenarioGsuSizing, ShowcaseScenario, evaluate_showcase_scenario
-from capacity.telemetry_parsers import VllmTelemetrySnapshot, parse_inference_server_telemetry
+from capacity.contract.common import SeriesKey
+from capacity.contract.requests import ChargebackRequest, VllmParseRequest
+from capacity.contract.results import VllmTelemetrySnapshot
+from capacity.contract.scenario import ScenarioGsuSizing, ShowcaseScenario
+from capacity.engine.catalog import build_model_catalog
+from capacity.engine.chargeback import compute_focus_chargeback
+from capacity.engine.sizing import compute_recommendations
+from capacity.engine.stats import minute_list_to_sparse
+from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.showcase.evaluate import evaluate_showcase_scenario
+from capacity.telemetry import cloud_monitoring
+from capacity.telemetry.cloud_monitoring import fetch_throughput
+from capacity.telemetry.local import build_demo_throughput
 from tests.conftest import FakeMonitoringClient, make_time_series
 
 PROMPT = 'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"}'
@@ -167,7 +171,7 @@ async def test_forecast_and_live_window_do_not_depend_on_query_hour(
         def now(cls, tz: tzinfo | None = None) -> Self:
             return cls(2026, 11, 16, query_hour, 37, 12, tzinfo=tz)
 
-    monkeypatch.setattr(core, "datetime", _FixedDatetime)
+    monkeypatch.setattr(cloud_monitoring, "datetime", _FixedDatetime)
 
     def _serve_window(req: dict[str, Any]) -> list[SimpleNamespace]:
         if '"dedicated"' not in req["filter"]:

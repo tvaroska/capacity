@@ -22,9 +22,9 @@ import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from capacity.burst import compute_weighted_burndown_tokens
-from capacity.gateway import generate_gateway_bundle
-from capacity.models import GatewayConfigRequest
+from capacity.contract.requests import GatewayConfigRequest
+from capacity.engine.burst import compute_weighted_burndown_tokens
+from capacity.gateway.bundle import generate_gateway_bundle
 
 
 class _InMemoryAsyncRedisCache:

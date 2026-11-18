@@ -20,15 +20,15 @@ Implemented milestones and completed passes moved from [`../roadmap.md`](../road
 - [x] **Pass C — Verification Gate & Portable Lockfile Readiness (`v0.2.0`)**
 - [x] **Pass D — Multi-Gateway, Disaggregated P/D, 5-KPI FinOps & GM3 Light Workbench (`v0.3.0`)**
 - [x] **Pass E — Physics Conservation, Stateful Gateway, BYO Telemetry, Hexagonal Ports & Open-Loop Benchmark (`v0.3.0`):**
-  - [x] Extracted pure math & `TelemetryPort` (`LocalTraceAdapter`) into [`capacity/forecasting.py`](../../capacity/forecasting.py), decomposed [`capacity/portal_template.py`](../../capacity/portal_template.py) from [`capacity/portal.py`](../../capacity/portal.py), and enforced 5 declarative AST contracts in [`specs/ast.rules.yaml`](../../specs/ast.rules.yaml) + [`tests/test_isolation_guard.py`](../../tests/test_isolation_guard.py) + `@pytest.mark.port` parity tests in [`tests/test_port_parity.py`](../../tests/test_port_parity.py).
+  - [x] Extracted pure math & `TelemetryPort` (`LocalTraceAdapter`) into `capacity/forecasting.py`, decomposed `capacity/portal_template.py` from `capacity/portal.py`, and enforced 5 declarative AST contracts in [`specs/ast.rules.yaml`](../../specs/ast.rules.yaml) + [`tests/test_isolation_guard.py`](../../tests/test_isolation_guard.py) + `@pytest.mark.port` parity tests in [`tests/test_port_parity.py`](../../tests/test_port_parity.py).
   - [x] Unified apples-to-apples Disaggregated vs. Monolithic prefill scaling, unified 8-hour residual schedule defaults, upgraded Tier-1 admission to exact branch-and-bound value maximization, and enforced verbatim `README.md` stdout parity in [`tests/test_documentation_contract.py`](../../tests/test_documentation_contract.py).
   - [x] Hardened `BurndownAndTrafficTypeLogger` with server-side Redis rolling minute counters (`1,024`-token pre-SSE floor + `cached_tokens` and `reasoning_tokens`), RFC-1035 K8s DNS labels, `yaml.safe_dump` serialization, multi-scrape Prometheus counter-reset rate parsing, nested OTel `gen_ai.usage.*` ingestion, and bounded finite API request validation.
   - [x] Added [`benchmarks/run_l3_benchmark.py`](../../benchmarks/run_l3_benchmark.py), [`benchmarks/corpora/azure_llm_trace_10k.jsonl.gz`](../../benchmarks/corpora/azure_llm_trace_10k.jsonl.gz), [`benchmarks/results/l3_receipt.json`](../../benchmarks/results/l3_receipt.json), and [`tests/test_l3_receipt.py`](../../tests/test_l3_receipt.py).
-- [x] **Pass E.1 — 3P Anthropic Claude Provisioned Throughput Mode (`v0.3.0`):** Added [`capacity/model_families.py`](../../capacity/model_families.py) (`ModelFamilySpec` separating 1P Gemini `1s`/`10s` `+5%` credit from 3P Claude `30s`/`60s` dual buckets with `0%` credit and flat `1.0x/0.1x/1.25x/2.0x/5.0x` burndown), `CLAUDE_GSU_CONFIG`, client-side weighted `token_count` Cloud Monitoring ingestion in [`capacity/core.py`](../../capacity/core.py), Anthropic cache-write log parsing in [`capacity/telemetry_parsers.py`](../../capacity/telemetry_parsers.py), `standard` PayGo spillover + Claude CEL/callback generation in [`capacity/gateway.py`](../../capacity/gateway.py), and 1P-only Folder RHPT hub-project warnings in [`capacity/finops.py`](../../capacity/finops.py).
+- [x] **Pass E.1 — 3P Anthropic Claude Provisioned Throughput Mode (`v0.3.0`):** Added `capacity/model_families.py` (`ModelFamilySpec` separating 1P Gemini `1s`/`10s` `+5%` credit from 3P Claude `30s`/`60s` dual buckets with `0%` credit and flat `1.0x/0.1x/1.25x/2.0x/5.0x` burndown), `CLAUDE_GSU_CONFIG`, client-side weighted `token_count` Cloud Monitoring ingestion in `capacity/core.py`, Anthropic cache-write log parsing in `capacity/telemetry_parsers.py`, `standard` PayGo spillover + Claude CEL/callback generation in `capacity/gateway.py`, and 1P-only Folder RHPT hub-project warnings in `capacity/finops.py`.
 - [x] **Pass F — Request Contract, Ingestion Accuracy & Invariant Tests (`v0.3.0`):** strict request models shared by the CLI and the API, whole-day live windows and zero-filled telemetry, exact commitment search at any size, default-deny package isolation, and exact-value tests for the `CRITICAL.md` and `ADR-006` rules that used to pass when inverted.
 - [x] **Pass G — Parameterized Scenario Contract (`--scenario-file`), Dual Collector (`capacity collect`), `gemini-4-carbon` Lifecycle Rules & Bundled Agent Skill (`v0.3.0`):**
-  - [x] Added [`capacity/scenario.py`](../../capacity/scenario.py) (`ShowcaseScenario`, `load_showcase_scenario`, `audit_scenario_public_safety` `--strict-public-check`, `load_orders_overlay`, and `compile_scenario_from_telemetry`), [`examples/scenarios/multi_tenant_enterprise.json`](../../examples/scenarios/multi_tenant_enterprise.json), [`examples/orders_overlay.yaml`](../../examples/orders_overlay.yaml), [`examples/bigquery_inference_request_export.sql`](../../examples/bigquery_inference_request_export.sql), and [`skills/capacity/SKILL.md`](../../skills/capacity/SKILL.md).
-  - [x] Registered `gemini-4-carbon` (`500` TPS/GSU, `2,048` token-boundary floor, Short-Term GA guidance), enforced `50`-GSU (`10s -> 1s`) zero-spillover step continuity in [`capacity/burst.py`](../../capacity/burst.py), added dynamic `Forecast+{hours}h` table headers in [`capacity/cli_formatters.py`](../../capacity/cli_formatters.py), extended [`capacity/telemetry_parsers.py`](../../capacity/telemetry_parsers.py) for `Observability 2.0` (`aiplatform.googleapis.com/inference_request`) JSONL logs + sub-second burst peaks, and added 3-state `--check-auth` + `dedicated_token_limit`/`model_invocation_count` inventory collection in [`capacity/core.py`](../../capacity/core.py).
+  - [x] Added `capacity/scenario.py` (`ShowcaseScenario`, `load_showcase_scenario`, `audit_scenario_public_safety` `--strict-public-check`, `load_orders_overlay`, and `compile_scenario_from_telemetry`), [`examples/scenarios/multi_tenant_enterprise.json`](../../examples/scenarios/multi_tenant_enterprise.json), [`examples/orders_overlay.yaml`](../../examples/orders_overlay.yaml), [`examples/bigquery_inference_request_export.sql`](../../examples/bigquery_inference_request_export.sql), and [`skills/capacity/SKILL.md`](../../skills/capacity/SKILL.md).
+  - [x] Registered `gemini-4-carbon` (`500` TPS/GSU, `2,048` token-boundary floor, Short-Term GA guidance), enforced `50`-GSU (`10s -> 1s`) zero-spillover step continuity in `capacity/burst.py`, added dynamic `Forecast+{hours}h` table headers in `capacity/cli_formatters.py`, extended `capacity/telemetry_parsers.py` for `Observability 2.0` (`aiplatform.googleapis.com/inference_request`) JSONL logs + sub-second burst peaks, and added 3-state `--check-auth` + `dedicated_token_limit`/`model_invocation_count` inventory collection in `capacity/core.py`.
 
 ## v0.3.1 (Milestone 1 - P0)
 
@@ -122,3 +122,33 @@ Part A (`P1.1` to `P1.7`) fixes 11 of the 14 defects without new structure. Part
   - Replace the text key (`folder/model@region`) with a typed key. Filter by model and region, and apply the folder map, in one place.
   - `collect` reads through the same port as `recommend`, and the access check returns a typed result.
   - Files: `capacity/forecasting.py`, `capacity/core.py`, `capacity/capacity.py`, `capacity/scenario.py`, `capacity/cli_formatters.py`.
+
+## Milestone 3 - `v0.5.0`: Folders by job (`P2`)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-18.*
+
+Target layout across Ports, Adapters and Contracts:
+
+```text
+capacity/
+  contract/    requests, results, scenario schema
+  engine/      sizing, burst, commitment, chargeback, scheduler, pooling, kpis,
+               self_hosted, stats, catalog
+  ingest/      prometheus, request_logs, trace_files
+  telemetry/   port, local, cloud_monitoring
+  gateway/     litellm, envoy, gke, header_policies, callback template
+  showcase/    evaluate (scenario to report), sample data, page renderer, assets/
+  cli/         one module per command, output formatting
+  api.py
+```
+
+- [x] **P2.1 Move modules into folders by job**
+  - Move with `git mv`. Old import paths are not kept: no re-export modules.
+  - Update the imports in `tests/` and `benchmarks/`, the entry points in `pyproject.toml`, `Dockerfile` and `capacity/cli.py`, the lint exemption for the gateway callback, and the path the gateway generator reads the callback from.
+  - Done when: the gate is green and the README blocks are unchanged.
+- [x] **P2.2 Split the modules that hold several jobs**
+  - `finops` into commitment, chargeback, scheduler, pooling and KPIs. `forecasting` into maths, port and local adapter. `models` into requests and results. The command line into one module per command.
+  - Done when: no module exists only to keep another one under the line cap.
+- [x] **P2.3 The guard states one rule per folder**
+  - The engine imports only the contract. One file imports the cloud SDK. The page renderer imports no calculation. The command line and the API may import anything.
+  - Files: `specs/ast.rules.yaml`, `tests/test_isolation_guard.py`, the repository map in `AGENTS.md`, `ADR-005` in `DECISIONS.md`, and the links in `docs/`.

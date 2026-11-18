@@ -6,22 +6,22 @@ import html
 import re
 from datetime import UTC, datetime, timedelta
 
-from capacity.capacity import build_response
-from capacity.models import (
+from capacity.contract.requests import (
     DisaggregatedPoolRequest,
     GatewayConfigRequest,
     ModelTierPrefixCacheRequest,
 )
-from capacity.portal import render_recommendations_html, render_showcase_portal_html
-from capacity.scenario import (
+from capacity.contract.scenario import (
     ModelInventoryAnnotation,
     ScenarioBurstAndCache,
     ScenarioGateway,
     ScenarioGsuSizing,
     ScenarioSelfHosted,
     ShowcaseScenario,
-    evaluate_showcase_scenario,
 )
+from capacity.engine.sizing import build_response
+from capacity.showcase.evaluate import evaluate_showcase_scenario
+from capacity.showcase.renderer import render_recommendations_html, render_showcase_portal_html
 
 
 def _recs_page_for(
@@ -56,7 +56,7 @@ def _scenario_page_with_scope(scope_label: str) -> str:
             },
         )
     )
-    return render_showcase_portal_html(static_export=True, scenario=scen)
+    return render_showcase_portal_html(evaluate_showcase_scenario(scen), static_export=True)
 
 
 def test_model_name_cannot_add_a_script_element() -> None:
@@ -89,7 +89,7 @@ def test_placeholder_text_in_data_is_not_expanded() -> None:
 def test_page_carries_no_unread_data_blob_and_no_leftover_placeholder() -> None:
     for rendered in (
         _recs_page_for("gemini-3.8-flash"),
-        render_showcase_portal_html(static_export=True),
+        render_showcase_portal_html(evaluate_showcase_scenario(), static_export=True),
     ):
         assert "CAPACITY_SHOWCASE_DATA" not in rendered
         assert re.findall(r"__[A-Z0-9_]+__", rendered) == []
@@ -165,7 +165,7 @@ def test_scenario_page_reflects_custom_gateway_disagg_cache_and_capacity_overrid
     assert report.gateway.committed_burndown_tpm == 240_000
     assert report.commitment.tpm_per_gsu == 60_000
 
-    rendered = render_showcase_portal_html(static_export=True, report=report)
+    rendered = render_showcase_portal_html(report, static_export=True)
     assert "6 Engines" in rendered
     assert "Healthy Scale Envelope" in rendered
     assert "value='120'" in rendered

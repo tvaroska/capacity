@@ -1,4 +1,4 @@
-"""Pure HTML renderer for the GM3 Light Web Workbench (`portal.py`).
+"""Pure HTML renderer for the GM3 Light Web Workbench (`showcase/renderer.py`).
 
 Takes a pre-evaluated `ShowcaseReport` or `RecommendationResponse` and calls zero calculations.
 """
@@ -8,15 +8,15 @@ from __future__ import annotations
 import html
 import re
 
-from capacity.model_families import build_model_catalog, normalize_model_id
-from capacity.models import (
-    PACKAGE_VERSION,
+from capacity.contract.common import PACKAGE_VERSION
+from capacity.contract.requests import ModelTierPrefixCacheRequest
+from capacity.contract.results import (
     ModelTierPrefixCacheAudit,
-    ModelTierPrefixCacheRequest,
     PercentileDetail,
     RecommendationResponse,
 )
-from capacity.portal_sections import (
+from capacity.contract.scenario import ModelInventoryAnnotation, ShowcaseReport
+from capacity.showcase.sections import (
     compute_mean_duty_pct,
     lifecycle_badge,
     lookup_annotation,
@@ -25,16 +25,10 @@ from capacity.portal_sections import (
     render_sizing_kpis,
     renewal_cell,
 )
-from capacity.portal_template import (
+from capacity.showcase.template import (
     FAVICON_DATA_URI,
     PORTAL_TEMPLATE,
     RECOMMENDATIONS_ONLY_TEMPLATE,
-)
-from capacity.scenario import (
-    ModelInventoryAnnotation,
-    ShowcaseReport,
-    ShowcaseScenario,
-    evaluate_showcase_scenario,
 )
 
 
@@ -81,7 +75,7 @@ def _build_sizing_table_html(
     for m in recs.models:
         known_cap = m.gsu_capacity_tpm is not None and m.gsu_capacity_tpm > 0
         cap_str = f"{m.gsu_capacity_tpm:,}" if known_cap else "?"
-        ann = lookup_annotation(annotations, m.model, m.region)
+        ann = lookup_annotation(annotations, m.model, m.normalized_model, m.region)
         if has_inventory_cols:
             c_gsus = (
                 f"{ann.contracted_gsus:,} GSU"
@@ -235,22 +229,15 @@ def render_recommendations_html(
 
 
 def render_showcase_portal_html(
+    report: ShowcaseReport,
     *,
     static_export: bool = False,
-    report: ShowcaseReport | None = None,
-    custom_recommendations: RecommendationResponse | None = None,
-    scenario: ShowcaseScenario | None = None,
 ) -> str:
-    """Render the self-contained GM3 Light Web Workbench from a typed report."""
-    if custom_recommendations is not None and report is None and scenario is None:
-        return render_recommendations_html(custom_recommendations, static_export=static_export)
-
-    eff_report = report if report is not None else evaluate_showcase_scenario(scenario)
-    scen = eff_report.scenario
-    catalog = build_model_catalog(overrides=scen.gsu_sizing.gsu_capacity_overrides or None)
+    """Render the self-contained GM3 Light Web Workbench from a typed `ShowcaseReport`."""
+    scen = report.scenario
 
     gsu_headers, gsu_rows_html = _build_sizing_table_html(
-        eff_report.gsu_recommendations,
+        report.gsu_recommendations,
         scen.gsu_sizing.inventory_annotations,
     )
 
@@ -261,7 +248,7 @@ def render_showcase_portal_html(
         f"<td><code>{html.escape(hp.shared_request_type_header)}</code></td>"
         f"<td><span class='badge badge-blue'>{html.escape(hp.uta_rank)}</span></td>"
         f"<td>{html.escape(hp.billing_and_capacity_behavior)}</td></tr>"
-        for hp in eff_report.gateway.header_policies
+        for hp in report.gateway.header_policies
     )
 
     cb_rows_html = "".join(
@@ -275,7 +262,7 @@ def render_showcase_portal_html(
         f"<td class='num'>${t.naive_full_pool_cost_usd:,.2f}</td>"
         f"<td class='num' style='color:var(--success);font-weight:600;'>"
         f"${t.idle_penalty_avoided_usd:,.2f}</td></tr>"
-        for t in eff_report.chargeback.tenants
+        for t in report.chargeback.tenants
     )
 
     sched_rows_html = "".join(
@@ -289,18 +276,18 @@ def render_showcase_portal_html(
         f"{html.escape(j.status)}</span></td>"
         f"<td><code>{html.escape(', '.join(f'{k}: {v}' for k, v in j.routing_headers.items()))}"
         f"</code></td><td class='num'>${j.marginal_cost_usd:,.2f}</td></tr>"
-        for j in eff_report.residual_schedule.jobs
+        for j in report.residual_schedule.jobs
     )
 
-    sizing_kpis_html, sh_section_html = render_sizing_kpis(eff_report)
-    gw_top_html = render_gateway_top_section(eff_report.gateway, scen.gateway.config, scen)
-    pool_kpi_html, pool_detail_html = render_finops_pool_cards(eff_report)
+    sizing_kpis_html, sh_section_html = render_sizing_kpis(report)
+    gw_top_html = render_gateway_top_section(report.gateway, scen.gateway.config, scen)
+    pool_kpi_html, pool_detail_html = render_finops_pool_cards(report)
 
-    selected_sim = normalize_model_id(scen.burst_and_cache.default_model)
+    selected_sim = report.selected_simulator_model
     sim_options_html = "".join(
         f"<option value='{html.escape(val)}'{' selected' if val == selected_sim else ''}>"
         f"{html.escape(lbl)}</option>"
-        for val, lbl in catalog.simulator_options()
+        for val, lbl in report.simulator_options
     )
 
     flash_req = scen.burst_and_cache.flash_tier_audit
@@ -320,7 +307,7 @@ def render_showcase_portal_html(
         for val, lbl in fail_choices
     )
 
-    mb = eff_report.micro_burst
+    mb = report.micro_burst
     if mb.illusion_detected:
         burst_b_cls, burst_b_txt = (
             "badge-danger",
@@ -338,7 +325,7 @@ def render_showcase_portal_html(
         )
 
     c_b_cls, c_b_txt, c_caption, sim_ban_cls, sim_ban_txt = _flash_cache_presentation(
-        eff_report.prefix_cache_flash,
+        report.prefix_cache_flash,
         flash_req,
     )
 
@@ -347,7 +334,7 @@ def render_showcase_portal_html(
     is_central_gw = scen.gateway.presentation_mode == "central_proxy"
     sh_enabled = scen.self_hosted.enabled
     has_inventory_cols = bool(scen.gsu_sizing.inventory_annotations)
-    fh = eff_report.gsu_recommendations.forecast_hours
+    fh = report.gsu_recommendations.forecast_hours
     docs_header_right = (
         '<span class="badge badge-blue">Offline Static Scorecard</span>'
         if static_export
@@ -357,13 +344,13 @@ def render_showcase_portal_html(
         f"Capacity v{PACKAGE_VERSION} — AI Capacity, Micro-Burst, "
         "Multi-Gateway & FOCUS 1.2 Showcase"
     )
-    page_title = html.escape(pres.title if eff_report.scenario_mode else default_page_title)
+    page_title = html.escape(pres.title if report.scenario_mode else default_page_title)
 
-    kpis = eff_report.finops_kpis
-    scav = eff_report.scavenger
-    flash_c = eff_report.prefix_cache_flash
-    pro_c = eff_report.prefix_cache_argon
-    rr_c = eff_report.prefix_cache_rr
+    kpis = report.finops_kpis
+    scav = report.scavenger
+    flash_c = report.prefix_cache_flash
+    pro_c = report.prefix_cache_argon
+    rr_c = report.prefix_cache_rr
 
     replacements = {
         "__PAGE_TITLE__": page_title,

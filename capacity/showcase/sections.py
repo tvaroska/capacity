@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import html
 
-from capacity.model_families import normalize_model_id
-from capacity.models import GatewayConfigBundle, GatewayConfigRequest, RecommendationResponse
-from capacity.scenario import (
+from capacity.contract.requests import GatewayConfigRequest
+from capacity.contract.results import GatewayConfigBundle, RecommendationResponse
+from capacity.contract.scenario import (
     ModelInventoryAnnotation,
     ShowcaseReport,
     ShowcaseScenario,
@@ -41,10 +41,11 @@ def renewal_cell(ann: ModelInventoryAnnotation | None) -> str:
 def lookup_annotation(
     annotations: dict[str, ModelInventoryAnnotation],
     model: str,
+    normalized_model: str,
     region: str | None,
 ) -> ModelInventoryAnnotation | None:
     loc = region or "global"
-    for candidate in (f"{model}@{loc}", f"{normalize_model_id(model)}@{loc}", model):
+    for candidate in (f"{model}@{loc}", f"{normalized_model}@{loc}", model):
         if candidate in annotations:
             return annotations[candidate]
     return None

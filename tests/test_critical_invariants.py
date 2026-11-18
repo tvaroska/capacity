@@ -17,27 +17,7 @@ import pytest
 from google.cloud import monitoring_v3
 from pydantic import ValidationError
 
-from capacity import finops
-from capacity.burst import compute_weighted_burndown_tokens, evaluate_micro_burst_window
-from capacity.capacity import (
-    compute_recommendations,
-    evaluate_gsu_optimization,
-    find_capacity,
-)
-from capacity.core import (
-    GROUP_BY_FIELDS,
-    PARTNER_GROUP_BY_FIELDS,
-    SELF_HOSTED_GROUP_BY_FIELDS,
-    fetch_throughput,
-)
-from capacity.finops import (
-    MINUTES_PER_MONTH,
-    compute_focus_chargeback,
-    optimize_hybrid_commitment,
-    schedule_residual_capacity,
-)
-from capacity.model_families import DEFAULT_GSU_CONFIG, build_model_catalog
-from capacity.models import (
+from capacity.contract.requests import (
     ChargebackRequest,
     DeadlineJobSpec,
     MicroBurstRequest,
@@ -45,7 +25,24 @@ from capacity.models import (
     ResidualScheduleRequest,
     VllmParseRequest,
 )
-from capacity.telemetry_parsers import parse_inference_server_telemetry
+from capacity.engine import scheduler
+from capacity.engine.burst import compute_weighted_burndown_tokens, evaluate_micro_burst_window
+from capacity.engine.catalog import DEFAULT_GSU_CONFIG, build_model_catalog
+from capacity.engine.chargeback import compute_focus_chargeback
+from capacity.engine.commitment import MINUTES_PER_MONTH, optimize_hybrid_commitment
+from capacity.engine.scheduler import schedule_residual_capacity
+from capacity.engine.sizing import (
+    compute_recommendations,
+    evaluate_gsu_optimization,
+    find_capacity,
+)
+from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.telemetry.cloud_monitoring import (
+    GROUP_BY_FIELDS,
+    PARTNER_GROUP_BY_FIELDS,
+    SELF_HOSTED_GROUP_BY_FIELDS,
+    fetch_throughput,
+)
 from tests.conftest import FakeMonitoringClient
 
 GSU_TPM = 120_900
@@ -289,7 +286,7 @@ def test_equal_value_jobs_fill_the_capacity_within_the_search_budget(
     monkeypatch: pytest.MonkeyPatch, node_budget: int
 ) -> None:
     """24 tied jobs would cost 2^24 node visits; the budget stops the search, not the answer."""
-    monkeypatch.setattr(finops, "_EXACT_SEARCH_NODE_BUDGET", node_budget)
+    monkeypatch.setattr(scheduler, "_EXACT_SEARCH_NODE_BUDGET", node_budget)
     tied = [
         DeadlineJobSpec(job_id=f"j{i:02d}", value_usd=100.0, burndown_tokens=1e6, deadline_hour=8)
         for i in range(24)
@@ -312,7 +309,7 @@ def test_search_stops_at_its_node_budget_and_falls_back_to_the_greedy_ranking(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A budget spent before the search reaches job-b plus job-c leaves greedy's job-a standing."""
-    monkeypatch.setattr(finops, "_EXACT_SEARCH_NODE_BUDGET", 3)
+    monkeypatch.setattr(scheduler, "_EXACT_SEARCH_NODE_BUDGET", 3)
     report = schedule_residual_capacity(
         ResidualScheduleRequest(
             provisioned_gsus=20,

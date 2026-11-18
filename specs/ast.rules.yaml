@@ -1,12 +1,19 @@
 # Declarative Structural & Security AST Contract (ast-grep)
-# Every module under capacity/ (including sub-folders) is pure sizing/FinOps maths unless it is a
-# listed driving/cloud adapter below. tests/test_isolation_guard.py holds the twin AST classifier
-# in Python, and tests/test_repo_hygiene.py executes every invalid/valid example listed here.
+# States one import rule per folder across Ports, Adapters and Contracts (`ADR-005` / `P2.3`):
+# 1. `engine/` imports only `capacity.contract` (and stdlib / sibling `capacity.engine`).
+# 2. Only `capacity/telemetry/cloud_monitoring.py` imports `google.*` Cloud SDKs; only `cli/` and
+#    `api.py` import `cloud_monitoring`.
+# 3. `showcase/` renderer modules import no calculation (`engine`, `ingest`, `telemetry`,
+#    `gateway`, `showcase.evaluate`, `showcase.sample_data`).
+# 4. Only `capacity/cli/**` and `capacity/api.py` import driving ports (`fastapi`, `typer`,
+#    `uvicorn`, `dotenv`).
+# `tests/test_isolation_guard.py` enforces the full resolved-import folder table in Python, and
+# `tests/test_repo_hygiene.py` executes every `invalid_examples` / `valid_examples` entry here.
 
 id: library-never-imports-examples
 language: Python
 severity: error
-message: "Hexagonal violation: capacity/ modules must never import examples/ or benchmarks/."
+message: "Boundary violation: capacity/ modules must never import examples/, benchmarks/, or dynamic imports."
 files:
   - "capacity/**/*.py"
 metadata:
@@ -18,8 +25,10 @@ metadata:
     - "import benchmarks"
     - "import os, benchmarks.trace_backtest"
     - "from benchmarks import trace_backtest"
+    - "__import__('capacity.api')"
+    - "importlib.import_module('capacity.api')"
   valid_examples:
-    - "from capacity.models import ModelRecommendation"
+    - "from capacity.contract.results import ModelRecommendation"
     - "import examples_helper"
 rule:
   any:
@@ -27,102 +36,145 @@ rule:
       regex: "(?s)^import\\s+(.+,\\s*)*(examples|benchmarks)(\\b|\\.)"
     - kind: import_from_statement
       regex: "(?s)^from\\s+(examples|benchmarks)(\\b|\\.)"
+    - pattern: __import__($$$)
+    - pattern: importlib.import_module($$$)
+    - pattern: import_module($$$)
 ---
-id: core-math-never-imports-driving-ports
+id: engine-imports-only-contract
 language: Python
 severity: error
-message: "Hexagonal violation: only api.py and CLI modules may import FastAPI, Typer or Uvicorn."
+message: "Folder rule (engine/): capacity/engine/ may import only stdlib, capacity.contract, and capacity.engine."
 files:
-  - "capacity/**/*.py"
-ignores:
-  - "capacity/api.py"
-  - "capacity/cli.py"
-  - "capacity/cli_collect.py"
-  - "capacity/cli_formatters.py"
-  - "capacity/cli/**"
+  - "capacity/engine/**/*.py"
 metadata:
-  test_path: "capacity/engine/finops.py"
+  test_path: "capacity/engine/probe.py"
   invalid_examples:
-    - "import fastapi"
-    - "import math, fastapi"
-    - "from typer import Typer"
-    - "import uvicorn"
-    - "from fastapi.responses import JSONResponse"
+    - "from capacity.ingest.prometheus import parse_prometheus_metrics"
+    - "from capacity.telemetry.port import TelemetryPort"
+    - "from capacity.gateway.bundle import generate_gateway_bundle"
+    - "from capacity.showcase.sample_data import DEMO_OPTIMIZE_SERIES"
+    - "from capacity.cli.common import app"
+    - "import capacity.api"
+    - "from ..telemetry import port"
+    - "from .. import gateway"
+    - "import yaml"
+    - "from pydantic import BaseModel"
   valid_examples:
-    - "from capacity.models import FocusChargebackReport"
-    - "import fastapi_like_helper"
+    - "from capacity.contract.requests import OptimizeRequest"
+    - "from capacity.contract.results import OptimizeResponse"
+    - "from capacity.engine.catalog import build_model_catalog"
+    - "from .stats import percentile"
+    - "import math"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|typer|uvicorn)(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*(pydantic|yaml|fastapi|typer|uvicorn|dotenv|google|capacity\\.(ingest|telemetry|gateway|showcase|cli|api))(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(fastapi|typer|uvicorn)(\\b|\\.)"
+      regex: "(?s)^from\\s+(pydantic|yaml|fastapi|typer|uvicorn|dotenv|google|(capacity\\.|\\.\\.\\s*)(ingest|telemetry|gateway|showcase|cli|api))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(capacity|\\.\\.)\\s+import\\s+(.*[\\s,(])?(ingest|telemetry|gateway|showcase|cli|api)\\b"
 ---
-id: domain-math-never-imports-gcp-adapter
+id: only-cloud-monitoring-imports-gcp-sdk
 language: Python
 severity: error
-message: "Hexagonal violation: pure modules never import Google Cloud SDKs, driving/cloud adapters, or dynamic imports."
+message: "Folder rule (telemetry/): only capacity/telemetry/cloud_monitoring.py may import Google Cloud SDKs."
 files:
   - "capacity/**/*.py"
 ignores:
-  - "capacity/api.py"
-  - "capacity/cli.py"
-  - "capacity/cli_collect.py"
-  - "capacity/cli_formatters.py"
-  - "capacity/core.py"
-  - "capacity/cli/**"
   - "capacity/telemetry/cloud_monitoring.py"
 metadata:
-  test_path: "capacity/engine/probe.py"
+  test_path: "capacity/telemetry/probe.py"
   invalid_examples:
     - "from google.cloud import monitoring_v3"
     - "from google import cloud"
     - "from google.auth.exceptions import DefaultCredentialsError"
     - "from google.api_core.exceptions import PermissionDenied"
-    - "from capacity.core import fetch_throughput"
-    - "import capacity.core"
-    - "import math, capacity.core"
-    - "from capacity import core"
-    - "from capacity import finops, core"
-    - "from . import core"
-    - "from .. import core"
-    - "from ... import core"
-    - "from .. import (\n    finops,\n    core,\n)"
-    - "from .core import fetch_throughput"
-    - "from ..core import fetch_throughput"
-    - "from ...core import fetch_throughput"
-    - "from capacity import api"
-    - "import capacity.telemetry.cloud_monitoring"
-    - "from capacity.telemetry import cloud_monitoring"
-    - "from capacity.telemetry.cloud_monitoring import CloudMonitoringAdapter"
-    - "from ..telemetry import cloud_monitoring"
-    - "from ..telemetry.cloud_monitoring import CloudMonitoringAdapter"
-    - "__import__('capacity.core')"
-    - "importlib.import_module('capacity.core')"
+    - "from google.protobuf import duration_pb2"
+    - "import google.auth"
   valid_examples:
-    - "from capacity.forecasting import holts_linear_trend"
-    - "from capacity import finops"
-    - "from . import burst"
-    - "from .. import finops"
-    - "from capacity.coreutils import helper"
-    - "from ..coreutils import helper"
-    - "from capacity.telemetry import port"
-    - "from ..telemetry import port"
+    - "from capacity.telemetry.port import TelemetryPort"
+    - "from capacity.contract.common import SeriesKey"
 rule:
   any:
     - kind: import_statement
-      regex: "(?s)^import\\s+(.+,\\s*)*(google\\.(cloud|auth|api_core)|capacity\\.(core|api|cli|cli_collect|cli_formatters|telemetry\\.cloud_monitoring))(\\b|\\.)"
+      regex: "(?s)^import\\s+(.+,\\s*)*google\\.(cloud|auth|api_core|protobuf)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(google\\.(cloud|auth|api_core)|(capacity\\.|\\.+\\s*)(core|api|cli|cli_collect|cli_formatters|(telemetry\\.)?cloud_monitoring))(\\b|\\.)"
+      regex: "(?s)^from\\s+google\\.(cloud|auth|api_core|protobuf)(\\b|\\.)"
     - kind: import_from_statement
-      regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(core|api|cli|cli_collect|cli_formatters)\\b"
+      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?(cloud|auth|api_core|protobuf)\\b"
+---
+id: renderer-imports-no-calculation
+language: Python
+severity: error
+message: "Folder rule (showcase renderer): page renderer modules may import only stdlib, capacity.contract, and sibling renderer modules."
+files:
+  - "capacity/showcase/**/*.py"
+ignores:
+  - "capacity/showcase/__init__.py"
+  - "capacity/showcase/evaluate.py"
+  - "capacity/showcase/sample_data.py"
+metadata:
+  test_path: "capacity/showcase/renderer_probe.py"
+  invalid_examples:
+    - "from capacity.engine.catalog import build_model_catalog"
+    - "from capacity.engine.burst import evaluate_micro_burst_window"
+    - "from capacity.gateway.bundle import generate_gateway_bundle"
+    - "from capacity.showcase.evaluate import evaluate_showcase_scenario"
+    - "from capacity.showcase.sample_data import build_default_showcase_scenario"
+    - "from .evaluate import evaluate_showcase_scenario"
+    - "from . import evaluate"
+    - "from ..engine import sizing"
+  valid_examples:
+    - "from capacity.contract.scenario import ShowcaseReport"
+    - "from capacity.showcase.sections import render_sizing_kpis"
+    - "import html"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*capacity\\.(engine|ingest|telemetry|gateway|cli|api|showcase\\.(evaluate|sample_data))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+((capacity\\.|\\.\\.\\s*)(engine|ingest|telemetry|gateway|cli|api)|(capacity\\.showcase\\.|\\.\\s*)(evaluate|sample_data))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(capacity\\.showcase|\\.)\\s+import\\s+(.*[\\s,(])?(evaluate|sample_data)\\b"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(capacity|\\.\\.)\\s+import\\s+(.*[\\s,(])?(engine|ingest|telemetry|gateway|cli|api)\\b"
+---
+id: only-cli-and-api-import-driving-ports
+language: Python
+severity: error
+message: "Folder rule (cli/ & api.py): only capacity/cli/** and capacity/api.py may import FastAPI, Typer, Uvicorn, dotenv, or cloud_monitoring."
+files:
+  - "capacity/**/*.py"
+ignores:
+  - "capacity/api.py"
+  - "capacity/cli/**"
+metadata:
+  test_path: "capacity/ingest/probe.py"
+  invalid_examples:
+    - "import fastapi"
+    - "import math, fastapi"
+    - "from typer import Typer"
+    - "import uvicorn"
+    - "from dotenv import load_dotenv"
+    - "from capacity import api"
+    - "from capacity.cli import app"
+    - "import capacity.telemetry.cloud_monitoring"
+    - "from capacity.telemetry import cloud_monitoring"
+    - "from ..telemetry import cloud_monitoring"
+  valid_examples:
+    - "from capacity.contract.results import FocusChargebackReport"
+    - "from capacity.telemetry import port"
+    - "import fastapi_like_helper"
+rule:
+  any:
+    - kind: import_statement
+      regex: "(?s)^import\\s+(.+,\\s*)*(fastapi|typer|uvicorn|dotenv|capacity\\.(api|cli|telemetry\\.cloud_monitoring))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(fastapi|typer|uvicorn|dotenv|(capacity\\.|\\.+\\s*)(api|cli|(telemetry\\.)?cloud_monitoring))(\\b|\\.)"
+    - kind: import_from_statement
+      regex: "(?s)^from\\s+(capacity|\\.+)+\\s+import\\s+(.*[\\s,(])?(api|cli)\\b"
     - kind: import_from_statement
       regex: "(?s)^from\\s+((capacity\\.|\\.+\\s*)telemetry|\\.+)+\\s+import\\s+(.*[\\s,(])?cloud_monitoring\\b"
-    - kind: import_from_statement
-      regex: "(?s)^from\\s+google\\s+import\\s+(.*[\\s,(])?(cloud|auth|api_core)\\b"
-    - pattern: __import__($$$)
-    - pattern: importlib.import_module($$$)
-    - pattern: import_module($$$)
 ---
 id: no-subprocess-shell-true
 language: Python

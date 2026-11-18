@@ -9,8 +9,8 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from capacity.cli import app as cli_app
-from capacity.gateway import generate_gateway_bundle
-from capacity.models import GatewayConfigRequest
+from capacity.contract.requests import GatewayConfigRequest
+from capacity.gateway.bundle import generate_gateway_bundle
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 runner = CliRunner()
