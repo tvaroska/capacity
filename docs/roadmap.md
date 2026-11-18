@@ -20,13 +20,152 @@ Decisions taken by the owner on 2026-11-17:
 | # | Milestone | Status |
 | :--- | :--- | :--- |
 | 1–4 | `v0.3.1` (`P0`), `v0.4.0` (`P1`), `v0.5.0` (`P2`), `v0.6.0` (`P3`) | Shipped — see [`## Shipped`](#shipped) and [`archive/roadmap-history.md`](archive/roadmap-history.md) |
-| Next | `v0.7.0` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled (`0` open `- [ ]` tasks) |
+| Next | `v0.6.1` — Fix the `P0` items in [`## Review 2026-11-18`](#review-2026-11-18-next-steps-p0p4) (wrong numbers from ingest, chargeback and the gateway callback) | Proposed, not yet scheduled |
+| Later | `v0.7.0` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled (`0` open `- [ ]` tasks) |
 
 Each scheduled milestone ends in a minor tagged release.
 
+## Review 2026-11-18: next steps (`P0`–`P4`)
+
+Daily architecture, code and test review at `v0.6.0` (`e95f059`). The gate was green before the review (286/286 in 24 s, no test slower than 2.9 s). Every `P0` was reproduced with a short script. Nothing below repeats a `U` item. Where an item adds to one it says "extends U#". All items are **pre-existing** (code already present in `v0.4.0` and only moved in `v0.5.0`) except R13 and R14, which came with `v0.6.0`. Items are plain bullets like the rest of the backlog. Promote them to `- [ ]` when scheduling them. Write the failing test first for each one.
+
+Mutation spot-check (9 one-line mutants in a scratch copy): 7 were caught, and 2 survived (R15, R16). The audit's `SIBLING_SYS_PATH_TRAVERSAL` hit on `tests/test_isolation_guard.py:337` is a false positive: the line finds the ast-grep binary next to the interpreter and does not change `sys.path`.
+
+### `P0`: wrong numbers or silent fallbacks
+
+- **R1 Prometheus: scrapes without timestamps are added together.** `capacity/ingest/prometheus.py:62-80`, `:107-121`. Untimestamped samples all land in one `current_scrape` dict. Two appended `/metrics` dumps (1,000,000 then 1,060,000) give 2,060,000 tokens where the true delta is 60,000 (34× too high). The comment at `:19` promises one-minute spacing that never happens.
+  - Next: start a new scrape when a `(metric, labels)` key repeats, or reject untimestamped multi-scrape input with one error line.
+  - Verify: new `test_untimestamped_concatenated_scrapes_are_differenced` in `tests/test_critical_invariants.py` expects a prompt delta of 60,000 and one interval.
+- **R2 Prometheus: the tenant TPM is an unweighted mean of interval rates.** `capacity/ingest/prometheus.py:166` (`sum(interval_tpms)/len(interval_tpms)`), `:170`, `:179`. Downstream, `cli/optimize.py:132` and `engine/commitment.py:90` read each point as one minute. Scrapes at 0 s, 60 s and 3,600 s with 600k tokens in the first minute give a tenant TPM of 300,000. The true hourly mean is 10,000, so chargeback is 30× too high.
+  - Next: weight by interval length (`Σ tokens / Σ minutes`) and expand `tpm_series` to per-minute points, or return interval lengths.
+  - Verify: test with a 1-minute plus 59-minute layout asserting `hourly_consumed_tpm_by_tenant["default"] == [10000.0]`.
+- **R3 Cloud Monitoring without `--model` never queries 3P Claude `token_count`.** `capacity/telemetry/cloud_monitoring.py:259-262`. `has_partner_filter` is False when `models` is None, so all Claude PT usage is missing from an unfiltered `recommend --project X`. This breaks `ADR-002`. The existing test at `tests/test_claude_3p.py:213-229` only covers explicit `models=[...]`.
+  - Next: `query_partner = models_filter is None or has_partner_filter`, and keep the per-model skip at `:297`.
+  - Verify: extend `test_fetch_throughput_partner_token_count_weighting_and_mixed_models` with a `fetch_throughput("demo-proj", days=1)` call and assert both the Gemini and the `claude-sonnet-4-6` `SeriesKey` are present.
+- **R4 JSONL logs: `tpm_series` drops idle minutes, so `recommend` puts new dates on them and `optimize` treats them as 24x7.** `capacity/ingest/request_logs.py:445-446`. Callers: `capacity/cli/recommend.py:118-121` lays the sparse minutes onto consecutive minutes from the trace epoch, so 3 days of traffic become 1 "day" with one daily peak for the Holt forecast. `capacity/cli/optimize.py:132,175` uses `active_duty_cycle_pct=100`, against `ADR-001` and `ADR-006`.
+  - Next: return a zero-filled minute series from the first record to the last (as `_minute_series_by_key` already does) or a sparse `dict[datetime, float]`. Feed real timestamps to `LocalTraceAdapter`. Derive the duty cycle in `optimize --vllm-file`.
+  - Verify: test that `recommend --vllm-file` on a 3-day log reports 3 daily peaks (`total_minutes ≥ 2,885`).
+- **R5 Chargeback: a scalar tenant beside hourly lists counts as one hour, then zeros.** `capacity/contract/requests.py:116` accepts `HourlyTpmSeries | BoundedTpmFloat`. `capacity/engine/commitment.py:33-41` (`pad_series_matrix`) turns a scalar into `[x]` and zero-pads it. `capacity/engine/chargeback.py:43`. Two tenants at 1M TPM split 4% / 96% instead of 50% / 50%. Lists of different lengths are also aligned at hour 0 without a message (`engine/pooling.py:29`).
+  - Next: broadcast a scalar as a constant (or drop the scalar arm; touches U11), and reject lists of different lengths with one `ValueError`.
+  - Verify: new `test_chargeback_scalar_tenant_is_constant` expects 50/50.
+- **R6 `GSU_CAPACITY_*` overrides: a malformed value is ignored without a message, and `0` crashes later.** `capacity/engine/catalog.py:469-472` (`except ValueError: continue`), `:437-454`. `GSU_CAPACITY_GEMINI_3_8_FLASH=3,000` silently keeps 120,900. `=0` is accepted and raises `ZeroDivisionError` at `engine/commitment.py:81` (same division at `chargeback.py:59` and `burst.py:132`). The scenario path already validates `ge=1` (`contract/scenario.py:96`).
+  - Next: raise `ValueError("<key>=<val>: expected a positive integer TPM per GSU")` when parsing fails or the value is ≤ 0.
+  - Verify: `build_model_catalog(env={...: "3,000"})` and `{...: "0"}` both raise. Add both cases to `tests/test_critical_invariants.py`.
+- **R7 The generated LiteLLM callback never writes to the shared cache.** `capacity/gateway/litellm_burndown_callback.py:136-142` checks `hasattr(cache, "async_increment")`. LiteLLM's `DualCache` method is `async_increment_cache`, so on a real proxy every increment goes to the per-process `_local_window` and nothing is logged. With the default 12 pods × 4 workers, a team can burn about 48× its funded share before it spills. The fake at `tests/conftest.py:120` copies the wrong name, so the suite stays green. `DECISIONS.md:70` documents the wrong name too.
+  - Next: add a pinned `litellm` dev extra and assert the real method names first (the method name here comes from LiteLLM's docs, since litellm is not installed in `.venv`). Then call `async_increment_cache`, log once or fail closed when the shared cache is missing, rename the fake's method, and fix `ADR-007` / `DECISIONS.md:70`.
+  - Verify: test with a cache exposing only `async_get_cache` / `async_increment_cache` and 2 callback instances, asserting 20 shared increments and an empty `_local_window`.
+- **R8 The per-team funded ceiling reads `max_budget_tpm`, which LiteLLM's key object does not have.** `capacity/gateway/litellm_burndown_callback.py:155-160`. `getattr(..., None)` always falls back to `committed_tpm // business_unit_shares`, so a team with `tpm_limit=5000` never spills. The tests build `SimpleNamespace(max_budget_tpm=...)` themselves (`tests/test_claude_3p.py:303`, `tests/test_physics_oracles.py:232`), so they cannot catch it.
+  - Next: read `team_tpm_limit`, then `tpm_limit` (or one documented team metadata key), log when the default is used, and drop `max_budget_tpm` from the tests.
+  - Verify: a team with `tpm_limit=5000` spills at about request 5.
+
+### `P1`: missing tests, weak guards, gate drift
+
+- **R9 The generated LiteLLM config hardcodes per-token prices for every model.** `capacity/gateway/litellm.py:175-176`, `:193-194`. Every model gets the same PT and spillover prices, and the Claude "standard" spillover is priced at 1.8× even though `GATEWAY_HEADER_POLICIES` tier 3 says 1.0×. So spend logs and budgets on a deployed proxy are wrong.
+  - Next: take prices from the request (`paygo_per_1m_burndown_tokens_usd`) or from a catalog field, with the spillover factor from `supports_priority_paygo`. Or omit the `*_cost_per_token` fields.
+  - Verify: test that bundles for two models differ, and that the Claude spillover price equals the PT price × 1.0.
+- **R10 Multi-model JSONL: `snapshot.model` is the last record's model, while `tpm_series` sums all models.** `capacity/ingest/request_logs.py:272`, `:419`. `cli/optimize.py:146` then sizes Gemini load against a Llama replica profile.
+  - Next: for single-model commands, fail with one line naming the models unless `--model` picks one, then filter the series.
+  - Verify: `optimize --mode self-hosted --vllm-file <mixed.jsonl>` exits non-zero and names both models.
+- **R11 Prometheus: a counter first seen in a later scrape is counted in full.** `capacity/ingest/prometheus.py:43-45` (`curr - 0`). A 5M counter seen only in scrape 2 becomes one minute of 20M weighted TPM.
+  - Next: a delta of 0 when the key is missing from the previous scrape.
+  - Verify: new row in the counter-reset table at `tests/test_critical_invariants.py:421-428`.
+- **R12 Minute series: zero-filling stops above the cell cap without a message, and the showcase keeps only the first region.** `capacity/ingest/request_logs.py:168-172`: 21 keys × 50,001 minutes give a series of length 2, which turns all-hours percentiles into active-only ones. `capacity/showcase/evaluate.py:347-349` keeps only the first region per model instead of summing them when `by_region=False`.
+  - Next: raise `ValueError` above the cap (as `_hourly_series_by_tenant:143-152` does), and sum regions element-wise.
+  - Verify: one test that expects a `ValueError` above the cap, and one that two regions are summed.
+- **R13 A bad scenario file returns a plain 500 on every sizing route (regression in `v0.6.0`, extends U5).** `capacity/api.py:95-102` (`_active_scenario_catalog`, added in `e95f059`) re-reads `CAPACITY_SCENARIO_FILE` inside 9 routes. `{not json` gives a 500 with no JSON body on `/api/v1/optimize`, `/api/v1/gateway/config` and `/`.
+  - Next: load and validate once at startup and keep the last good copy. Until then, map `ValidationError`/`ValueError`/`OSError` to a 503 JSON detail.
+  - Verify: a TestClient test with a corrupted scenario file expects a 503 JSON response (or a 200 from the cached catalog).
+- **R14 The workbench swallows API errors and leaves stale numbers on screen (`v0.6.0`).** `capacity/showcase/assets/workbench.js:18-31` (`postJson` returns `null` on non-2xx, and an empty input becomes `0`). Callers at `:44`, `:91`, `:117` and `:194` return early. A `fetch` rejection is unhandled.
+  - Next: show a visible error state (text plus `badge-danger`) on a non-OK response or a network error, and treat `""` as invalid.
+  - Verify: a TestClient test that the page includes the error-state element ids, plus a manual check under `capacity serve` (clear a field and the badge shows an error).
+- **R15 Mutation survives: a flat (idle) counter is not tested.** Changing `diff < 0` to `diff <= 0` at `capacity/ingest/prometheus.py:45` keeps 286/286 green, yet makes an idle server report its whole cumulative counter (500,000 TPM instead of 0).
+  - Next: add a `"flat counter is zero traffic"` row to the parametrize table at `tests/test_critical_invariants.py:411-438`.
+  - Verify: re-apply the mutant in a scratch copy; that row must fail.
+- **R16 Mutation survives: the NaN/Inf 422 test never checks the sanitized value.** `tests/test_refactor_cutpoints.py:314-320` checks only the status and that `detail` is a list. Changing `return repr(node)` to `return None` at `capacity/api.py:87` stays green.
+  - Next: assert `detail[0]["input"] == repr(bad_num)` and `detail[0]["loc"] == ["body", "tpm_series", 0]`.
+  - Verify: re-apply the mutant in a scratch copy; the test must fail.
+- **R17 Cloud Build uses a uv three minor versions older than the one that wrote the lockfile.** `cloudbuild.yaml:14` and `Dockerfile:3` pin uv `0.9.1`. The local uv is `0.12.24` and `uv.lock:2` is `revision = 5`. No `[tool.uv] required-version` is set. Whether `0.9.1` accepts the lock under `lock --check` / `sync --frozen` is **unverified**.
+  - Next: pin one uv version everywhere (`required-version` plus matching image tags) and note it in the gate gotchas in `AGENTS.md`.
+  - Verify: `docker run --rm -v "$PWD":/w -w /w ghcr.io/astral-sh/uv:0.9.1-python3.13-bookworm-slim uv lock --check`.
+
+### `P2`: boundaries and refactor-blocking coupling
+
+- **R18 The engine reads `os.environ`, and both import guards allow stdlib I/O in `engine/`.** `capacity/engine/catalog.py:5,464`. Every `catalog or build_model_catalog()` fallback (`commitment.py:51`, `chargeback.py:31`, `scheduler.py:33,174`, `pooling.py:20`, `burst.py:76`, `sizing.py:53,72,85,247`) depends on the server's environment. `specs/ast.rules.yaml:43-75` and `tests/test_isolation_guard.py:37` (`sys.stdlib_module_names`) would also let `pathlib`, `socket` or `subprocess` through.
+  - Next: read the environment in the adapters (`build_model_catalog(env=os.environ)` in `cli/` and `api.py`), default the engine to `env={}`, and deny stdlib I/O roots in the `engine`/`contract` rules.
+  - Verify: a probe `import os` in `capacity/engine/` fails `tests/test_isolation_guard.py`.
+- **R19 Unknown models report `recommended_gsus=0`.** `capacity/engine/sizing.py:97-100`, `:148`, `:176-180`. **Owner decision (2026-11-18): keep `0`.** There will be no `None` and no `UnknownModelError` on the `recommend` path. `showcase/evaluate.py:370` still fails closed for scenarios.
+  - Next: state in `ADR-001` that `recommend` reports `0` GSUs with `gsu_capacity_tpm: null` for models outside the catalog, and add a test that pins this behaviour.
+  - Verify: a sparse series keyed `unknown-model-x` gives `recommended_gsus == 0` and `gsu_capacity_tpm is None`.
+- **R20 Capacity overrides for models outside the catalog silently get Gemini 1P rules.** `capacity/engine/catalog.py:449-454`. `GSU_CAPACITY_CLAUDE_HAIKU_4_5=50000` gives the `gemini_1p` family: 4.0× output instead of 5.0×, the wrong buckets, and Priority spillover that Claude lacks (`ADR-007`).
+  - Next: infer the family from the publisher prefix, or require the override to name it.
+  - Verify: `build_model_catalog(env={"GSU_CAPACITY_CLAUDE_HAIKU_4_5": "50000"}).require("claude-haiku-4-5").family_spec.family == "claude_3p"`.
+- **R21 Workbench input race.** `capacity/showcase/assets/workbench.js:33-231`. Each `oninput` fires an unsequenced `fetch`, so an older response can overwrite a newer one.
+  - Next: an `AbortController` per handler (or a request id), plus a debounce of about 150 ms.
+  - Verify: `grep -n AbortController capacity/showcase/assets/workbench.js`.
+- **R22 Badge and banner rules exist in both Python and JS and already differ (extends U3).** `tabs.py:111-120` ↔ `workbench.js:49-57`, `tabs.py:261-311` ↔ `:126-175`, `tabs.py:319-330` ↔ `:99-108`, `governance_tabs.py:173-184` ↔ `:209-230`. With no bottleneck warnings, Python shows the status text (`governance_tabs.py:184`), while JS keeps the old banner (`workbench.js:228-230`).
+  - Next: return `BadgeView`/`BannerView` tone and text from the API, so JS only assigns `className`/`textContent`.
+  - Verify: `grep -c "badge badge-" capacity/showcase/assets/workbench.js` returns 0.
+- **R23 Callback state: the local window grows without limit, failures are never refunded, and spill decisions read a stale value.** `capacity/gateway/litellm_burndown_callback.py:120-142` (one key per team per minute, never removed), `:162-200` (no `async_log_failure_event`, so each failed call keeps its 1,024-token reservation; the spill check uses the value read before this request's own increment).
+  - Next: fold into R7. Drop keys older than the current minute minus 2, refund `-reserved` on failure, and decide on the total that `_increment_counter` returns.
+  - Verify: `time_fn` over 10 minutes leaves `len(_local_window) <= 3`, and 10 concurrent pre-calls at a 5×1,024 ceiling spill from the 5th call.
+- **R24 Tests patch private module globals.** `tests/test_critical_invariants.py:289,312` (`scheduler._EXACT_SEARCH_NODE_BUDGET`), `tests/test_ingestion.py:174` (`cloud_monitoring.datetime`), `tests/test_l3_receipt.py:65,90,111-112` (`catalog.GEMINI_1P_FLASH_SPEC`, benchmark functions). A rename or a `from datetime import` turns these into silent no-ops.
+  - Next: make the search budget a keyword argument, inject `now: Callable[[], datetime]` into the Cloud Monitoring adapter, and pass `catalog=` into `run_track_a_backtest`.
+  - Verify: `rg -n 'monkeypatch.setattr\(\w+, "_' tests/` returns nothing.
+
+### `P3`: cleanup and doc contracts
+
+- **R25 Gaps in `specs/ast.rules.yaml`.** The header at `:2-11` says "one import rule per folder", but there is no `contract/` or `ingest/` rule. `exec`, `compile`, `getattr(importlib, "import_module")` and `importlib.__import__` all pass (`:39-41`, and `:201-214` bans only `eval`). The Google SDK regex at `:100-104` misses `from google import genai`. The Python guard covers most of these cases.
+  - Next: add `contract`/`ingest` rules, extend `no-eval-builtin` to cover `exec`/`compile`, and add the dynamic-import patterns. Or reword the header to "a subset; the Python guard is authoritative".
+  - Verify: add the bypasses as `invalid_examples`, then `uv run --no-sync pytest tests/test_repo_hygiene.py -k ast`.
+- **R26 The engine silently fixes up bad input.** `capacity/contract/requests.py:86-90` has no `min_replica_count > max_replica_count` validator, and `self_hosted.py` raises max to min. `capacity/engine/kpis.py:39-41` caps `ecur_168h_pct` at 100, which hides over-reservation. `capacity/contract/common.py:11-14` keeps a hardcoded `"0.6.0"` fallback.
+  - Next: add a `model_validator`, return uncapped ECUR (or an `over_reservation` flag), and keep one version source.
+  - Verify: `uv run --no-sync pytest -k "self_hosted or kpi"` with the new cases.
+- **R27 A placeholder project in the Cloud Monitoring adapter.** `capacity/telemetry/cloud_monitoring.py:208-209` turns an empty project list into `"default-project"`.
+  - Next: raise `ValueError("at least one project")`.
+  - Verify: `fetch_throughput([])` raises.
+- **R28 `SKILL.md` commands fail as written.** `skills/capacity/SKILL.md:47,49` (`optimize`, `schedule`) lack `--demo` or an input file, which has been required since `v0.4.0`. `.agents/skills/capacity/SKILL.md` is a copy, not a symlink.
+  - Next: add `--demo`, make the copy a symlink, and add both files to the documentation-contract command test.
+  - Verify: every fenced `capacity ...` command in both `SKILL.md` files exits 0 under the doc-contract test.
+- **R29 A README example prints `?` replicas.** `README.md:56` runs `recommend --mode self-hosted` on managed-model OTel spans (`examples/otel_genai_spans.jsonl`).
+  - Next: point it at `examples/vllm_requests.jsonl`, or drop `--mode self-hosted`.
+  - Verify: the example output contains no `?`.
+- **R30 Self-hosted calibration from a vLLM snapshot lives only in the CLI.** `capacity/cli/optimize.py` (self-hosted branch, `observed_cache_hit_rate` and KV/queue mapping). `/api/v1/self-hosted/audit` callers get different results from the same telemetry.
+  - Next: one shared "snapshot → `SelfHostedAuditRequest`" function in `contract/` or `engine/`.
+  - Verify: `grep -n observed_cache_hit_rate capacity/cli/optimize.py` returns nothing.
+- **R31 The ast-grep binary lookup is written twice, and one copy falls back to a home-directory binary.** `tests/test_repo_hygiene.py:49-60` (venv → `which` → `~/.local/bin`, which is 0.51.1 on this host against the locked 0.51.2) vs `tests/test_isolation_guard.py:337-341`.
+  - Next: one `resolve_ast_grep()` in `tests/conftest.py` that uses the venv binary or fails.
+  - Verify: `rg -n 'executable\).parent' tests/` matches only `conftest.py`.
+- **R32 Duplicated inline fakes.** LiteLLM key and response `SimpleNamespace` trees appear at `tests/test_physics_oracles.py:232-245` and `tests/test_claude_3p.py:303-310`. ADC patches appear at `tests/test_refactor_cutpoints.py:346,353-355` and `tests/test_scenario_and_collect.py:280-282`.
+  - Next: add `make_litellm_key`, `make_litellm_response` and a `fake_adc` fixture to `conftest.py` (fixes R8 in the tests at the same time).
+  - Verify: `rg -n 'SimpleNamespace\(team_id|patch\("google.auth.default"' tests/ | grep -v conftest` returns nothing.
+- **R33 The U items cite paths from before `v0.5.0`.** U1–U12 still name `capacity/finops.py`, `capacity/gateway.py`, `capacity/telemetry_parsers.py`, `capacity/portal*.py`, `capacity/models.py`, `capacity/core.py` and `capacity/cli_formatters.py`, none of which exist now. U6 and U10 refer to `P1.9` and `P3.1` as future work, but both have shipped.
+  - Next: map each path to its folder (`engine/`, `gateway/`, `ingest/`, `showcase/`, `contract/`, `cli/formatters.py`) the next time a U item is promoted.
+  - Verify: `grep -nE 'capacity/(finops|gateway|telemetry_parsers|portal[a-z_]*|models|core|cli_formatters)\.py' docs/roadmap.md` returns nothing.
+
+### `P4`: ergonomics and optional
+
+- **R34 The Track-A replay runs three times per suite (about 4.3 s of 22 s).** `tests/test_l3_receipt.py:66` replays only to assert `schema_version`.
+  - Next: read `schema_version` from the receipt file instead.
+  - Verify: `uv run --no-sync pytest -q --durations=5 -p no:cacheprovider tests/test_l3_receipt.py` shows at most 2 replays.
+- **R35 `proj-test capacity` does not create the venv on a fresh host.** The workspace runner calls `scripts/gate.sh` directly.
+  - Next: add `uv sync --frozen --extra dev --offline` to the runner when `.venv/bin/pytest` is missing, matching `cloudbuild.yaml:25`.
+  - Verify: the gate passes with `.venv` moved aside.
+- **R36 `_PUSH: "auto"` is a dead value.** `cloudbuild.yaml:6` sets it, and `:42` only tests `== "true"`.
+  - Next: default to `"false"` and add a comment explaining when it pushes.
+  - Verify: `grep -n _PUSH cloudbuild.yaml`.
+- **R37 `gateway --target` is ignored with `--format json`.** `capacity/cli/gateway.py:65-69`.
+  - Next: filter the JSON by target, or say in the help text that `--target` only affects the table.
+  - Verify: `uv run --no-sync capacity gateway -t envoy -f json | grep -c litellm_config_yaml` returns 0.
+- **R38 Investigate: `/api/v1/recommendations` with no network or credentials hung for about 60 s, then returned a plain 500.** The exception type was not captured; most likely a google-auth `TransportError` that is not mapped to `GCPQueryError`.
+  - Next: capture the exception, map it to a 502 JSON detail, and set a client timeout.
+  - Verify: a TestClient test with `google.auth.default` raising `TransportError` expects a 502 JSON response.
+- **R39 The benchmark's cache claim is only shown against the weakest baseline (extends U8).** The capacity arm's `effective_prefix_cache_hit_pct` (26.84) equals the `unweighted_60s_default` arm's, and `tests/test_l3_receipt.py` compares it only against the stripped round-robin arm.
+  - Next: either assert and publish the comparison with the naive gateway, or drop the cache-advantage claim from the README.
+  - Verify: `uv run --no-sync pytest tests/test_l3_receipt.py`.
+
 ## Unscheduled backlog
 
-Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only the 18 scheduled milestone tasks above. Promote an item into a milestone (`- [ ]`) when scheduling it.
+Items below have no target release and use plain bullets rather than `- [ ]` checkboxes so `work_sync.py` counts only scheduled milestone tasks (currently `0`). Promote an item into a milestone (`- [ ]`) when scheduling it.
 
 ### Review follow-ups (`U1`–`U12`)
 
@@ -93,7 +232,6 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
   - The gateway callback is tested only through its generated text. Add direct tests of `capacity/litellm_burndown_callback.py`.
   - The container image is built in Cloud Build and never started. Start it once and call the health route.
   - The hygiene scans walk the working directory, so an untracked local file can fail the suite on one machine only.
-  - Tests import `benchmarks` without a `pythonpath` setting. It works only through the editable install.
   - Files: `pyproject.toml`, `cloudbuild.yaml`, `tests/`.
   - Done when: each point is fixed, or dropped with a one-line reason.
 - **U10 Page content with a source**
