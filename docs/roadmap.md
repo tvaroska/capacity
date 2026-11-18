@@ -21,6 +21,7 @@ Decisions taken by the owner on 2026-11-17:
 | :--- | :--- | :--- |
 | 1–5 | `v0.3.1` (`P0`), `v0.4.0` (`P1`), `v0.5.0` (`P2`), `v0.6.0` (`P3`), `v0.6.1` (`P0`–`P2` review fixes) | Shipped — see [`## Shipped`](#shipped) and [`archive/roadmap-history.md`](archive/roadmap-history.md) |
 | 6 | `v0.7.0` — Cloud Console Capacity, Reallocation & Hourly Spillover Workbench | Scheduled (`6` open `- [ ]` tasks) |
+| 7 | `v0.7.1` — Cross-Repo `bq-eval` Burndown, OTel Span & Hourly `FOCUS 1.2` Wire Alignment | Scheduled (`1` open `- [ ]` task) |
 | Next | `v0.8.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled |
 
 Each scheduled milestone ends in a minor tagged release.
@@ -35,6 +36,10 @@ Port the finalized Cloud Console visual design, per-model `P50`/`P75`/`P90`/`P95
 - [ ] **Full-width 1P & 3P per-model reallocation planners (`capacity/engine/reallocation.py`, `api.py`, `reallocation_cards.py`):** Separate 1P Gemini and 3P Claude reallocation tables with explicit formula (`Target GSUs = Contracted + From Existing (Realloc Δ) + Buy New GSUs`), per-row + bulk `Target P` selectors backed by `POST /api/v1/reallocate` on `capacity serve` (and pre-computed snapshots on `--html-out`), full-width *Recommended 1P GSU Reallocations* directly below 1P, and editable 3P what-if inputs when 3P Cloud Monitoring telemetry is not yet attached.
 - [ ] **Tab 2 hourly 1-minute PT spillover SVG line graph (`capacity/engine/reallocation.py`, `tabs.py`, `renderer.py`, `workbench.js`):** Compute per-model, per-hour 1-minute GSU arrays and per-local-day active `P50`/`P75`/`P90`/`P95` reference lines (`timezone_offset_hours` configurable, e.g. `EST` primary + `UTC` secondary), rendered as an interactive SVG line chart with model/hour selectors, `Worst First` / `Chronological` ordering, shaded red spillover area above contracted PT, toggleable daily `P` lines, and a minute-snapping mouseover crosshair + tooltip.
 - [ ] **Tests & `v0.7.0` release gate (`tests/test_reallocation.py`, `tests/test_portal_export.py`):** Verify `POST /api/v1/reallocate`, `hidden_tabs`, hourly spillover series, and Cloud Console HTML escaping invariants under `./scripts/gate.sh` (`proj-test capacity`), then tag `v0.7.0`.
+
+## Milestone 7 — `v0.7.1`: Cross-Repo `bq-eval` Burndown, OTel Span & Hourly `FOCUS 1.2` Wire Alignment
+
+- [ ] **Align `capacity/ingest/request_logs.py` & `FOCUS 1.2` contract fixtures with `bq-eval` (`BQ-G1`):** Accept `usage_hour` timestamps alongside `timestamp` in [`capacity/ingest/request_logs.py`](../capacity/ingest/request_logs.py) (`_record_time_utc`), preserve `model_name`, `apphub_application_id` (`tenant`), `cached_input_tokens`, `thinking_tokens`, and pre-weighted `weighted_burndown_tokens` exported by `v_capacity_hourly_burndown_export` without re-weighting hourly sums across the `>200K` cliff, parse string `status_code` values (`"OK"` / `"ERROR"`) on exported OpenTelemetry span JSONL alongside integer HTTP codes, and add a round-trip contract test verifying hourly `FOCUS 1.2` Two-Pool Chargeback parity against [`capacity/engine/chargeback.py`](../capacity/engine/chargeback.py) (`done when`: `./scripts/gate.sh` passes round-trip `v_capacity_hourly_burndown_export` and OTel JSONL fixtures with `0` timestamp/status errors, then tag `v0.7.1`).
 
 ## Unscheduled backlog
 
