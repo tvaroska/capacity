@@ -86,7 +86,12 @@ def _source_files() -> list[Path]:
 
 
 def _selects(selected: list[str], rule: str) -> bool:
-    return any(s == "ALL" or rule.startswith(s) for s in selected)
+    return any(
+        s == "ALL"
+        or s == rule
+        or (rule.startswith(s) and len(rule) > len(s) and rule[len(s)].isdigit())
+        for s in selected
+    )
 
 
 def _config_gaps() -> set[str] | None:
