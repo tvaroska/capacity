@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 try:
     PACKAGE_VERSION = version("capacity")
 except PackageNotFoundError:  # pragma: no cover
-    PACKAGE_VERSION = "0.6.0"
+    PACKAGE_VERSION = "0.6.1"
 
 # Interpolated into generated YAML/Kubernetes manifests and Cloud Monitoring filters;
 # reject quotes, newlines, spaces, or injection tokens at validation boundaries.
@@ -93,7 +93,14 @@ class StrictModel(BaseModel):
 
 
 def reject_oversized_matrix(series_by_key: dict[str, Any]) -> None:
-    longest = max((len(v) for v in series_by_key.values() if isinstance(v, list)), default=1)
+    list_lengths = {len(v) for v in series_by_key.values() if isinstance(v, list)}
+    if 0 in list_lengths:
+        raise ValueError("Hourly series must contain at least 1 hour; got an empty list")
+    if len(list_lengths) > 1:
+        raise ValueError(
+            f"Hourly series must all have the same length; got lengths {sorted(list_lengths)}"
+        )
+    longest = max(list_lengths, default=1)
     cells = len(series_by_key) * max(1, longest)
     if cells > MAX_SERIES_CELLS:
         raise ValueError(

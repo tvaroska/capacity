@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+from pathlib import Path
 from typing import Annotated, Any, Literal
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -92,14 +93,39 @@ def _sanitize_nonfinite(node: Any) -> Any:  # noqa: ANN401
     return node
 
 
-def _active_scenario_catalog() -> ModelCatalog | None:
-    """Return a scenario-aware `ModelCatalog` when `CAPACITY_SCENARIO_FILE` is served."""
+class ScenarioConfigError(ValueError):
+    """Raised when `CAPACITY_SCENARIO_FILE` cannot be read or validated."""
+
+
+_scenario_cache: tuple[tuple[str, int, int], ShowcaseScenario, ModelCatalog] | None = None
+
+
+def _load_active_scenario() -> tuple[ShowcaseScenario | None, ModelCatalog | None]:
+    """Load and cache `CAPACITY_SCENARIO_FILE` by mtime/size, raising `ScenarioConfigError`."""
+    global _scenario_cache
     scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
     if not scenario_path:
-        return None
-    scenario = load_showcase_scenario(scenario_path)
-    overrides = scenario.gsu_sizing.gsu_capacity_overrides
-    return build_model_catalog(overrides=overrides or None)
+        return None, None
+    try:
+        resolved = Path(scenario_path)
+        st = resolved.stat()
+        stamp = (str(resolved), st.st_mtime_ns, st.st_size)
+        if _scenario_cache is not None and _scenario_cache[0] == stamp:
+            return _scenario_cache[1], _scenario_cache[2]
+        scenario = load_showcase_scenario(resolved)
+        overrides = scenario.gsu_sizing.gsu_capacity_overrides
+        catalog = build_model_catalog(overrides=overrides or None)
+        _scenario_cache = (stamp, scenario, catalog)
+        return scenario, catalog
+    except (OSError, ValueError) as exc:
+        raise ScenarioConfigError(
+            f"Invalid CAPACITY_SCENARIO_FILE ({scenario_path}): {exc}"
+        ) from exc
+
+
+def _active_scenario_catalog() -> ModelCatalog | None:
+    """Return a scenario-aware `ModelCatalog` when `CAPACITY_SCENARIO_FILE` is served."""
+    return _load_active_scenario()[1]
 
 
 @app.exception_handler(RequestValidationError)
@@ -115,14 +141,20 @@ async def unknown_model_handler(_request: Request, exc: UnknownModelError) -> JS
     return JSONResponse(status_code=422, content={"detail": str(exc)})
 
 
+@app.exception_handler(ScenarioConfigError)
+async def scenario_config_error_handler(
+    _request: Request, exc: ScenarioConfigError
+) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": str(exc)})
+
+
 # The sizing handlers are plain `def` on purpose: FastAPI runs those in its thread pool, so a
 # slow request cannot stall the event loop that answers `/healthz` and every other caller.
 
 
 @app.get("/", response_class=HTMLResponse)
 def index() -> HTMLResponse:
-    scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
-    scenario = load_showcase_scenario(scenario_path) if scenario_path else None
+    scenario, _ = _load_active_scenario()
     report = evaluate_showcase_scenario(scenario)
     return HTMLResponse(content=render_showcase_portal_html(report, static_export=False))
 

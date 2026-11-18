@@ -28,17 +28,25 @@ from capacity.gateway.bundle import generate_gateway_bundle
 
 
 class _InMemoryAsyncRedisCache:
-    """Async Redis-compatible atomic counter store (`async_get_cache` + `async_increment`)."""
+    """Async Redis-compatible atomic counter store (`DualCache.async_increment_cache`)."""
 
     def __init__(self) -> None:
         self._data: dict[str, float] = {}
         self._lock = asyncio.Lock()
+        self.redis_cache: object = object()
 
-    async def async_get_cache(self, key: str) -> float | None:
+    async def async_get_cache(self, key: str, **_kwargs: object) -> float | None:
         async with self._lock:
             return self._data.get(key)
 
-    async def async_increment(self, key: str, value: float, ttl: int = 120) -> float:
+    async def async_increment_cache(
+        self,
+        key: str,
+        value: float,
+        *,
+        ttl: int = 120,
+        **_kwargs: object,
+    ) -> float:
         _ = ttl
         async with self._lock:
             updated = self._data.get(key, 0.0) + float(value)
@@ -110,7 +118,9 @@ def _build_live_sse_gateway_app(arm: str) -> tuple[FastAPI, dict[str, Any]]:
         data_payload: dict[str, Any] = {"extra_headers": extra_headers, "litellm_params": {}}
 
         if arm == "capacity_two_phase_gateway":
-            api_key_obj = SimpleNamespace(team_id=bu, max_budget_tpm=bu_share_tpm)
+            api_key_obj = SimpleNamespace(
+                team_id=bu, team_metadata={"funded_burndown_tpm": bu_share_tpm}
+            )
             data_payload = await burndown_logger.async_pre_call_hook(
                 api_key_obj, redis_cache, data_payload, "acompletion"
             )

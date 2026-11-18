@@ -26,20 +26,22 @@ SPILLOVER_MULTIPLIERS: dict[str, float] = {
 def pad_series_matrix(
     raw_by_key: dict[str, list[float] | float],
 ) -> tuple[dict[str, list[float]], int]:
-    """Normalize scalar or variable-length series to a common zero-padded horizon."""
+    """Broadcast scalar rates and require equal-length hourly series across keys."""
+    list_lengths = {len(v) for v in raw_by_key.values() if not isinstance(v, (int, float))}
+    if 0 in list_lengths:
+        raise ValueError("Hourly series must contain at least 1 hour; got an empty list")
+    if len(list_lengths) > 1:
+        raise ValueError(
+            f"Hourly series must all have the same length; got lengths {sorted(list_lengths)}"
+        )
+    horizon = max(list_lengths, default=1)
     normalized: dict[str, list[float]] = {}
-    max_len = 1
     for key, series_or_scalar in raw_by_key.items():
         if isinstance(series_or_scalar, (int, float)):
-            arr = [float(series_or_scalar)]
+            normalized[key] = [float(series_or_scalar)] * horizon
         else:
-            arr = [float(v) for v in series_or_scalar] or [0.0]
-        normalized[key] = arr
-        max_len = max(max_len, len(arr))
-    for key, arr in list(normalized.items()):
-        if len(arr) < max_len:
-            normalized[key] = arr + [0.0] * (max_len - len(arr))
-    return normalized, max_len
+            normalized[key] = [float(v) for v in series_or_scalar]
+    return normalized, horizon
 
 
 def optimize_hybrid_commitment(

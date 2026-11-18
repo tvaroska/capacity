@@ -128,7 +128,14 @@ def optimize(
     snap: VllmTelemetrySnapshot | None = None
     series: list[float]
     if vllm_file is not None:
-        snap = or_exit(lambda: load_inference_server_file(vllm_file, default_model=eff_model))
+        snap = or_exit(
+            lambda: load_inference_server_file(
+                vllm_file,
+                default_model=eff_model,
+                model_filter=model,
+                require_single_model=(model is None),
+            )
+        )
         series = snap.tpm_series
     elif trace_file is not None:
         series = or_exit(lambda: load_tpm_list(trace_file))

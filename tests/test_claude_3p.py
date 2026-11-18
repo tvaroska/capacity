@@ -228,6 +228,14 @@ async def test_fetch_throughput_partner_token_count_weighting_and_mixed_models(
     assert any(PT_METRIC in f for f in filters)
     assert any(PARTNER_TOKEN_METRIC in f for f in filters)
 
+    fake.requests.clear()
+    sparse_unfiltered, _ = await fetch_throughput("demo-proj", days=1)
+    assert sparse_unfiltered[SeriesKey("gemini-3.8-flash")][minute] == 120_900
+    assert sparse_unfiltered[SeriesKey("claude-sonnet-4-6")][minute] == 27_500
+    unfiltered_filters = [r["filter"] for r in fake.requests]
+    assert any(PT_METRIC in f for f in unfiltered_filters)
+    assert any(PARTNER_TOKEN_METRIC in f for f in unfiltered_filters)
+
 
 def test_parse_anthropic_messages_jsonl_additive_usage_and_cache_writes() -> None:
     lines = [
@@ -300,7 +308,7 @@ async def test_claude_gateway_bundle_yaml_cel_and_executable_callback() -> None:
     logger_cls = load_generated_burndown_logger(bundle.litellm_burndown_callback_py)
     cb = logger_cls(time_fn=lambda: 1_763_000_000.0)
     cache = FakeAsyncCache()
-    api_key = SimpleNamespace(team_id="bu-a", max_budget_tpm=5_000.0)
+    api_key = SimpleNamespace(team_id="bu-a", team_tpm_limit=5_000)
     resp = SimpleNamespace(
         usage={
             "input_tokens": 1_000,
@@ -412,3 +420,30 @@ def test_claude_cli_and_api_endpoints_plus_portal() -> None:
     assert "claude-sonnet-4-6" in portal_res.text
     assert "claude-opus-4-6" in portal_res.text
     assert "claude-sonnet-5-5" in portal_res.text
+
+
+def test_litellm_yaml_omits_hardcoded_flash_token_prices() -> None:
+    for model_id in ("gemini-3.8-flash", "gemini-4-argon", "claude-sonnet-4-6"):
+        bundle = generate_gateway_bundle(GatewayConfigRequest(model=model_id, provisioned_gsus=10))
+        doc = yaml.safe_load(bundle.litellm_config_yaml)
+        for entry in doc["model_list"]:
+            info = entry.get("model_info") or {}
+            assert "input_cost_per_token" not in info, (model_id, entry["model_name"])
+            assert "output_cost_per_token" not in info, (model_id, entry["model_name"])
+
+
+def test_unlisted_claude_capacity_override_infers_claude_3p_family() -> None:
+    from capacity.engine.catalog import CLAUDE_3P_OPUS_4_SPEC, build_model_catalog
+
+    cat = build_model_catalog(env={"GSU_CAPACITY_CLAUDE_HAIKU_4_5": "50000"})
+    rec = cat.require("claude-haiku-4-5")
+    assert rec.gsu_capacity_tpm == 50_000
+    assert rec.family_spec.family == "claude_3p"
+    assert rec.family_spec.publisher == "anthropic"
+    assert rec.family_spec.standard_output_weight == 5.0
+    assert rec.family_spec.supports_priority_paygo is False
+
+    cat_opus = build_model_catalog(
+        overrides={"publishers/anthropic/models/claude-opus-4-7": 15_000}
+    )
+    assert cat_opus.require("claude-opus-4-7").family_spec == CLAUDE_3P_OPUS_4_SPEC

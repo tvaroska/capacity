@@ -88,7 +88,7 @@ class FakeMonitoringClient:
         self.requests: list[dict[str, Any]] = []
         self.descriptor_requests: list[dict[str, Any]] = []
 
-    async def list_time_series(self, request: dict[str, Any]) -> AsyncItems:
+    async def list_time_series(self, request: dict[str, Any], **_kwargs: Any) -> AsyncItems:
         self.requests.append(request)
         items = (
             self._series_handler(request)
@@ -97,7 +97,7 @@ class FakeMonitoringClient:
         )
         return AsyncItems(items)
 
-    async def list_metric_descriptors(self, request: dict[str, Any]) -> AsyncItems:
+    async def list_metric_descriptors(self, request: dict[str, Any], **_kwargs: Any) -> AsyncItems:
         self.descriptor_requests.append(request)
         items = (
             self._descriptors_handler(request)
@@ -114,14 +114,57 @@ class FakeAsyncCache:
         self.store: dict[str, float] = {}
         self.increments: list[tuple[str, float]] = []
 
-    async def async_get_cache(self, key: str) -> float | None:
+    async def async_get_cache(self, key: str, **_kwargs: Any) -> float | None:
         return self.store.get(key)
 
-    async def async_increment(self, key: str, value: float = 1.0, ttl: int = 120) -> float:
+    async def async_increment_cache(
+        self,
+        key: str,
+        value: float = 1.0,
+        *,
+        ttl: int | None = 120,
+        **_kwargs: Any,
+    ) -> float:
         _ = ttl
         self.increments.append((key, value))
         self.store[key] = self.store.get(key, 0.0) + float(value)
         return self.store[key]
+
+
+class FakeDualCache:
+    """Worker-scoped `DualCache` double reproducing LiteLLM's local-first `async_get_cache`."""
+
+    def __init__(
+        self,
+        shared_redis: dict[str, float],
+        shared_increments: list[tuple[str, float]],
+    ) -> None:
+        self.in_memory_cache: dict[str, float] = {}
+        self._shared_redis = shared_redis
+        self._shared_increments = shared_increments
+        self.redis_cache: object = object()
+
+    async def async_get_cache(self, key: str, **_kwargs: Any) -> float | None:
+        if key in self.in_memory_cache:
+            return self.in_memory_cache[key]
+        val = self._shared_redis.get(key)
+        if val is not None:
+            self.in_memory_cache[key] = val
+        return val
+
+    async def async_increment_cache(
+        self,
+        key: str,
+        value: float = 1.0,
+        *,
+        ttl: int | None = 120,
+        **_kwargs: Any,
+    ) -> float:
+        _ = ttl
+        self.in_memory_cache[key] = self.in_memory_cache.get(key, 0.0) + float(value)
+        self._shared_increments.append((key, value))
+        self._shared_redis[key] = self._shared_redis.get(key, 0.0) + float(value)
+        return self._shared_redis[key]
 
 
 def load_generated_burndown_logger(source_code: str) -> type[Any]:

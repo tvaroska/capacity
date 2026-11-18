@@ -212,3 +212,22 @@ def test_declarative_ast_rules_and_positive_controls(tmp_path: Path) -> None:
                     assert res.returncode == expected_rc, (
                         f"{rule_id} ({key}) failed on {snippet!r}:\n{res.stdout}"
                     )
+
+
+def test_uv_version_pinned_consistently_across_ci_dockerfile_pyproject_and_agents() -> None:
+    import tomllib
+
+    pyproject = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    req_uv = pyproject.get("tool", {}).get("uv", {}).get("required-version", "")
+    assert req_uv == ">=0.12.24"
+
+    cloudbuild = (REPO_ROOT / "cloudbuild.yaml").read_text(encoding="utf-8")
+    assert "ghcr.io/astral-sh/uv:0.12.24-python3.13-bookworm-slim" in cloudbuild
+    assert "uv:0.9.1" not in cloudbuild
+
+    dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ghcr.io/astral-sh/uv:0.12.24" in dockerfile
+    assert "uv:0.9.1" not in dockerfile
+
+    agents_md = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+    assert "0.12.24" in agents_md

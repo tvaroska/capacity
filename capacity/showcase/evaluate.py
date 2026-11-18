@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -227,9 +227,12 @@ def audit_scenario_public_safety(scenario: ShowcaseScenario) -> list[str]:
 def _load_structured_file(path: Path | str) -> object:
     raw = Path(path).read_text(encoding="utf-8")
     stripped = raw.lstrip()
-    if stripped.startswith(("{", "[")):
-        return json.loads(raw)
-    return yaml.safe_load(raw)
+    try:
+        if stripped.startswith(("{", "[")):
+            return json.loads(raw)
+        return yaml.safe_load(raw)
+    except (json.JSONDecodeError, yaml.YAMLError) as exc:
+        raise ValueError(f"Unreadable JSON/YAML in {path}: {exc}") from exc
 
 
 def load_showcase_scenario(
@@ -289,10 +292,10 @@ def _normalize_inventory_map(
     inventory_telemetry: InventoryMap | None,
     *,
     by_region: bool,
-) -> dict[str, Mapping[str, int]]:
+) -> dict[str, dict[str, int]]:
     if not inventory_telemetry:
         return {}
-    out: dict[str, Mapping[str, int]] = {}
+    out: dict[str, dict[str, int]] = {}
     for raw_k, inv in inventory_telemetry.items():
         k_str = (
             raw_k.format(by_region=by_region)
@@ -301,8 +304,45 @@ def _normalize_inventory_map(
                 by_region=by_region
             )
         )
-        out[k_str] = inv
+        bucket = out.setdefault(k_str, {})
+        for metric_name, metric_val in inv.items():
+            bucket[metric_name] = bucket.get(metric_name, 0) + int(metric_val)
     return out
+
+
+def _fold_model_region_counts(
+    counts: Mapping[str, int],
+    *,
+    by_region: bool,
+) -> dict[str, int]:
+    folded: dict[str, int] = {}
+    for mr_key, val in counts.items():
+        key = mr_key if by_region else mr_key.split("@", 1)[0]
+        folded[key] = folded.get(key, 0) + int(val)
+    return folded
+
+
+def _accumulate_log_minute_series(
+    minute_series: dict[str, list[float]],
+    monitoring_keys: set[str],
+    log_series: Mapping[str, Sequence[float]],
+    *,
+    by_region: bool,
+) -> None:
+    for mr_key, vals in sorted(log_series.items()):
+        key = mr_key if by_region else mr_key.split("@", 1)[0]
+        if key in monitoring_keys:
+            continue
+        clipped = [max(0.0, float(v)) for v in vals[:MAX_MINUTE_POINTS]]
+        existing = minute_series.get(key)
+        if existing is None:
+            minute_series[key] = clipped
+            continue
+        target_len = max(len(existing), len(clipped))
+        if len(existing) < target_len:
+            existing.extend([0.0] * (target_len - len(existing)))
+        for idx, pt in enumerate(clipped):
+            existing[idx] = round(existing[idx] + pt, 2)
 
 
 def compile_scenario_from_telemetry(
@@ -342,11 +382,14 @@ def compile_scenario_from_telemetry(
                         arr[idx] += float(max(0, val))
                 minute_series[raw_key] = arr
 
+    monitoring_keys = set(minute_series)
     if log_snapshot is not None and log_snapshot.minute_tpm_by_model_region:
-        for mr_key, vals in sorted(log_snapshot.minute_tpm_by_model_region.items()):
-            key = mr_key if by_region else mr_key.split("@", 1)[0]
-            if key not in minute_series:
-                minute_series[key] = [max(0.0, float(v)) for v in vals[:MAX_MINUTE_POINTS]]
+        _accumulate_log_minute_series(
+            minute_series,
+            monitoring_keys,
+            log_snapshot.minute_tpm_by_model_region,
+            by_region=by_region,
+        )
 
     if not minute_series and log_snapshot is not None:
         key = (
@@ -361,6 +404,16 @@ def compile_scenario_from_telemetry(
 
     series_len = max((len(v) for v in minute_series.values()), default=min(eff_minutes, 1_440))
     annotations: dict[str, ModelInventoryAnnotation] = {}
+    log_spill_by_key = (
+        _fold_model_region_counts(log_snapshot.spillover_by_model_region, by_region=by_region)
+        if log_snapshot is not None
+        else {}
+    )
+    log_429_by_key = (
+        _fold_model_region_counts(log_snapshot.http_429_by_model_region, by_region=by_region)
+        if log_snapshot is not None
+        else {}
+    )
     all_keys = sorted(set(minute_series) | set(norm_inventory) | set(orders_overlay or {}))
     for key in all_keys:
         if key not in minute_series:
@@ -370,12 +423,8 @@ def compile_scenario_from_telemetry(
         catalog.require(model_part)
         inv = norm_inventory.get(key, {})
         ov = (orders_overlay or {}).get(key) or (orders_overlay or {}).get(model_part)
-        log_spill = (
-            log_snapshot.spillover_by_model_region.get(key) if log_snapshot is not None else None
-        )
-        log_429 = (
-            log_snapshot.http_429_by_model_region.get(key) if log_snapshot is not None else None
-        )
+        log_spill = log_spill_by_key.get(key)
+        log_429 = log_429_by_key.get(key)
         contracted = (
             ov.contracted_gsus
             if ov and ov.contracted_gsus is not None

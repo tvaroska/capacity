@@ -12,7 +12,12 @@ import typer
 from capacity.cli.common import CapacityMode, OutputFormat, app, fail, or_exit, write_html
 from capacity.cli.formatters import print_recommendations_table
 from capacity.contract.common import SeriesKey
-from capacity.engine.stats import DEFAULT_DAYS, DEFAULT_PERCENTILES, minute_list_to_sparse
+from capacity.engine.stats import (
+    DEFAULT_DAYS,
+    DEFAULT_PERCENTILES,
+    DEFAULT_TRACE_EPOCH_UTC,
+    minute_list_to_sparse,
+)
 from capacity.ingest.request_logs import load_inference_server_file
 from capacity.ingest.trace_files import load_sparse_from_trace_file, parse_folder_map
 from capacity.showcase.renderer import render_recommendations_html
@@ -115,12 +120,29 @@ def recommend(
         snap = or_exit(
             lambda: load_inference_server_file(vllm_file, default_model=default_trace_model)
         )
-        minutes = or_exit(lambda: minute_list_to_sparse(snap.tpm_series))
-        source = LocalTraceAdapter(
-            {SeriesKey(model=snap.model): minutes},
-            max(days * 24 * 60, len(snap.tpm_series)),
-        )
-        model_filter = None
+        start_utc = snap.window_start_utc or DEFAULT_TRACE_EPOCH_UTC
+        mr_models = {k.split("@", 1)[0] for k in snap.minute_tpm_by_model_region}
+        if snap.minute_tpm_by_model_region and (len(mr_models) > 1 or by_region or model):
+            sparse_by_key = or_exit(
+                lambda: {
+                    SeriesKey.parse(mr_k, by_region=True): minute_list_to_sparse(
+                        vals, start=start_utc
+                    )
+                    for mr_k, vals in snap.minute_tpm_by_model_region.items()
+                }
+            )
+            max_pts = max(
+                (len(v) for v in snap.minute_tpm_by_model_region.values()),
+                default=len(snap.tpm_series),
+            )
+            source = LocalTraceAdapter(sparse_by_key, max(days * 24 * 60, max_pts))
+        else:
+            minutes = or_exit(lambda: minute_list_to_sparse(snap.tpm_series, start=start_utc))
+            source = LocalTraceAdapter(
+                {SeriesKey(model=snap.model): minutes},
+                max(days * 24 * 60, len(snap.tpm_series)),
+            )
+            model_filter = None
     elif trace_file is not None:
         sparse, total_minutes = or_exit(
             lambda: load_sparse_from_trace_file(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from pydantic import Field
 
 from capacity.contract.common import CapacityModeLiteral, StrictModel
@@ -283,6 +285,7 @@ class VllmTelemetrySnapshot(StrictModel):
     source_format: str
     model: str
     tpm_series: list[float]
+    window_start_utc: datetime | None = None
     prompt_tokens_total: int
     cached_tokens_total: int
     cache_write_5m_tokens_total: int = 0

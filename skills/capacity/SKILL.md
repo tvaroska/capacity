@@ -44,9 +44,9 @@ Drive every capability of [`capacity`](../../README.md) through its stateless, r
 
 4. **Targeted deep-dive commands (all support `--format json`):**
    - **Empirical percentile & daily-peak Holt sizing:** `uv run capacity recommend --project <ID> --active-only --by-region --format json`
-   - **Newsvendor hybrid commitment + sub-second burst + prefix cache:** `uv run capacity optimize --model gemini-3.8-flash --sixty-sec-tpm 750000 --peak-1s-tps 25000 --format json`
+   - **Newsvendor hybrid commitment + sub-second burst + prefix cache:** `uv run capacity optimize --demo --model gemini-3.8-flash --sixty-sec-tpm 750000 --peak-1s-tps 25000 --format json`
    - **Gateway policies & manifests:** `uv run capacity gateway --target all --model gemini-3.8-flash --gsus 20 --format json`
-   - **3-Tier overnight EDF residual schedule:** `uv run capacity schedule --model gemini-3.8-flash --gsus 20 --format json`
+   - **3-Tier overnight EDF residual schedule:** `uv run capacity schedule --demo --model gemini-3.8-flash --gsus 20 --format json`
    - **FOCUS 1.2 Two-Pool chargeback:** `uv run capacity chargeback --model gemini-3.8-flash --gsus 20 --tenant-file examples/chargeback_tenants.json --format json`
 
 ## Guardrails

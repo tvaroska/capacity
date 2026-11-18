@@ -312,3 +312,64 @@ async def test_fetch_inventory_telemetry_converts_dedicated_limit_and_429s(
     assert inv[skey]["contracted_gsus"] == 20
     assert inv[skey]["http_429_count"] == 250
     assert inv[skey]["spillover_requests"] == 250
+
+
+def test_minute_series_by_key_raises_above_cell_cap() -> None:
+    t0 = datetime(2026, 11, 1, 0, 0, tzinfo=UTC)
+    t_end = t0 + timedelta(minutes=50_000)
+    rows = [
+        {
+            "timestamp": t0.isoformat(),
+            "model": "gemini-3.8-flash",
+            "region": f"region-{i:02d}",
+            "prompt_tokens": 1_000,
+        }
+        for i in range(25)
+    ]
+    rows.append(
+        {
+            "timestamp": t_end.isoformat(),
+            "model": "gemini-3.8-flash",
+            "region": "region-00",
+            "prompt_tokens": 1_000,
+        }
+    )
+    raw = "\n".join(json.dumps(r) for r in rows)
+    with pytest.raises(ValueError, match=r"exceeds 1,000,000 cells"):
+        parse_inference_server_telemetry(VllmParseRequest(raw_content=raw))
+
+
+def test_collect_no_by_region_sums_regional_minute_series_and_log_counts(tmp_path: Path) -> None:
+    rows = [
+        {
+            "timestamp": "2026-11-10T14:00:05Z",
+            "model": "gemini-3.8-flash",
+            "region": "us-central1",
+            "prompt_token_count": 100_000,
+            "candidates_token_count": 0,
+            "traffic_type": "ON_DEMAND_PRIORITY",
+            "status_code": 429,
+        },
+        {
+            "timestamp": "2026-11-10T14:00:25Z",
+            "model": "gemini-3.8-flash",
+            "region": "europe-west4",
+            "prompt_token_count": 150_000,
+            "candidates_token_count": 0,
+            "traffic_type": "ON_DEMAND_PRIORITY",
+            "status_code": 429,
+        },
+    ]
+    logs_path = tmp_path / "two_regions.jsonl"
+    logs_path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
+
+    res = runner.invoke(
+        cli_app,
+        ["collect", "--logs-file", str(logs_path), "--no-by-region", "--format", "json"],
+    )
+    assert res.exit_code == 0, res.output
+    compiled = json.loads(res.stdout)
+    assert compiled["gsu_sizing"]["minute_tpm_series"]["gemini-3.8-flash"] == [250_000.0]
+    ann = compiled["gsu_sizing"]["inventory_annotations"]["gemini-3.8-flash"]
+    assert ann["spillover_requests"] == 2
+    assert ann["http_429_count"] == 2

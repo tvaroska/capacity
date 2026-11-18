@@ -66,6 +66,7 @@ SELF_HOSTED_GROUP_BY_FIELDS = [
     "resource.label.endpoint_id",
     "resource.label.location",
 ]
+DEFAULT_RPC_TIMEOUT_SECONDS = 30.0
 
 
 class GCPQueryError(RuntimeError):
@@ -161,7 +162,7 @@ async def _query_series(
     aggregation: Any,  # noqa: ANN401
 ) -> list[Any]:
     from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
-    from google.auth.exceptions import DefaultCredentialsError
+    from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError
     from google.cloud import monitoring_v3
 
     request = {
@@ -172,13 +173,15 @@ async def _query_series(
         "aggregation": aggregation,
     }
     try:
-        pager = await client.list_time_series(request=request)
+        pager = await client.list_time_series(request=request, timeout=DEFAULT_RPC_TIMEOUT_SECONDS)
         return [ts async for ts in pager]
     except DefaultCredentialsError as exc:
         raise GCPQueryError(
             "GCP credentials not found. Run `gcloud auth application-default login` "
             "or pass `--demo` / `--trace-file` for offline simulation."
         ) from exc
+    except GoogleAuthError as exc:
+        raise GCPQueryError(f"GCP authentication failed for project '{project}': {exc}") from exc
     except PermissionDenied as exc:
         raise GCPQueryError(
             f"Permission denied querying Cloud Monitoring for project '{project}'. "
@@ -201,7 +204,7 @@ async def fetch_throughput(
     tokens_per_prediction: int = 1_800,
 ) -> tuple[dict[SeriesKey, dict[datetime, int]], int]:
     """Fetch per-minute token throughput across one or more GCP projects."""
-    from google.auth.exceptions import DefaultCredentialsError
+    from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError
     from google.cloud import monitoring_v3
 
     raw_projects = [project] if isinstance(project, str) else list(project)
@@ -224,6 +227,8 @@ async def fetch_throughput(
             "GCP credentials not found. Run `gcloud auth application-default login` "
             "or pass `--demo` / `--trace-file` for offline simulation."
         ) from exc
+    except GoogleAuthError as exc:
+        raise GCPQueryError(f"GCP authentication failed: {exc}") from exc
 
     start, end = _whole_day_window(datetime.now(UTC), days)
     interval = monitoring_v3.TimeInterval(start_time=start, end_time=end)
@@ -260,6 +265,7 @@ async def fetch_throughput(
     has_partner_filter = bool(models_filter and any(is_partner_claude(m) for m in models_filter))
     has_1p_filter = bool(models_filter and any(not is_partner_claude(m) for m in models_filter))
     query_1p = models_filter is None or has_1p_filter
+    query_partner = models_filter is None or has_partner_filter
 
     coros = []
     coro_meta: list[tuple[str, bool]] = []
@@ -281,7 +287,7 @@ async def fetch_throughput(
             coros.append(_query_series(client, proj_id, shared_filter, interval, aggregation))
             coro_meta.append((proj_id, False))
 
-    if has_partner_filter:
+    if query_partner:
         partner_agg = _build_aggregation(group_by_fields=PARTNER_GROUP_BY_FIELDS)
         partner_filter = _build_filter(PARTNER_TOKEN_METRIC, regions)
         for proj_id in project_list:
@@ -323,7 +329,7 @@ async def fetch_throughput(
 async def check_gcp_project_access(projects: Sequence[str]) -> GcpAccessCheckReport:
     """Pre-flight check separating ADC auth, Monitoring API state, and viewer IAM access."""
     from google.api_core.exceptions import GoogleAPICallError, PermissionDenied
-    from google.auth.exceptions import DefaultCredentialsError
+    from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError
 
     project_list = [
         _validate_identifier("project", p, GCP_PROJECT_ID_PATTERN) for p in projects if p.strip()
@@ -335,7 +341,7 @@ async def check_gcp_project_access(projects: Sequence[str]) -> GcpAccessCheckRep
         creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/monitoring.read"])
         account = getattr(creds, "service_account_email", None) or "user-adc"
         client = create_monitoring_client()
-    except (DefaultCredentialsError, ImportError) as exc:
+    except (DefaultCredentialsError, GoogleAuthError, ImportError) as exc:
         instructions.append(
             "Authenticate with Google Cloud ADC: gcloud auth application-default login"
         )
@@ -355,7 +361,8 @@ async def check_gcp_project_access(projects: Sequence[str]) -> GcpAccessCheckRep
                     "name": f"projects/{proj}",
                     "filter": 'metric.type = starts_with("aiplatform.googleapis.com/")',
                     "page_size": 1,
-                }
+                },
+                timeout=DEFAULT_RPC_TIMEOUT_SECONDS,
             )
             async for _ in pager:
                 break
@@ -386,7 +393,7 @@ async def check_gcp_project_access(projects: Sequence[str]) -> GcpAccessCheckRep
                 instructions.append(
                     f"Grant viewer access (`roles/monitoring.viewer`) on project '{proj}'."
                 )
-        except GoogleAPICallError as exc:
+        except (GoogleAPICallError, GoogleAuthError) as exc:
             statuses[proj] = GcpProjectAccessStatus(
                 ok=False,
                 error=str(getattr(exc, "message", "") or exc),
@@ -409,7 +416,7 @@ async def fetch_inventory_telemetry(
     by_region: bool = True,
 ) -> dict[SeriesKey, dict[str, int]]:
     """Fetch provisioned GSU ceiling (`dedicated_token_limit`) and spillover/429 counts."""
-    from google.auth.exceptions import DefaultCredentialsError
+    from google.auth.exceptions import DefaultCredentialsError, GoogleAuthError
     from google.cloud import monitoring_v3
 
     raw_projects = [project] if isinstance(project, str) else list(project)
@@ -426,6 +433,8 @@ async def fetch_inventory_telemetry(
         raise GCPQueryError(
             "GCP credentials not found. Run `gcloud auth application-default login`."
         ) from exc
+    except GoogleAuthError as exc:
+        raise GCPQueryError(f"GCP authentication failed: {exc}") from exc
 
     start, end = _whole_day_window(datetime.now(UTC), days)
     interval = monitoring_v3.TimeInterval(start_time=start, end_time=end)

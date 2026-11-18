@@ -77,7 +77,14 @@ def chargeback(
     tenants: Any
     raw_weights: dict[str, Any] | None = None
     if vllm_file is not None:
-        snap = or_exit(lambda: load_inference_server_file(vllm_file, default_model=eff_model))
+        snap = or_exit(
+            lambda: load_inference_server_file(
+                vllm_file,
+                default_model=eff_model,
+                model_filter=model,
+                require_single_model=(model is None),
+            )
+        )
         tenants = snap.hourly_consumed_tpm_by_tenant
     elif tenant_file is not None:
         raw = or_exit(lambda: json.loads(tenant_file.read_text(encoding="utf-8")))

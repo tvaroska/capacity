@@ -175,7 +175,7 @@ async def test_fetch_throughput_regional_bucketing_and_folder_map(
     assert sparse_reg[SeriesKey("gemini-3.8-flash", "europe-west4", "retail-banking")][minute] == (
         50_000
     )
-    assert len(fake.requests) == 2
+    assert len(fake.requests) == 3
     agg = fake.requests[0]["aggregation"]
     assert list(agg.group_by_fields) == GROUP_BY_FIELDS
 

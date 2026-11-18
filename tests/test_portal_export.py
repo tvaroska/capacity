@@ -599,3 +599,341 @@ def test_hostile_text_and_engine_values_across_all_section_combinations() -> Non
             ) in doc
         else:
             assert "GA Priority + RHPT" in doc
+
+
+def test_workbench_surfaces_error_state_on_empty_input_non_ok_and_network_failure() -> None:
+    import shutil
+    import subprocess
+
+    served = client.get("/")
+    assert served.status_code == 200
+    assert "badge-danger" in served.text
+    assert "danger-banner" in served.text
+
+    js_src = (ASSETS_DIR / "workbench.js").read_text(encoding="utf-8")
+    assert "raw === ''" in js_src
+    assert "catch (" in js_src
+    assert "badge-danger" in js_src
+    assert "danger-banner" in js_src
+
+    node_bin = shutil.which("node")
+    if node_bin is not None:
+        driver = """
+const fs = require('fs');
+const vm = require('vm');
+const jsSrc = fs.readFileSync(process.argv[1], 'utf8');
+
+function makeHarness(fetchImpl) {
+  const els = {};
+  const defaults = {
+    'pd-qps': '18', 'pd-in': '6400', 'pd-out': '450', 'pd-ttft': '350',
+    'sim-model': 'gemini-3.8-flash', 'sim-strip-sig': 'none',
+    'sim-gsus': '10', 'sim-60s-tpm': '150000', 'sim-peak-tps': '4750',
+    'sim-total-in': '18000', 'sim-static-in': '14000', 'sim-dyn-offset': '120',
+    'gw-rps': '650', 'gw-sse': '400', 'gw-pods': '12', 'gw-workers': '4',
+  };
+  for (const [id, val] of Object.entries(defaults)) {
+    els[id] = { id, value: val, className: '', textContent: '' };
+  }
+  for (const id of [
+    'kpi-disagg-reps', 'kpi-disagg-badge', 'pd-output',
+    'burst-60s-val', 'burst-badge', 'burst-caption',
+    'cache-hit-val', 'cache-block0-badge', 'sim-remediation-box',
+    'gw-prisma-val', 'gw-pg-caption', 'gw-cooldown-val', 'gw-status-badge', 'gw-audit-msg',
+  ]) {
+    els[id] = { id, value: '', className: 'badge badge-green', textContent: 'Healthy' };
+  }
+  const mainEl = {
+    dataset: {
+      liveApi: 'true', disaggProfile: 'llama-3.3-70b-fp8', disaggTpotMs: '25',
+      cacheOutTokens: '800', cacheThoughtsTokens: '400', cacheReplicas: '8',
+      gwModel: 'gemini-3.8-flash', gwProject: 'prod-genai-pt-host', gwLocation: 'global',
+      gwGsus: '20', gwSelfHostedModel: 'llama-3.3-70b-fp8', gwBuShares: '4',
+    },
+  };
+  let fetchCalls = 0;
+  const ctx = vm.createContext({
+    document: {
+      getElementById: (id) => els[id] || null,
+      querySelector: (sel) => (sel === 'main' ? mainEl : null),
+      querySelectorAll: () => [],
+    },
+    fetch: async (url, opts) => {
+      fetchCalls += 1;
+      return await fetchImpl(url, opts);
+    },
+    Number, Math, Promise, Array, Object, JSON, String, AbortController, setTimeout, clearTimeout,
+  });
+  vm.runInContext(jsSrc, ctx);
+  return { els, ctx, getFetchCalls: () => fetchCalls };
+}
+
+(async () => {
+  // Empty field must surface error state without sending 0 to API
+  const hEmpty = makeHarness(async () => ({ ok: true, status: 200, json: async () => ({}) }));
+  hEmpty.els['gw-rps'].value = '';
+  await hEmpty.ctx.recalcGatewayAudit();
+  if (hEmpty.getFetchCalls() !== 0) throw new Error('expected 0 fetch calls on empty input');
+  if (!hEmpty.els['gw-status-badge'].className.includes('badge-danger')) throw new Error('missing gw badge-danger');
+  if (!hEmpty.els['gw-audit-msg'].className.includes('danger-banner')) throw new Error('missing gw danger-banner');
+
+  hEmpty.els['pd-qps'].value = '   ';
+  await hEmpty.ctx.recalcDisagg();
+  if (!hEmpty.els['kpi-disagg-badge'].className.includes('badge-danger')) throw new Error('missing pd badge-danger');
+  if (!hEmpty.els['pd-output'].className.includes('danger-banner')) throw new Error('missing pd danger-banner');
+
+  hEmpty.els['sim-gsus'].value = '';
+  await hEmpty.ctx.recalcBurstAndCache();
+  if (!hEmpty.els['burst-badge'].className.includes('badge-danger')) throw new Error('missing burst badge-danger');
+  if (!hEmpty.els['sim-remediation-box'].className.includes('danger-banner')) throw new Error('missing sim danger-banner');
+
+  // Non-OK 422 response must surface server error state
+  const h422 = makeHarness(async () => ({
+    ok: false,
+    status: 422,
+    json: async () => ({ detail: [{ loc: ['body', 'pods'], msg: 'Input should be >= 1' }] }),
+  }));
+  await h422.ctx.recalcGatewayAudit();
+  if (!h422.els['gw-status-badge'].className.includes('badge-danger')) throw new Error('422 missing badge-danger');
+  if (!h422.els['gw-audit-msg'].textContent.includes('pods')) throw new Error('422 missing detail text');
+
+  // Network rejection must be caught and surface error state
+  const hNet = makeHarness(async () => { throw new TypeError('Failed to fetch'); });
+  await hNet.ctx.recalcGatewayAudit();
+  if (!hNet.els['gw-status-badge'].className.includes('badge-danger')) throw new Error('net missing badge-danger');
+  if (!hNet.els['gw-audit-msg'].textContent.includes('Failed to fetch')) throw new Error('net missing message');
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+        proc = subprocess.run(  # noqa: S603
+            [node_bin, "-e", driver, str(ASSETS_DIR / "workbench.js")],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert proc.returncode == 0, proc.stderr
+
+        # Also verify against a live loopback ASGI server (`capacity serve` runtime path).
+        import os
+        import socket
+        import threading
+        import time
+
+        import uvicorn
+
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = int(sock.getsockname()[1])
+
+        srv = uvicorn.Server(
+            uvicorn.Config(api_app, host="127.0.0.1", port=port, log_level="error")
+        )
+        thread = threading.Thread(target=srv.run, daemon=True)
+        thread.start()
+        try:
+            deadline = time.monotonic() + 5.0
+            while not srv.started and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert srv.started
+
+            live_driver = """
+const vm = require('vm');
+const baseUrl = process.argv[1];
+(async () => {
+  const html = await (await fetch(baseUrl + '/')).text();
+  const m = html.match(/<script>([\\s\\S]*?)<\\/script>/);
+  if (!m) throw new Error('no script tag served');
+  const els = {
+    'gw-rps': { value: '' }, 'gw-sse': { value: '400' },
+    'gw-pods': { value: '12' }, 'gw-workers': { value: '4' },
+    'gw-prisma-val': { textContent: '' }, 'gw-pg-caption': { textContent: '' },
+    'gw-cooldown-val': { textContent: '' },
+    'gw-status-badge': { className: 'badge badge-green', textContent: 'Healthy' },
+    'gw-audit-msg': { className: 'info-banner', textContent: 'OK' },
+  };
+  const mainEl = {
+    dataset: {
+      liveApi: 'true', gwModel: 'gemini-3.8-flash', gwProject: 'prod-genai-pt-host',
+      gwLocation: 'global', gwGsus: '20', gwSelfHostedModel: 'llama-3.3-70b-fp8', gwBuShares: '4',
+    },
+  };
+  const ctx = vm.createContext({
+    document: {
+      getElementById: (id) => els[id] || null,
+      querySelector: (sel) => (sel === 'main' ? mainEl : null),
+      querySelectorAll: () => [],
+    },
+    fetch: (path, opts) => fetch(baseUrl + path, opts),
+    Number, Math, Promise, Array, Object, JSON, String, AbortController, setTimeout, clearTimeout,
+  });
+  vm.runInContext(m[1], ctx);
+
+  await ctx.recalcGatewayAudit();
+  if (els['gw-status-badge'].className !== 'badge badge-danger') {
+    throw new Error('clearing gw-rps did not set badge-danger on live serve');
+  }
+  if (els['gw-audit-msg'].className !== 'danger-banner') {
+    throw new Error('clearing gw-rps did not set danger-banner on live serve');
+  }
+
+  els['gw-rps'].value = '650';
+  els['gw-pods'].value = '0';
+  await ctx.recalcGatewayAudit();
+  if (els['gw-status-badge'].className !== 'badge badge-danger') {
+    throw new Error('live 422 did not set badge-danger');
+  }
+  if (!els['gw-audit-msg'].textContent.includes('pods')) {
+    throw new Error('live 422 detail missing: ' + els['gw-audit-msg'].textContent);
+  }
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+            live_proc = subprocess.run(  # noqa: S603
+                [
+                    node_bin,
+                    "-e",
+                    live_driver,
+                    f"http://127.0.0.1:{port}",
+                ],
+                env={
+                    **os.environ,
+                    "HTTP_PROXY": "",
+                    "HTTPS_PROXY": "",
+                    "http_proxy": "",
+                    "https_proxy": "",
+                    "NO_PROXY": "127.0.0.1,localhost",
+                },
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            assert live_proc.returncode == 0, live_proc.stderr
+        finally:
+            srv.should_exit = True
+            thread.join(timeout=3.0)
+
+
+def test_workbench_debounces_and_aborts_stale_inflight_requests() -> None:
+    import shutil
+    import subprocess
+
+    js_src = (ASSETS_DIR / "workbench.js").read_text(encoding="utf-8")
+    assert "AbortController" in js_src
+
+    node_bin = shutil.which("node")
+    if node_bin is None:
+        return
+
+    race_driver = """
+const fs = require('fs');
+const vm = require('vm');
+const jsSrc = fs.readFileSync(process.argv[1], 'utf8');
+
+function buildAuditResponse(engines) {
+  return {
+    litellm_audit: {
+      total_prisma_rust_engines: engines,
+      recommended_pgbouncer_pool_size: 20,
+      recommended_postgres_max_connections: 100,
+      anti_blackhole_cooldown_seconds: 5,
+      scale_status: 'healthy',
+      bottleneck_warnings: ['ok-' + engines],
+    },
+  };
+}
+
+(async () => {
+  const els = {
+    'gw-rps': { value: '200' }, 'gw-sse': { value: '100' },
+    'gw-pods': { value: '8' }, 'gw-workers': { value: '4' },
+    'gw-prisma-val': { textContent: '' }, 'gw-pg-caption': { textContent: '' },
+    'gw-cooldown-val': { textContent: '' },
+    'gw-status-badge': { className: 'badge badge-green', textContent: 'Healthy' },
+    'gw-audit-msg': { className: 'info-banner', textContent: 'Init' },
+  };
+  const mainEl = {
+    dataset: {
+      liveApi: 'true', gwModel: 'gemini-3.8-flash', gwProject: 'prod-genai-pt-host',
+      gwLocation: 'global', gwGsus: '20', gwSelfHostedModel: 'llama-3.3-70b-fp8', gwBuShares: '4',
+    },
+  };
+
+  let calls = [];
+  let abortedCount = 0;
+  let slowResolve = null;
+
+  const ctx = vm.createContext({
+    document: {
+      getElementById: (id) => els[id] || null,
+      querySelector: (sel) => (sel === 'main' ? mainEl : null),
+      querySelectorAll: () => [],
+    },
+    fetch: (url, opts) => {
+      const body = JSON.parse(opts.body);
+      const sig = opts.signal;
+      if (!sig) throw new Error('missing AbortSignal on fetch');
+      calls.push(body.pods);
+      if (body.pods === 12) {
+        return new Promise((resolve, reject) => {
+          sig.addEventListener('abort', () => {
+            abortedCount += 1;
+            const err = new Error('Aborted');
+            err.name = 'AbortError';
+            reject(err);
+          });
+          slowResolve = () => resolve({ ok: true, status: 200, json: async () => buildAuditResponse(48) });
+        });
+      }
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: async () => buildAuditResponse(body.pods * 4),
+      });
+    },
+    Number, Math, Promise, Array, Object, JSON, String, AbortController, setTimeout, clearTimeout,
+  });
+  vm.runInContext(jsSrc, ctx);
+
+  // Rapid burst within debounce window fires only the latest request
+  els['gw-pods'].value = '8';
+  const p1 = ctx.recalcGatewayAudit();
+  els['gw-pods'].value = '4';
+  const p2 = ctx.recalcGatewayAudit();
+  await Promise.all([p1, p2]);
+  if (calls.length !== 1 || calls[0] !== 4) {
+    throw new Error('debounce failed: ' + JSON.stringify(calls));
+  }
+  if (els['gw-prisma-val'].textContent !== '16 Engines') {
+    throw new Error('unexpected engines after debounce: ' + els['gw-prisma-val'].textContent);
+  }
+
+  // Slow in-flight request (pods=12) must be aborted when newer request (pods=3) fires
+  calls = [];
+  els['gw-pods'].value = '12';
+  const slowPromise = ctx.recalcGatewayAudit();
+  await new Promise((r) => setTimeout(r, 180));
+  if (calls.length !== 1 || calls[0] !== 12) {
+    throw new Error('expected slow request in flight: ' + JSON.stringify(calls));
+  }
+
+  els['gw-pods'].value = '3';
+  const fastPromise = ctx.recalcGatewayAudit();
+  await Promise.all([slowPromise, fastPromise]);
+  if (slowResolve) slowResolve();
+
+  if (abortedCount !== 1) {
+    throw new Error('expected slow request to be aborted once, got ' + abortedCount);
+  }
+  if (els['gw-prisma-val'].textContent !== '12 Engines') {
+    throw new Error('stale response overwrote newer state: ' + els['gw-prisma-val'].textContent);
+  }
+  if (els['gw-status-badge'].className !== 'badge badge-green') {
+    throw new Error('aborted request corrupted badge: ' + els['gw-status-badge'].className);
+  }
+})().catch((e) => { console.error(e); process.exit(1); });
+"""
+    proc = subprocess.run(  # noqa: S603
+        [node_bin, "-e", race_driver, str(ASSETS_DIR / "workbench.js")],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr

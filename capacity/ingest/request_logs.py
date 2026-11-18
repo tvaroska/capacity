@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from capacity.contract.common import MAX_HOURLY_POINTS, MAX_SERIES_CELLS
+from capacity.contract.common import MAX_HOURLY_POINTS, MAX_SERIES_CELLS, MAX_SERIES_POINTS
 from capacity.contract.requests import VllmParseRequest
 from capacity.contract.results import VllmTelemetrySnapshot
 from capacity.engine.burst import compute_weighted_burndown_tokens
@@ -26,6 +26,8 @@ def parse_inference_server_telemetry(
     req: VllmParseRequest,
     *,
     catalog: ModelCatalog | None = None,
+    model_filter: str | None = None,
+    require_single_model: bool = False,
 ) -> VllmTelemetrySnapshot:
     """Parse vLLM/SGLang Prometheus `/metrics` text or OTel/vLLM JSONL logs."""
     stripped = req.raw_content.strip()
@@ -55,8 +57,19 @@ def parse_inference_server_telemetry(
     )
 
     if first_non_comment.startswith(("{", "[")):
-        return parse_jsonl_or_json_logs(stripped, default_model=req.default_model, catalog=catalog)
-    return parse_prometheus_metrics(stripped, default_model=req.default_model)
+        return parse_jsonl_or_json_logs(
+            stripped,
+            default_model=req.default_model,
+            catalog=catalog,
+            model_filter=model_filter,
+            require_single_model=require_single_model,
+        )
+    return parse_prometheus_metrics(
+        stripped,
+        default_model=req.default_model,
+        model_filter=model_filter,
+        require_single_model=require_single_model,
+    )
 
 
 def load_inference_server_file(
@@ -64,12 +77,16 @@ def load_inference_server_file(
     default_model: str = "llama-3.3-70b-fp8",
     *,
     catalog: ModelCatalog | None = None,
+    model_filter: str | None = None,
+    require_single_model: bool = False,
 ) -> VllmTelemetrySnapshot:
     """Load and parse a vLLM/SGLang Prometheus `/metrics` snapshot or JSONL request log file."""
     content = Path(path).read_text(encoding="utf-8")
     return parse_inference_server_telemetry(
         VllmParseRequest(raw_content=content, default_model=default_model),
         catalog=catalog,
+        model_filter=model_filter,
+        require_single_model=require_single_model,
     )
 
 
@@ -165,16 +182,39 @@ def _minute_series_by_key(
         return {}
     first, last = min(observed), max(observed)
     span = int((last - first).total_seconds() // 60) + 1
-    if span > MAX_HOURLY_POINTS * 60 or span * len(key_minute_tokens) > MAX_SERIES_CELLS:
-        return {
-            key: [round(minutes[m], 2) for m in sorted(minutes)]
-            for key, minutes in key_minute_tokens.items()
-        }
+    if span > MAX_SERIES_POINTS:
+        raise ValueError(
+            f"records span {span:,} minutes; split the log into windows of at most "
+            f"{MAX_SERIES_POINTS:,} minutes"
+        )
+    if span * len(key_minute_tokens) > MAX_SERIES_CELLS:
+        raise ValueError(
+            f"{len(key_minute_tokens):,} model-region series over {span:,} minutes exceeds "
+            f"{MAX_SERIES_CELLS:,} cells; split the log"
+        )
     axis = [first + timedelta(minutes=i) for i in range(span)]
     return {
         key: [round(minutes.get(minute, 0.0), 2) for minute in axis]
         for key, minutes in key_minute_tokens.items()
     }
+
+
+def _zero_filled_minute_series(
+    minute_buckets: Mapping[datetime, float],
+) -> tuple[list[float], datetime | None]:
+    if not minute_buckets:
+        return [0.0], None
+    first, last = min(minute_buckets), max(minute_buckets)
+    span = int((last - first).total_seconds() // 60) + 1
+    if span > MAX_SERIES_POINTS:
+        raise ValueError(
+            f"records span {span:,} minutes; split the log into windows of at most "
+            f"{MAX_SERIES_POINTS:,} minutes"
+        )
+    return (
+        [round(minute_buckets.get(first + timedelta(minutes=i), 0.0), 2) for i in range(span)],
+        first,
+    )
 
 
 def _as_map(obj: object) -> Mapping[str, object]:
@@ -195,16 +235,81 @@ def _load_json_records(text: str) -> list[Mapping[str, object]]:
     return records
 
 
+def _record_raw_model(rec: Mapping[str, object], default_model: str) -> str:
+    payload_map = _as_map(rec.get("jsonPayload"))
+    attr_map = _as_map(rec.get("attributes"))
+    res_map = _as_map(rec.get("resource"))
+    mod_candidate = _lookup_first(
+        (
+            rec,
+            payload_map,
+            attr_map,
+            _as_map(res_map.get("attributes")),
+            _as_map(res_map.get("labels")),
+        ),
+        (
+            "model",
+            "model_id",
+            "model_user_id",
+            "publisher_model_id",
+            "gen_ai.response.model",
+            "gen_ai.request.model",
+        ),
+    )
+    if isinstance(mod_candidate, str) and mod_candidate.strip():
+        return mod_candidate.strip()
+    return default_model
+
+
+def _filter_records_by_model(
+    records: Sequence[Mapping[str, object]],
+    default_model: str,
+    *,
+    model_filter: str | None,
+    require_single_model: bool,
+) -> list[tuple[int, Mapping[str, object], str]]:
+    tagged: list[tuple[int, Mapping[str, object], str]] = []
+    running_default = default_model
+    for idx, rec in enumerate(records):
+        resolved = _record_raw_model(rec, running_default)
+        running_default = resolved
+        tagged.append((idx, rec, resolved))
+    if not tagged:
+        return []
+    observed_norm = sorted({normalize_model_id(m) for _, _, m in tagged})
+    if model_filter is not None:
+        target = normalize_model_id(model_filter)
+        matched = [item for item in tagged if normalize_model_id(item[2]) == target]
+        if not matched:
+            raise ValueError(
+                f"model {model_filter!r} not found in log (found: {', '.join(observed_norm)})"
+            )
+        return matched
+    if require_single_model and len(observed_norm) > 1:
+        raise ValueError(
+            f"log contains multiple models ({', '.join(observed_norm)}); pass --model to select one"
+        )
+    return tagged
+
+
 def parse_jsonl_or_json_logs(
     text: str,
     default_model: str = "llama-3.3-70b-fp8",
     *,
     catalog: ModelCatalog | None = None,
+    model_filter: str | None = None,
+    require_single_model: bool = False,
 ) -> VllmTelemetrySnapshot:
-    records = _load_json_records(text)
+    raw_records = _load_json_records(text)
+    selected = _filter_records_by_model(
+        raw_records,
+        default_model,
+        model_filter=model_filter,
+        require_single_model=require_single_model,
+    )
     cat = catalog if catalog is not None else build_model_catalog()
 
-    model_name = default_model
+    model_name = model_filter if model_filter is not None else default_model
     prompt_total = 0
     cached_total = 0
     cache_write_5m_total = 0
@@ -226,7 +331,7 @@ def parse_jsonl_or_json_logs(
     spill_by_mr: dict[str, int] = {}
     err429_by_mr: dict[str, int] = {}
 
-    for idx, rec in enumerate(records):
+    for idx, rec, rec_model in selected:
         usage_map = _as_map(rec.get("usage"))
         payload_map = _as_map(rec.get("jsonPayload"))
         p_usage_map = _as_map(payload_map.get("usage_metadata") or payload_map.get("usage"))
@@ -251,23 +356,6 @@ def parse_jsonl_or_json_logs(
             res_attr_map,
             res_label_map,
             rec,
-        )
-
-        mod_candidate = _lookup_first(
-            (rec, payload_map, attr_map, res_attr_map, res_label_map),
-            (
-                "model",
-                "model_id",
-                "model_user_id",
-                "publisher_model_id",
-                "gen_ai.response.model",
-                "gen_ai.request.model",
-            ),
-        )
-        rec_model = (
-            mod_candidate.strip()
-            if isinstance(mod_candidate, str) and mod_candidate.strip()
-            else model_name
         )
         model_name = rec_model
 
@@ -442,8 +530,7 @@ def parse_jsonl_or_json_logs(
     mr_series = _minute_series_by_key(model_region_minutes)
 
     hit_rate = cached_total / prompt_total if prompt_total > 0 else 0.0
-    ordered_minutes = [minute_buckets[k] for k in sorted(minute_buckets)]
-    tpm_series = [round(v, 2) for v in ordered_minutes] or [0.0]
+    tpm_series, window_start_utc = _zero_filled_minute_series(minute_buckets)
     peak_1s = max(sec1_buckets.values(), default=0.0)
     peak_10s = max(sec10_buckets.values(), default=0.0) / 10.0
     peak_30s = max(sec30_buckets.values(), default=0.0) / 30.0
@@ -452,6 +539,7 @@ def parse_jsonl_or_json_logs(
         source_format="jsonl",
         model=model_name,
         tpm_series=tpm_series,
+        window_start_utc=window_start_utc,
         prompt_tokens_total=prompt_total,
         cached_tokens_total=cached_total,
         cache_write_5m_tokens_total=cache_write_5m_total,
@@ -463,7 +551,7 @@ def parse_jsonl_or_json_logs(
         observed_requests_waiting=round(wait_max, 2),
         observed_cache_hit_rate=round(hit_rate, 4),
         hourly_consumed_tpm_by_tenant=tenant_series,
-        total_requests=len(records),
+        total_requests=len(selected),
         spillover_requests=spillover_total,
         http_429_count=http_429_total,
         peak_1s_burndown_tps=round(peak_1s, 2),

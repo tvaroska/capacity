@@ -305,3 +305,65 @@ def test_importing_cli_and_api_neither_loads_cloud_sdk_nor_reads_dotenv(tmp_path
     data = json.loads(proc.stdout.strip())
     assert data["sdk"] == []
     assert data["env"] is False
+
+
+def test_corrupted_or_missing_scenario_file_returns_structured_json_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bad_json = tmp_path / "corrupt.json"
+    bad_json.write_text("{not valid json", encoding="utf-8")
+    bad_yaml = tmp_path / "corrupt.yaml"
+    bad_yaml.write_text("gsu_sizing: [unclosed\n", encoding="utf-8")
+    bad_schema = tmp_path / "bad_schema.json"
+    bad_schema.write_text('{"unknown_root_key": 1}', encoding="utf-8")
+    missing_path = tmp_path / "does_not_exist.json"
+
+    for bad_path in (bad_json, bad_yaml, bad_schema, missing_path):
+        monkeypatch.setenv("CAPACITY_SCENARIO_FILE", str(bad_path))
+        for resp in (
+            client.get("/"),
+            client.post("/api/v1/optimize", json={"tpm_series": [120_900.0]}),
+            client.post("/api/v1/gateway/config", json={}),
+        ):
+            assert resp.status_code == 422, (bad_path.name, resp.status_code, resp.text)
+            assert resp.headers["content-type"].startswith("application/json")
+            payload = resp.json()
+            assert "detail" in payload and isinstance(payload["detail"], str)
+
+    from unittest.mock import patch
+
+    import capacity.api as api_mod
+    from capacity.showcase.evaluate import load_showcase_scenario
+
+    valid_path = REPO_ROOT / "examples" / "scenarios" / "multi_tenant_enterprise.json"
+    monkeypatch.setenv("CAPACITY_SCENARIO_FILE", str(valid_path))
+    monkeypatch.setattr(api_mod, "_scenario_cache", None)
+    with patch("capacity.api.load_showcase_scenario", wraps=load_showcase_scenario) as spied:
+        assert client.post("/api/v1/gateway/config", json={}).status_code == 200
+        assert client.post("/api/v1/optimize", json={"tpm_series": [120_900.0]}).status_code == 200
+        assert spied.call_count == 1
+
+
+def test_recommendations_route_maps_google_auth_transport_and_refresh_errors_to_502(
+    patch_monitoring_client: Any,
+) -> None:
+    from google.auth.exceptions import RefreshError, TransportError
+
+    for auth_exc in (
+        TransportError("metadata server unreachable"),  # type: ignore[no-untyped-call]
+        RefreshError("invalid_grant: token expired"),  # type: ignore[no-untyped-call]
+    ):
+        patch_monitoring_client(init_error=auth_exc)
+        resp = client.get("/api/v1/recommendations?project=demo-project&days=1")
+        assert resp.status_code == 502, (type(auth_exc), resp.status_code, resp.text)
+        assert resp.headers["content-type"].startswith("application/json")
+        assert "detail" in resp.json()
+
+        def _raise_on_query(_req: dict[str, Any], exc: Exception = auth_exc) -> list[Any]:
+            raise exc
+
+        patch_monitoring_client(_raise_on_query)
+        resp_q = client.get("/api/v1/recommendations?project=demo-project&days=1")
+        assert resp_q.status_code == 502, (type(auth_exc), resp_q.status_code, resp_q.text)
+        assert resp_q.headers["content-type"].startswith("application/json")
+        assert "detail" in resp_q.json()

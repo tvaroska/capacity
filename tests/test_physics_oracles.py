@@ -229,7 +229,7 @@ async def test_stateful_litellm_burndown_callback_and_k8s_rfc1035_labels() -> No
     logger_cls = load_generated_burndown_logger(bundle.litellm_burndown_callback_py)
     logger = logger_cls(time_fn=lambda: 1_762_880_010.0)
     redis = FakeAsyncCache()
-    key_obj = SimpleNamespace(team_id="claims", max_budget_tpm=200_000.0)
+    key_obj = SimpleNamespace(team_id="claims", team_metadata={"funded_burndown_tpm": 200_000.0})
 
     call1: dict[str, Any] = {"metadata": {"team_current_burndown_tpm": 0.0}}
     await logger.async_pre_call_hook(key_obj, redis, call1, "acompletion")

@@ -6,6 +6,7 @@ kept as a real module, not a string, so the linter and the type checker read it 
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any
 
@@ -15,6 +16,9 @@ except ImportError:  # pragma: no cover
 
     class CustomLogger:  # type: ignore[no-redef]
         pass
+
+
+_LOGGER = logging.getLogger(__name__)
 
 
 MODEL_FAMILY = "gemini_1p"
@@ -118,27 +122,82 @@ class BurndownAndTrafficTypeLogger(CustomLogger):  # type: ignore[misc]
         self._time_fn = time_fn
         self._cache_ref: Any = None
         self._local_window: dict[str, float] = {}
+        self._warned_missing_redis = False
+        self._default_ceiling_teams: set[str] = set()
+
+    def _current_minute(self) -> int:
+        return int(self._time_fn() // 60)
 
     def _window_key(self, team_id: str) -> str:
-        minute_bucket = int(self._time_fn() // 60)
-        return f"capacity:burndown:{team_id}:{minute_bucket}"
+        return f"capacity:burndown:{team_id}:{self._current_minute()}"
 
-    async def _read_counter(self, cache: Any, key: str) -> float:
-        if cache is not None and hasattr(cache, "async_get_cache"):
-            val = await cache.async_get_cache(key)
-            if val is not None:
-                return float(val)
-        return float(self._local_window.get(key, 0.0))
+    def _prune_local_window(self) -> None:
+        if not self._local_window:
+            return
+        cutoff = self._current_minute() - 2
+        stale = [
+            k
+            for k in self._local_window
+            if k.rsplit(":", 1)[-1].lstrip("-").isdigit() and int(k.rsplit(":", 1)[-1]) < cutoff
+        ]
+        for k in stale:
+            self._local_window.pop(k, None)
+
+    def _resolve_funded_ceiling(self, user_api_key_dict: Any, team_id: str) -> float:
+        for meta_attr in ("team_metadata", "metadata"):
+            meta_obj = _field(user_api_key_dict, meta_attr)
+            if isinstance(meta_obj, dict):
+                custom = meta_obj.get("funded_burndown_tpm")
+                if custom is not None:
+                    return float(custom)
+        for limit_attr in ("team_tpm_limit", "tpm_limit"):
+            limit_val = _field(user_api_key_dict, limit_attr)
+            if limit_val is not None:
+                return float(limit_val)
+        if team_id not in self._default_ceiling_teams and len(self._default_ceiling_teams) < 1_024:
+            self._default_ceiling_teams.add(team_id)
+            _LOGGER.info(
+                "Team %r has no funded_burndown_tpm or team_tpm_limit; using default share %s TPM",
+                team_id,
+                DEFAULT_TEAM_FUNDED_BURNDOWN_TPM,
+            )
+        return float(DEFAULT_TEAM_FUNDED_BURNDOWN_TPM)
 
     async def _increment_counter(self, cache: Any, key: str, delta: float) -> float:
-        if delta == 0.0:
-            return await self._read_counter(cache, key)
-        if cache is not None and hasattr(cache, "async_increment"):
-            updated = await cache.async_increment(key, delta, ttl=WINDOW_TTL_SECONDS)
+        self._prune_local_window()
+        if cache is not None and hasattr(cache, "async_increment_cache"):
+            if (
+                hasattr(cache, "redis_cache")
+                and getattr(cache, "redis_cache", None) is None
+                and not self._warned_missing_redis
+            ):
+                self._warned_missing_redis = True
+                _LOGGER.warning(
+                    "LiteLLM DualCache has no redis_cache attached; burndown quotas are per-worker."
+                )
+            if delta == 0.0:
+                redis_backend = getattr(cache, "redis_cache", None)
+                reader = (
+                    redis_backend
+                    if redis_backend is not None and hasattr(redis_backend, "async_get_cache")
+                    else cache
+                )
+                val = (
+                    await reader.async_get_cache(key)
+                    if hasattr(reader, "async_get_cache")
+                    else None
+                )
+                return float(val) if val is not None else 0.0
+            updated = await cache.async_increment_cache(key, float(delta), ttl=WINDOW_TTL_SECONDS)
             if updated is not None:
-                self._local_window[key] = float(updated)
                 return float(updated)
-        new_val = self._local_window.get(key, 0.0) + delta
+
+        if not self._warned_missing_redis:
+            self._warned_missing_redis = True
+            _LOGGER.warning(
+                "Shared LiteLLM DualCache unavailable; falling back to per-worker burndown window."
+            )
+        new_val = max(0.0, self._local_window.get(key, 0.0) + float(delta))
         self._local_window[key] = new_val
         return new_val
 
@@ -149,25 +208,22 @@ class BurndownAndTrafficTypeLogger(CustomLogger):  # type: ignore[misc]
         data: dict[str, Any],
         call_type: str,
     ) -> dict[str, Any]:
+        _ = call_type
         if cache is not None:
             self._cache_ref = cache
-        team_id = str(getattr(user_api_key_dict, "team_id", None) or "default")
-        funded_ceiling_raw = getattr(user_api_key_dict, "max_budget_tpm", None)
-        team_funded_ceiling = (
-            float(funded_ceiling_raw)
-            if funded_ceiling_raw is not None
-            else float(DEFAULT_TEAM_FUNDED_BURNDOWN_TPM)
-        )
+        team_id = str(_field(user_api_key_dict, "team_id") or "default")
+        team_funded_ceiling = self._resolve_funded_ceiling(user_api_key_dict, team_id)
         key = self._window_key(team_id)
-        rolling_burndown = await self._read_counter(cache, key)
-        # Reserve a pre-SSE floor immediately so concurrent slow streams cannot bypass quota.
-        await self._increment_counter(cache, key, float(PREFLIGHT_FLOOR_TOKENS))
+        # Reserve a pre-SSE floor atomically; DualCache.async_increment_cache returns Redis's total.
+        post_reserve_burndown = await self._increment_counter(
+            cache, key, float(PREFLIGHT_FLOOR_TOKENS)
+        )
 
         proxy_meta = data.setdefault("litellm_params", {}).setdefault("metadata", {})
         proxy_meta["_burndown_window_key"] = key
         proxy_meta["_burndown_preflight_reserved"] = float(PREFLIGHT_FLOOR_TOKENS)
 
-        if rolling_burndown + PREFLIGHT_FLOOR_TOKENS > team_funded_ceiling:
+        if post_reserve_burndown > team_funded_ceiling:
             headers = dict(data.get("extra_headers") or {})
             headers["X-Vertex-AI-LLM-Request-Type"] = "shared"
             headers["X-Vertex-AI-LLM-Shared-Request-Type"] = SPILLOVER_SHARED_HEADER
@@ -181,6 +237,7 @@ class BurndownAndTrafficTypeLogger(CustomLogger):  # type: ignore[misc]
         start_time: Any,
         end_time: Any,
     ) -> None:
+        _ = (start_time, end_time)
         usage = getattr(response_obj, "usage", None) or {}
         prompt_tok, comp_tok, reason_tok, cached_tok, w5_tok, w1_tok = _extract_usage_counts(usage)
         burndown = compute_burndown_tokens(
@@ -195,7 +252,7 @@ class BurndownAndTrafficTypeLogger(CustomLogger):  # type: ignore[misc]
         meta = litellm_params.setdefault("metadata", {})
         team_id = str(meta.get("user_api_key_team_id") or "default")
         key = str(meta.get("_burndown_window_key") or self._window_key(team_id))
-        reserved = float(meta.get("_burndown_preflight_reserved", 0.0))
+        reserved = float(meta.pop("_burndown_preflight_reserved", 0.0) or 0.0)
         cache = litellm_params.get("cache") or self._cache_ref
         await self._increment_counter(cache, key, burndown - reserved)
 
@@ -204,6 +261,28 @@ class BurndownAndTrafficTypeLogger(CustomLogger):  # type: ignore[misc]
         )
         meta["weighted_burndown_tokens"] = round(burndown, 2)
         meta["vertex_traffic_type"] = raw_traffic_type
+
+    async def async_log_failure_event(
+        self,
+        kwargs: dict[str, Any],
+        response_obj: Any,
+        start_time: Any,
+        end_time: Any,
+    ) -> None:
+        _ = (response_obj, start_time, end_time)
+        litellm_params = kwargs.get("litellm_params")
+        if not isinstance(litellm_params, dict):
+            return
+        meta = litellm_params.get("metadata")
+        if not isinstance(meta, dict):
+            return
+        reserved = float(meta.pop("_burndown_preflight_reserved", 0.0) or 0.0)
+        if reserved <= 0.0:
+            return
+        team_id = str(meta.get("user_api_key_team_id") or "default")
+        key = str(meta.get("_burndown_window_key") or self._window_key(team_id))
+        cache = litellm_params.get("cache") or self._cache_ref
+        await self._increment_counter(cache, key, -reserved)
 
 
 burndown_handler = BurndownAndTrafficTypeLogger()

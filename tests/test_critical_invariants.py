@@ -7,10 +7,12 @@ command resets it.
 
 from __future__ import annotations
 
+import asyncio
 import math
 import random
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +22,8 @@ from pydantic import ValidationError
 from capacity.contract.requests import (
     ChargebackRequest,
     DeadlineJobSpec,
+    FolderPoolingRequest,
+    GatewayConfigRequest,
     MicroBurstRequest,
     OptimizeRequest,
     ResidualScheduleRequest,
@@ -30,12 +34,14 @@ from capacity.engine.burst import compute_weighted_burndown_tokens, evaluate_mic
 from capacity.engine.catalog import DEFAULT_GSU_CONFIG, build_model_catalog
 from capacity.engine.chargeback import compute_focus_chargeback
 from capacity.engine.commitment import MINUTES_PER_MONTH, optimize_hybrid_commitment
+from capacity.engine.pooling import evaluate_folder_pooling
 from capacity.engine.scheduler import schedule_residual_capacity
 from capacity.engine.sizing import (
     compute_recommendations,
     evaluate_gsu_optimization,
     find_capacity,
 )
+from capacity.gateway.bundle import generate_gateway_bundle
 from capacity.ingest.request_logs import parse_inference_server_telemetry
 from capacity.telemetry.cloud_monitoring import (
     GROUP_BY_FIELDS,
@@ -43,7 +49,7 @@ from capacity.telemetry.cloud_monitoring import (
     SELF_HOSTED_GROUP_BY_FIELDS,
     fetch_throughput,
 )
-from tests.conftest import FakeMonitoringClient
+from tests.conftest import FakeDualCache, FakeMonitoringClient, load_generated_burndown_logger
 
 GSU_TPM = 120_900
 PROMPT = 'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8"}'
@@ -454,3 +460,144 @@ def test_epoch_is_read_in_seconds_milliseconds_or_nanoseconds() -> None:
         )
     ]
     assert by_unit == [[60_000.0, 120_000.0]] * 3
+
+
+def test_untimestamped_concatenated_scrapes_are_differenced() -> None:
+    snap = _parse(f"{PROMPT} 1000000\n{PROMPT} 1060000\n")
+    assert snap.prompt_tokens_total == 60_000
+    assert snap.tpm_series == [60_000.0]
+
+    sharded = _parse(
+        'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8",tp_rank="0"} 500000\n'
+        'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8",tp_rank="1"} 500000\n'
+        'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8",tp_rank="0"} 530000\n'
+        'vllm:prompt_tokens_total{model_name="llama-3.3-70b-fp8",tp_rank="1"} 530000\n'
+    )
+    assert sharded.prompt_tokens_total == 60_000
+    assert sharded.tpm_series == [60_000.0]
+
+
+def test_unequal_scrape_intervals_weight_tenant_tpm_and_expand_minute_series() -> None:
+    snap = _parse(
+        f"# scrape_timestamp_seconds 0\n{PROMPT} 0\n"
+        f"# scrape_timestamp_seconds 60\n{PROMPT} 600000\n"
+        f"# scrape_timestamp_seconds 3600\n{PROMPT} 600000\n"
+    )
+    assert snap.hourly_consumed_tpm_by_tenant == {"default": [10_000.0]}
+    assert len(snap.tpm_series) == 60
+    assert snap.tpm_series[0] == 600_000.0
+    assert snap.tpm_series[1:] == [0.0] * 59
+
+
+def test_chargeback_scalar_tenant_is_constant_and_mismatched_lengths_fail() -> None:
+    report = compute_focus_chargeback(
+        ChargebackRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=20,
+            hourly_consumed_tpm_by_tenant={
+                "scalar-desk": 1_000_000.0,
+                "hourly-desk": [1_000_000.0] * 24,
+            },
+        )
+    )
+    by_tenant = {row.tenant: row for row in report.tenants}
+    assert by_tenant["scalar-desk"].usage_share_pct == 50.0
+    assert by_tenant["hourly-desk"].usage_share_pct == 50.0
+    assert by_tenant["scalar-desk"].active_allocated_cost_usd == pytest.approx(
+        by_tenant["hourly-desk"].active_allocated_cost_usd
+    )
+
+    with pytest.raises(ValidationError, match="same length"):
+        ChargebackRequest(
+            hourly_consumed_tpm_by_tenant={
+                "short": [100_000.0, 200_000.0],
+                "long": [100_000.0, 200_000.0, 300_000.0],
+            }
+        )
+    with pytest.raises(ValidationError, match="same length"):
+        FolderPoolingRequest(
+            hourly_tpm_by_project={
+                "spoke-a": [100_000.0],
+                "spoke-b": [100_000.0, 200_000.0],
+            }
+        )
+    with pytest.raises(ValueError, match="same length"):
+        evaluate_folder_pooling(
+            FolderPoolingRequest.model_construct(
+                model="gemini-3.8-flash",
+                percentile_target=90,
+                gsu_monthly_price_usd=2_000.0,
+                hourly_tpm_by_project={"a": [100_000.0], "b": [100_000.0, 200_000.0]},
+            )
+        )
+
+
+@pytest.mark.parametrize("bad_val", ["3,000", "abc", "0", "-50"])
+def test_malformed_or_nonpositive_gsu_capacity_override_raises(bad_val: str) -> None:
+    with pytest.raises(ValueError, match="expected a positive integer TPM per GSU"):
+        build_model_catalog(env={"GSU_CAPACITY_GEMINI_3_8_FLASH": bad_val})
+
+
+@pytest.mark.asyncio
+async def test_litellm_callback_dual_cache_cross_worker_ceilings_and_failure_refund() -> None:
+    bundle = generate_gateway_bundle(
+        GatewayConfigRequest(
+            model="gemini-3.8-flash",
+            provisioned_gsus=20,
+            business_unit_shares=4,
+        )
+    )
+    logger_cls = load_generated_burndown_logger(bundle.litellm_burndown_callback_py)
+    now_sec = 1_763_000_000.0
+    worker_a = logger_cls(time_fn=lambda: now_sec)
+    worker_b = logger_cls(time_fn=lambda: now_sec)
+
+    shared_redis: dict[str, float] = {}
+    shared_increments: list[tuple[str, float]] = []
+    cache_a = FakeDualCache(shared_redis, shared_increments)
+    cache_b = FakeDualCache(shared_redis, shared_increments)
+
+    key_meta = SimpleNamespace(team_id="desk-1", team_metadata={"funded_burndown_tpm": 5_120.0})
+
+    async def _pre_call(worker: Any, cache: FakeDualCache, key_obj: Any) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        await worker.async_pre_call_hook(key_obj, cache, payload, "acompletion")
+        return payload
+
+    results = await asyncio.gather(
+        *(
+            _pre_call(
+                worker_a if i % 2 == 0 else worker_b, cache_a if i % 2 == 0 else cache_b, key_meta
+            )
+            for i in range(10)
+        )
+    )
+    spilled_count = sum(
+        r.get("extra_headers", {}).get("X-Vertex-AI-LLM-Request-Type") == "shared" for r in results
+    )
+    assert spilled_count == 5
+    assert len(shared_increments) == 10
+    assert worker_a._local_window == {}
+    assert worker_b._local_window == {}
+
+    # Refund preflight floor on upstream failure (and never double-refund on retry).
+    failed_payload = results[0]
+    failed_payload["litellm_params"]["metadata"]["user_api_key_team_id"] = "desk-1"
+    failed_payload["litellm_params"]["cache"] = cache_a
+    before_refund = sum(shared_redis.values())
+    await worker_a.async_log_failure_event(
+        {"litellm_params": failed_payload["litellm_params"]}, None, now_sec, now_sec
+    )
+    await worker_a.async_log_failure_event(
+        {"litellm_params": failed_payload["litellm_params"]}, None, now_sec, now_sec
+    )
+    assert sum(shared_redis.values()) == pytest.approx(before_refund - 1_024.0)
+
+    # Local fallback window prunes expired minute buckets.
+    minute_idx = 0
+    local_worker = logger_cls(time_fn=lambda: 1_763_000_000.0 + minute_idx * 60.0)
+    key_tpm = SimpleNamespace(team_id="desk-local", tpm_limit=5_000)
+    for m in range(10):
+        minute_idx = m
+        await local_worker.async_pre_call_hook(key_tpm, None, {}, "acompletion")
+    assert len(local_worker._local_window) <= 3

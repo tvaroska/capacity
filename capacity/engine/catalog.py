@@ -434,10 +434,28 @@ class ModelCatalog:
         return items
 
 
+def _infer_override_family_spec(raw_hint: str, cid: str) -> ModelFamilySpec:
+    hint = raw_hint.strip().lower()
+    norm = normalize_model_id(cid)
+    if norm in SELF_HOSTED_MODEL_IDS:
+        return SELF_HOSTED_VLLM_SPEC
+    if norm.startswith("claude-") or "publishers/anthropic/" in hint:
+        if "5-5" in norm or "5.5" in norm:
+            return CLAUDE_3P_V55_SPEC
+        if "opus" in norm:
+            return CLAUDE_3P_OPUS_4_SPEC
+        return CLAUDE_3P_SONNET_SPEC
+    if any(tok in norm for tok in ("-pro", "-argon", "-carbon")):
+        return GEMINI_1P_PRO_SPEC
+    return GEMINI_1P_FLASH_SPEC
+
+
 def _apply_capacity_override(
     table: dict[str, ModelRecord],
     candidate_ids: tuple[str, ...],
     cap_val: int,
+    *,
+    raw_hint: str = "",
 ) -> None:
     existing = next((table[cid] for cid in candidate_ids if cid in table), None)
     for cid in candidate_ids:
@@ -450,7 +468,7 @@ def _apply_capacity_override(
                 model_id=cid,
                 display_label=f"{cid} ({cap_val:,} TPM/GSU override)",
                 gsu_capacity_tpm=cap_val,
-                family_spec=GEMINI_1P_FLASH_SPEC,
+                family_spec=_infer_override_family_spec(raw_hint or cid, cid),
             )
 
 
@@ -468,8 +486,10 @@ def build_model_catalog(
             dotted_name = re.sub(r"(\d)-(\d)", r"\1.\2", model_name)
             try:
                 cap_val = int(val)
-            except ValueError:
-                continue
+            except ValueError as exc:
+                raise ValueError(f"{key}={val!r}: expected a positive integer TPM per GSU") from exc
+            if cap_val <= 0:
+                raise ValueError(f"{key}={val!r}: expected a positive integer TPM per GSU")
             _apply_capacity_override(
                 table,
                 (
@@ -479,16 +499,23 @@ def build_model_catalog(
                     normalize_model_id(dotted_name),
                 ),
                 cap_val,
+                raw_hint=model_name,
             )
     if overrides:
-        for raw_model, cap_val in overrides.items():
+        for raw_model, raw_cap in overrides.items():
+            cap_val = int(raw_cap)
+            if cap_val <= 0:
+                raise ValueError(
+                    f"{raw_model}={raw_cap!r}: expected a positive integer TPM per GSU"
+                )
             cleaned = raw_model.strip().lower().split("@", 1)[0]
             if "/" in cleaned:
                 cleaned = cleaned.rsplit("/", 1)[-1]
             _apply_capacity_override(
                 table,
                 (cleaned, normalize_model_id(cleaned)),
-                int(cap_val),
+                cap_val,
+                raw_hint=raw_model,
             )
     return ModelCatalog(records=table)
 
@@ -520,12 +547,15 @@ def is_partner_claude(
     model_id: str | None,
     catalog: ModelCatalog | None = None,
 ) -> bool:
-    """Return True when `model_id` resolves to an Anthropic Claude record in the catalog."""
+    """Return True when `model_id` resolves to an Anthropic Claude record or family."""
     if not model_id:
         return False
     cat = catalog if catalog is not None else build_model_catalog()
     rec = cat.get(model_id)
-    return rec is not None and rec.family_spec.family == "claude_3p"
+    if rec is not None:
+        return rec.family_spec.family == "claude_3p"
+    cleaned = model_id.strip().lower()
+    return normalize_model_id(cleaned).startswith("claude-") or "publishers/anthropic/" in cleaned
 
 
 def infer_lifecycle_track(

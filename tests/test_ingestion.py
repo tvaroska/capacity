@@ -220,3 +220,105 @@ async def test_live_query_dates_last_minute_correctly_for_datetime_and_proto_tim
             datetime(2026, 11, 10, 0, 0, tzinfo=UTC): 200,
         }
     }
+
+
+def test_sparse_multi_day_jsonl_preserves_idle_minutes_and_daily_peaks(tmp_path: Path) -> None:
+    log_path = tmp_path / "three_day_sparse.jsonl"
+    records = [
+        {
+            "timestamp": "2026-11-10T12:00:00Z",
+            "model": "gemini-3.8-flash",
+            "prompt_tokens": 120_900,
+            "completion_tokens": 0,
+        },
+        {
+            "timestamp": "2026-11-11T12:00:00Z",
+            "model": "gemini-3.8-flash",
+            "prompt_tokens": 120_900,
+            "completion_tokens": 30_225,
+        },
+        {
+            "timestamp": "2026-11-12T12:04:00Z",
+            "model": "gemini-3.8-flash",
+            "prompt_tokens": 120_900,
+            "completion_tokens": 60_450,
+        },
+    ]
+    log_path.write_text(_jsonl(records), encoding="utf-8")
+
+    rec_res = runner.invoke(
+        cli_app,
+        ["recommend", "--vllm-file", str(log_path), "--days", "1", "--format", "json"],
+    )
+    assert rec_res.exit_code == 0, rec_res.output
+    rec_model = json.loads(rec_res.stdout)["models"][0]
+    assert rec_model["total_minutes"] >= 2_885
+    assert rec_model["active_minutes"] == 3
+    assert rec_model["duty_cycle_pct"] < 1.0
+    assert rec_model["forecast_24h_peak_tpm"] == 483_600
+
+    opt_res = runner.invoke(
+        cli_app,
+        ["optimize", "--vllm-file", str(log_path), "--format", "json"],
+    )
+    assert opt_res.exit_code == 0, opt_res.output
+    opt_payload = json.loads(opt_res.stdout)
+    assert opt_payload["commitment"]["optimal_gsus"] == 0
+
+
+def test_single_model_commands_reject_mixed_model_jsonl_unless_model_selected(
+    tmp_path: Path,
+) -> None:
+    mixed_path = tmp_path / "mixed_models.jsonl"
+    records = [
+        {
+            "timestamp": "2026-11-10T10:00:00Z",
+            "model": "llama-3.3-70b-fp8",
+            "prompt_tokens": 384_000,
+            "completion_tokens": 0,
+        },
+        {
+            "timestamp": "2026-11-10T10:00:00Z",
+            "model": "gemma-3-27b-bf16",
+            "prompt_tokens": 87_000,
+            "completion_tokens": 0,
+        },
+    ]
+    mixed_path.write_text(_jsonl(records), encoding="utf-8")
+
+    opt_fail = runner.invoke(
+        cli_app,
+        ["optimize", "--mode", "self-hosted", "--vllm-file", str(mixed_path)],
+    )
+    assert opt_fail.exit_code == 1
+    assert opt_fail.output.startswith("Error: ")
+    assert len(opt_fail.output.strip().splitlines()) == 1
+    assert "gemma-3-27b-bf16" in opt_fail.output
+    assert "llama-3.3-70b-fp8" in opt_fail.output
+
+    cb_fail = runner.invoke(
+        cli_app,
+        ["chargeback", "--mode", "self-hosted", "--vllm-file", str(mixed_path)],
+    )
+    assert cb_fail.exit_code == 1
+    assert "gemma-3-27b-bf16" in cb_fail.output
+    assert "llama-3.3-70b-fp8" in cb_fail.output
+
+    opt_filtered = runner.invoke(
+        cli_app,
+        [
+            "optimize",
+            "--mode",
+            "self-hosted",
+            "--vllm-file",
+            str(mixed_path),
+            "--model",
+            "gemma-3-27b-bf16",
+            "--format",
+            "json",
+        ],
+    )
+    assert opt_filtered.exit_code == 0, opt_filtered.output
+    audit = json.loads(opt_filtered.stdout)
+    assert audit["profile_id"] == "gemma-3-27b-bf16"
+    assert audit["p99_peak_replicas"] == 1

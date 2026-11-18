@@ -172,8 +172,6 @@ def build_litellm_yaml(
                 },
                 "model_info": {
                     "id": f"vertex-{norm}-pt-pool",
-                    "input_cost_per_token": 0.00000050,
-                    "output_cost_per_token": 0.00000200,
                 },
             },
             {
@@ -190,8 +188,6 @@ def build_litellm_yaml(
                 },
                 "model_info": {
                     "id": spill_pool_id,
-                    "input_cost_per_token": 0.00000090,
-                    "output_cost_per_token": 0.00000360,
                 },
             },
             {

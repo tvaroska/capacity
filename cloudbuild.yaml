@@ -1,4 +1,4 @@
-# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.6.0)
+# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.6.1)
 substitutions:
   _REGION: us-central1
   _AR_REPO: containers
@@ -11,7 +11,7 @@ options:
 
 steps:
   - id: python-lint-and-tests
-    name: ghcr.io/astral-sh/uv:0.9.1-python3.13-bookworm-slim
+    name: ghcr.io/astral-sh/uv:0.12.24-python3.13-bookworm-slim
     waitFor: ["-"]
     entrypoint: bash
     env:

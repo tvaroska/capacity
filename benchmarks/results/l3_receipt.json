@@ -1,11 +1,11 @@
 {
   "schema_version": "capacity.l3_receipt.v1",
-  "generated_at_utc": "2026-11-18T01:11:29Z",
+  "generated_at_utc": "2026-11-18T04:07:36Z",
   "environment": {
     "python": "3.13.15"
   },
-  "git_commit": "b52319ba3b54cbc2c68f16927ef11a5c9e897b37",
-  "engine_code_sha256": "3452a632067eddd690d80e87a2b462095016c585982e1819f264bf76a54ec71b",
+  "git_commit": "6dec81f5c0c62c5eaffadbf5924714e3dcf5e0ba",
+  "engine_code_sha256": "37dd4527a9a2c984f8ffce9f4af6b2013bcb477ac12bd5d32a66484a73c10cb8",
   "corpus_file": "benchmarks/corpora/azure_llm_trace_10k.jsonl.gz",
   "corpus_gzip_sha256": "471ea3916fd27b98c3b38de5b4044d54ff4ace95b0e030354b6e3644bea325a7",
   "track_a_empirical_trace_backtest": {
@@ -77,18 +77,18 @@
         "http_200_streams": 454,
         "router_blackhole_drop_rate_pct": 9.2,
         "burndown_accounting_drift_pct": 40.3101,
-        "peer_pt_starvation_events": 62,
+        "peer_pt_starvation_events": 61,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 420.46
+        "p95_sse_stream_latency_ms": 440.23
       },
       "stateless_rr_stripped": {
         "requests_sent": 500,
         "http_200_streams": 500,
         "router_blackhole_drop_rate_pct": 0.0,
-        "burndown_accounting_drift_pct": 51.3085,
+        "burndown_accounting_drift_pct": 51.3089,
         "peer_pt_starvation_events": 144,
         "effective_prefix_cache_hit_pct": 0.25,
-        "p95_sse_stream_latency_ms": 465.4
+        "p95_sse_stream_latency_ms": 481.54
       },
       "capacity_two_phase_gateway": {
         "requests_sent": 500,
@@ -97,9 +97,9 @@
         "burndown_accounting_drift_pct": 0.0,
         "peer_pt_starvation_events": 0,
         "effective_prefix_cache_hit_pct": 26.84,
-        "p95_sse_stream_latency_ms": 503.61
+        "p95_sse_stream_latency_ms": 491.18
       }
     }
   },
-  "receipt_sha256": "df56dd5061b02b2d8d2a85ba142e0be3568251f2a79e7e8667fb1c85c96f4d8d"
+  "receipt_sha256": "453569d1555b4db435f17fdb5d97b32ea499b1eaa3842ff956e4a0d06065c799"
 }
