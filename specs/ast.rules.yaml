@@ -126,7 +126,7 @@ metadata:
     - "from ..engine import sizing"
   valid_examples:
     - "from capacity.contract.scenario import ShowcaseReport"
-    - "from capacity.showcase.sections import render_sizing_kpis"
+    - "from capacity.showcase.view import PageView"
     - "import html"
 rule:
   any:

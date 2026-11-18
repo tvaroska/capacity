@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 try:
     PACKAGE_VERSION = version("capacity")
 except PackageNotFoundError:  # pragma: no cover
-    PACKAGE_VERSION = "0.5.0"
+    PACKAGE_VERSION = "0.6.0"
 
 # Interpolated into generated YAML/Kubernetes manifests and Cloud Monitoring filters;
 # reject quotes, newlines, spaces, or injection tokens at validation boundaries.

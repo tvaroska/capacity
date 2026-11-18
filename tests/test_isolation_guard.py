@@ -11,7 +11,7 @@ Enforces one explicit import rule per folder across Ports, Adapters and Contract
   `capacity.engine`, and `capacity.gateway`.
 - `showcase/{evaluate,sample_data}.py`: orchestrates scenario evaluation over `contract`, `engine`,
   `gateway`, `telemetry.local`, and `yaml`.
-- `showcase/` renderer modules (`renderer`, `sections`, `template`, `scripts`, `view`): import zero
+- `showcase/` renderer modules (`renderer`, `view`, `tabs`, `governance_tabs`): import zero
   calculations — only stdlib, `capacity.contract`, and sibling renderer modules.
 - `cli/` and `api.py`: driving ports — may import any `capacity.*` module plus `fastapi`, `typer`,
   `uvicorn`, and `dotenv`, while still delegating `google.*` SDK calls to `cloud_monitoring.py`.
@@ -288,7 +288,7 @@ def test_only_cloud_monitoring_imports_google_sdk() -> None:
             "from capacity.showcase.evaluate import evaluate_showcase_scenario",
         ),
         ("capacity/showcase/renderer.py", "from . import evaluate"),
-        ("capacity/showcase/sections.py", "from capacity.engine.catalog import normalize_model_id"),
+        ("capacity/showcase/view.py", "from capacity.engine.catalog import normalize_model_id"),
         ("capacity/telemetry/port.py", "from . import cloud_monitoring"),
         ("capacity/telemetry/local.py", "from google.cloud import monitoring_v3"),
         ("capacity/cli/recommend.py", "from google.cloud import monitoring_v3"),
@@ -316,7 +316,7 @@ def test_folder_guard_catches_every_forbidden_cross_folder_import(
         ("capacity/engine/probe.py", "from . import burst"),
         ("capacity/engine/probe.py", "import math"),
         ("capacity/showcase/renderer.py", "from capacity.contract.scenario import ShowcaseReport"),
-        ("capacity/showcase/renderer.py", "from .sections import render_sizing_kpis"),
+        ("capacity/showcase/renderer.py", "from .view import PageView"),
         ("capacity/telemetry/cloud_monitoring.py", "from google.cloud import monitoring_v3"),
         (
             "capacity/cli/recommend.py",

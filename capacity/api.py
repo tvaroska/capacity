@@ -26,6 +26,7 @@ from capacity.contract.requests import (
     FinOpsKpiRequest,
     FolderPoolingRequest,
     GatewayConfigRequest,
+    MicroBurstRequest,
     ModelTierPrefixCacheRequest,
     OptimizeRequest,
     ResidualScheduleRequest,
@@ -39,6 +40,7 @@ from capacity.contract.results import (
     FocusChargebackReport,
     FolderPoolingReport,
     GatewayConfigBundle,
+    MicroBurstAudit,
     ModelTierPrefixCacheAudit,
     OptimizeResponse,
     RecommendationResponse,
@@ -47,7 +49,8 @@ from capacity.contract.results import (
     VllmTelemetrySnapshot,
 )
 from capacity.contract.scenario import ShowcaseReport, ShowcaseScenario
-from capacity.engine.burst import evaluate_model_tier_prefix_cache
+from capacity.engine.burst import evaluate_micro_burst_window, evaluate_model_tier_prefix_cache
+from capacity.engine.catalog import ModelCatalog, build_model_catalog
 from capacity.engine.chargeback import compute_focus_chargeback
 from capacity.engine.kpis import compute_finops_kpis
 from capacity.engine.pooling import evaluate_folder_pooling
@@ -87,6 +90,16 @@ def _sanitize_nonfinite(node: Any) -> Any:  # noqa: ANN401
     if isinstance(node, dict):
         return {k: _sanitize_nonfinite(v) for k, v in node.items()}
     return node
+
+
+def _active_scenario_catalog() -> ModelCatalog | None:
+    """Return a scenario-aware `ModelCatalog` when `CAPACITY_SCENARIO_FILE` is served."""
+    scenario_path = os.environ.get("CAPACITY_SCENARIO_FILE")
+    if not scenario_path:
+        return None
+    scenario = load_showcase_scenario(scenario_path)
+    overrides = scenario.gsu_sizing.gsu_capacity_overrides
+    return build_model_catalog(overrides=overrides or None)
 
 
 @app.exception_handler(RequestValidationError)
@@ -172,12 +185,17 @@ async def get_recommendations(
 
 @app.post("/api/v1/optimize", response_model=OptimizeResponse)
 def post_optimize(req: OptimizeRequest) -> OptimizeResponse:
-    return evaluate_gsu_optimization(req)
+    return evaluate_gsu_optimization(req, catalog=_active_scenario_catalog())
+
+
+@app.post("/api/v1/burst/window", response_model=MicroBurstAudit)
+def post_micro_burst_window(req: MicroBurstRequest) -> MicroBurstAudit:
+    return evaluate_micro_burst_window(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/prefix-cache/model-tier", response_model=ModelTierPrefixCacheAudit)
 def post_model_tier_prefix_cache(req: ModelTierPrefixCacheRequest) -> ModelTierPrefixCacheAudit:
-    return evaluate_model_tier_prefix_cache(req)
+    return evaluate_model_tier_prefix_cache(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/self-hosted/audit", response_model=SelfHostedEndpointAudit)
@@ -200,27 +218,27 @@ def post_vllm_parse(req: VllmParseRequest) -> VllmTelemetrySnapshot:
 
 @app.post("/api/v1/gateway/config", response_model=GatewayConfigBundle)
 def post_gateway_config(req: GatewayConfigRequest) -> GatewayConfigBundle:
-    return generate_gateway_bundle(req)
+    return generate_gateway_bundle(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/chargeback", response_model=FocusChargebackReport)
 def post_chargeback(req: ChargebackRequest) -> FocusChargebackReport:
-    return compute_focus_chargeback(req)
+    return compute_focus_chargeback(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/finops/scavenger", response_model=BatchScavengerAudit)
 def post_batch_scavenger(req: BatchScavengerRequest) -> BatchScavengerAudit:
-    return evaluate_batch_scavenger_economics(req)
+    return evaluate_batch_scavenger_economics(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/finops/schedule", response_model=ResidualScheduleReport)
 def post_residual_schedule(req: ResidualScheduleRequest) -> ResidualScheduleReport:
-    return schedule_residual_capacity(req)
+    return schedule_residual_capacity(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/finops/folder-pooling", response_model=FolderPoolingReport)
 def post_folder_pooling(req: FolderPoolingRequest) -> FolderPoolingReport:
-    return evaluate_folder_pooling(req)
+    return evaluate_folder_pooling(req, catalog=_active_scenario_catalog())
 
 
 @app.post("/api/v1/finops/kpis", response_model=FinOpsKpiScorecard)

@@ -1,4 +1,4 @@
-# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.5.0)
+# Google Cloud Build CI/CD pipeline for Vertex AI Capacity Planner (capacity v0.6.0)
 substitutions:
   _REGION: us-central1
   _AR_REPO: containers

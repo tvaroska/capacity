@@ -152,3 +152,23 @@ capacity/
 - [x] **P2.3 The guard states one rule per folder**
   - The engine imports only the contract. One file imports the cloud SDK. The page renderer imports no calculation. The command line and the API may import anything.
   - Files: `specs/ast.rules.yaml`, `tests/test_isolation_guard.py`, the repository map in `AGENTS.md`, `ADR-005` in `DECISIONS.md`, and the links in `docs/`.
+
+## Milestone 4 - `v0.6.0`: The page shows only what the engine computed (`P3`)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-18.*
+
+- [x] **P3.1 One typed, display-ready object for the page**
+  - It carries every card, table, label and control default. The renderer turns it into HTML and escapes everything in one place, including the default page `<title>` (`Multi-Gateway & FOCUS 1.2` in `capacity/showcase/view.py`).
+  - Files: `capacity/showcase/view.py`, `capacity/showcase/tabs.py`, `capacity/showcase/renderer.py`, `capacity/showcase/assets/workbench.html`.
+  - Done when: no template holds a number, every text slot is escaped in one place, and a test renders a hand-made object.
+- [x] **P3.2 No formulas in the browser**
+  - The offline file is a snapshot with disabled controls. The served page sends control changes to the API (`POST /api/v1/burst/window`, `/api/v1/prefix-cache/model-tier`, `/api/v1/self-hosted/disaggregated`, `/api/v1/gateway/config`) and shows the answer, honouring active scenario overrides.
+  - Deleted the tables and rules typed in the script and amended `ADR-004`.
+  - Files: `capacity/showcase/assets/workbench.js`, `capacity/api.py`, `capacity/contract/requests.py`, `DECISIONS.md`.
+  - Done when: the script holds no capacity, threshold or weight.
+- [x] **P3.3 HTML, CSS and JavaScript as files**
+  - Kept as real files inside `capacity/showcase/assets/` and joined at render time, so the export stays one file. Aligned the stylesheet font-family fallback stacks with `.stitch/DESIGN.md`, and extended the identifier scan to `.js` and `.css`.
+  - Files: `capacity/showcase/assets/workbench.html`, `capacity/showcase/assets/workbench.css`, `capacity/showcase/assets/workbench.js`, `capacity/showcase/assets/favicon.svg`, `tests/test_repo_hygiene.py`.
+- [x] **P3.4 Page tests on values**
+  - Sent hostile text through every scenario text field with balanced-tag parsing, and rendered once per combination of page sections asserting engine values.
+  - Files: `tests/test_portal_export.py`.

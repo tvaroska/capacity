@@ -4,43 +4,25 @@ The ordered list of upcoming work. Each milestone ends in a tagged release; ther
 
 ## Where we are
 
-`v0.5.0` is tagged on `main` and its gate (`./scripts/gate.sh`) is green (`277` tests; Milestones 1–3 / `P0`–`P2` complete). Every module lives in a job-scoped folder (`contract/`, `engine/`, `ingest/`, `telemetry/`, `gateway/`, `showcase/`, `cli/`, `api.py`) guarded by one rule per folder. The remaining milestone below (`v0.6.0` / `P3`) removes numbers and rules from templates and browser JavaScript.
+`v0.6.0` is tagged on `main` and its gate (`./scripts/gate.sh`) is green (Milestones 1–4 / `P0`–`P3` complete). Every module lives in a job-scoped folder (`contract/`, `engine/`, `ingest/`, `telemetry/`, `gateway/`, `showcase/`, `cli/`, `api.py`) guarded by one rule per folder, and the GM3 Light workbench renders solely from a typed `PageView` with single-point escaping, real `.html`/`.css`/`.js`/`.svg` package assets, disabled controls on offline snapshots, and live FastAPI calls on `capacity serve`.
 
 Decisions taken by the owner on 2026-11-17:
 
 1. An empty API request no longer returns the sample answer; CLI `optimize`, `schedule` and `chargeback` require an explicit `--demo` switch or input file (shipped in `v0.4.0` / `P1.9`).
-2. The offline HTML file is a snapshot. Its sliders need not work (`P3.2`).
+2. The offline HTML file is a snapshot. Its sliders need not work (shipped in `v0.6.0` / `P3.2`).
 3. `recommend --html-out` shows no sample data (shipped in `v0.4.0` / `P1.1`).
-4. Import paths may change (`P2.1`).
+4. Import paths may change (shipped in `v0.5.0` / `P2.1`).
 5. The file hash on the benchmark is a release-time check (shipped in `v0.3.1` / `P0.1`).
 6. Self-hosted sample card: no preference was given, so the request default applies, 6 replicas and 48 GPUs (shipped in `v0.4.0` / `P1.4`).
 
 ## Milestones at a glance
 
-| # | Milestone | Done when | Size (rough) |
-| :--- | :--- | :--- | :--- |
-| 4 | `v0.6.0` — The page shows only what the engine computed (`P3`) | No number or rule is typed in a template or in the browser script | 3 to 5 days |
+| # | Milestone | Status |
+| :--- | :--- | :--- |
+| 1–4 | `v0.3.1` (`P0`), `v0.4.0` (`P1`), `v0.5.0` (`P2`), `v0.6.0` (`P3`) | Shipped — see [`## Shipped`](#shipped) and [`archive/roadmap-history.md`](archive/roadmap-history.md) |
+| Next | `v0.7.0` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled (`0` open `- [ ]` tasks) |
 
-Each remaining milestone (`P2` to `P3`) ends in a minor tagged release.
-
-## Milestone 4 — `v0.6.0`: The page shows only what the engine computed (`P3`)
-
-- [ ] **P3.1 One typed, display-ready object for the page**
-  - It carries every card, table, label and control default. The renderer turns it into HTML and escapes everything in one place, including the default page `<title>` (`Multi-Gateway & FOCUS 1.2` in `capacity/portal.py`, which currently emits a bare `&` when `scenario is None`).
-  - Files: `capacity/portal.py`, `capacity/portal_sections.py`, `capacity/portal_template.py`.
-  - Done when: no template holds a number, every text slot is escaped in one place, and a test renders a hand-made object.
-- [ ] **P3.2 No formulas in the browser**
-  - Today the first change to a control on a scenario page replaces the server's numbers with ones from the script's own tables, which do not know the scenario.
-  - The offline file is a snapshot: its controls are disabled or removed. The served page sends control changes to the API and shows the answer. This needs one new route for the burst window at a fixed number of GSUs.
-  - Delete the tables and rules typed in the script. Amend `ADR-004`.
-  - Files: `capacity/portal_scripts.py`, `capacity/api.py`, `capacity/models.py`, `DECISIONS.md`.
-  - Done when: the script holds no capacity, threshold or weight.
-- [ ] **P3.3 HTML, CSS and JavaScript as files**
-  - Keep them as real files inside the package and join them at render time, so the export stays one file. Align the stylesheet font-family fallback stack with `.stitch/DESIGN.md`, and extend the identifier scan to `.js` and `.css`.
-  - Files: `capacity/portal_template.py`, `capacity/portal_scripts.py`, `tests/test_repo_hygiene.py`.
-- [ ] **P3.4 Page tests on values**
-  - Send hostile text through every scenario text field. Render once per combination of page sections and assert engine values.
-  - Files: `tests/test_portal_export.py`.
+Each scheduled milestone ends in a minor tagged release.
 
 ## Unscheduled backlog
 
@@ -156,4 +138,5 @@ Pick one up when a milestone touches the same files. Items marked *changes outpu
 - **v0.3.1 (Milestone 1 - P0):** A comment edit in an engine file keeps the suite green, a module moved into a sub-folder is still scanned, and one script defines the gate — [archive](archive/roadmap-history.md#v031-milestone-1---p0)
 - **v0.4.0 (Milestone 2 - P1):** Unified model catalog, single request-to-result path across CLI/API/workbench, typed `ShowcaseReport` and `SeriesKey`, lazy Cloud Monitoring SDK and `.env` loading, and complexity lint ratchet — [archive](archive/roadmap-history.md#v040-milestone-2---p1-tidy-in-place-then-one-path-from-request-to-result)
 - **Milestone 3 — `v0.5.0`: Folders by job (`P2`):** The guard states one rule per folder and the gate is green — [archive](archive/roadmap-history.md#milestone-3---v050-folders-by-job-p2)
+- **v0.6.0 (Milestone 4 - P3):** Display-ready `PageView` escaped in one place, zero formulas or thresholds in browser JavaScript (disabled snapshot `--html-out`, live API controls + `POST /api/v1/burst/window` on `serve`), real `.html`/`.css`/`.js`/`.svg` package assets, and hostile-text + section-combination value tests — [archive](archive/roadmap-history.md#milestone-4---v060-the-page-shows-only-what-the-engine-computed-p3)
 

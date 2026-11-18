@@ -82,6 +82,11 @@ def test_suffixed_self_hosted_profile_still_resolves() -> None:
         ("post", "/api/v1/optimize", {"model": "claude-sonnet-9", "tpm_series": [1.0]}),
         (
             "post",
+            "/api/v1/burst/window",
+            {"model": "claude-sonnet-9", "sixty_sec_tpm": 100.0, "peak_1s_tps": 10.0},
+        ),
+        (
+            "post",
             "/api/v1/chargeback",
             {
                 "model": "claude-sonnet-9",

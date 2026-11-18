@@ -27,6 +27,7 @@ POST_ROUTES = sorted(
     if isinstance(route, APIRoute) and "POST" in route.methods
 )
 REQUIRED_BODY: dict[str, dict[str, Any]] = {
+    "/api/v1/burst/window": {"sixty_sec_tpm": 120_900.0, "peak_1s_tps": 2_500.0},
     "/api/v1/optimize": {"tpm_series": [241_800.0]},
     "/api/v1/self-hosted/audit": {"tpm_series": [384_000.0]},
     "/api/v1/vllm/parse": {"raw_content": ""},
@@ -47,8 +48,8 @@ DUPLICATE_JOBS = [
 ]
 
 
-def test_all_twelve_post_routes_are_under_test() -> None:
-    assert len(POST_ROUTES) == 12
+def test_all_thirteen_post_routes_are_under_test() -> None:
+    assert len(POST_ROUTES) == 13
 
 
 @pytest.mark.parametrize("path", POST_ROUTES)

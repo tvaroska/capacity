@@ -73,6 +73,8 @@ TEXT_SUFFIXES = {
     ".lock",
     ".sh",
     ".html",
+    ".css",
+    ".js",
     ".cfg",
     ".ini",
 }

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "capacity"
-version = "0.5.0"
+version = "0.6.0"
 description = "Stateless trace compiler for Google Cloud Provisioned Throughput and vLLM: sub-second burndown gateways, $0 night backfill, and FOCUS 1.2 two-pool chargeback."
 readme = "README.md"
 license = "Apache-2.0"

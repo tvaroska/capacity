@@ -104,7 +104,7 @@ sequenceDiagram
 ### Generated Envoy AI Gateway Post-SSE `CEL` Manifest (`capacity gateway --target envoy`)
 
 ```yaml
-# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.5.0)
+# Envoy AI Gateway Declarative Weighted Burndown Config (capacity v0.6.0)
 apiVersion: aigateway.envoyproxy.io/v1alpha1
 kind: AIGatewayRoute
 metadata:
@@ -220,7 +220,7 @@ uv run capacity gateway --target all --model claude-sonnet-4-6 --gsus 25 --rps 4
 ### 4A. Executive Showcase Scorecard (`capacity demo`) & 5-KPI Definitions
 
 ```text
-=== Capacity v0.5.0 — End-to-End Executive Showcase Scorecard ===
+=== Capacity v0.6.0 — End-to-End Executive Showcase Scorecard ===
 1. FinOps for AI KPIs:    CPVO=$0.1750/outcome | CPWT_1M=$5.6193 | TER=7.4% | CSR=68.4% | ECUR_168h=57.0%
 2. Folder RHPT Pooling:   Siloed=15 GSUs -> Pooled=9 GSUs (Saved=6 GSUs / $12,000/mo)
 3. Batch 0.5x Trap Saved: $11,250.00/mo (Lifts PT utilization 24% -> 67.1%)
@@ -253,7 +253,7 @@ Tier-2 Evergreen Water-Fill: 250,000,000 tokens ($0)
 
 ### 4C. Open-Loop Level 3 Empirical Benchmark (`benchmarks/run_l3_benchmark.py`)
 
-Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: 4311139a5bfa...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
+Committed SHA-256 receipts in [`benchmarks/results/l3_receipt.json`](benchmarks/results/l3_receipt.json) (`receipt_sha256: df56dd5061b0...`) validate two open-loop tracks (`uv run python -m benchmarks.run_l3_benchmark --offline` or `--live`):
 
 | Benchmark Track & Policy Arm | Reserved Base | 7-Day Total Cost | Unhandled Drop / Drift | Key Capacity & Routing Outcome |
 | :--- | :---: | :---: | :---: | :--- |
