@@ -20,6 +20,7 @@ from capacity.showcase.view import (
     CardView,
     CellView,
     ControlFieldView,
+    GroupedBarChartView,
     KpiCardView,
     PageView,
     TableView,
@@ -127,6 +128,43 @@ def _render_banner(banner: BannerView) -> str:
     return f'<div{id_attr} class="{_esc(banner.tone)}-banner">{_esc(banner.text)}</div>'
 
 
+def _render_chart(chart: GroupedBarChartView) -> str:
+    legend_html = "".join(
+        f'<span class="chart-legend-item">'
+        f'<span class="chart-swatch tone-{_esc(item.tone)}"></span>'
+        f"{_esc(item.label)}</span>"
+        for item in chart.legend
+    )
+    groups_html: list[str] = []
+    for grp in chart.groups:
+        bars_html = "".join(
+            '<div class="chart-bar-row">'
+            f'<span class="chart-bar-label">{_esc(b.label)}</span>'
+            '<div class="chart-bar-track">'
+            f'<div class="chart-bar-fill tone-{_esc(b.tone)}" '
+            f'style="width:{_esc(b.pct_width)}%"></div>'
+            "</div>"
+            f'<span class="chart-bar-val">{_esc(b.value_text)}</span>'
+            "</div>"
+            for b in grp.bars
+        )
+        groups_html.append(
+            '<div class="chart-group">'
+            f'<div class="chart-group-head"><strong>{_esc(grp.label)}</strong>'
+            f"<span>{_esc(grp.subtitle)}</span></div>"
+            f"{bars_html}"
+            "</div>"
+        )
+    cap_html = f'<p class="chart-caption">{_esc(chart.caption)}</p>' if chart.caption else ""
+    return (
+        '<div class="chart-box">'
+        f'<div class="chart-legend">{legend_html}</div>'
+        f"{''.join(groups_html)}"
+        f"{cap_html}"
+        "</div>"
+    )
+
+
 def _render_card(card: CardView) -> str:
     parts = [f"<h2>{_esc(card.title)}</h2>"]
     if card.subtitle is not None:
@@ -136,6 +174,8 @@ def _render_card(card: CardView) -> str:
         parts.append(f'<div class="controls-grid">{controls_html}</div>')
     if card.banner is not None:
         parts.append(_render_banner(card.banner))
+    if card.chart is not None:
+        parts.append(_render_chart(card.chart))
     if card.table is not None:
         parts.append(_render_table(card.table))
     if card.code_block is not None:

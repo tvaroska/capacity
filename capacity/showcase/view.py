@@ -94,11 +94,41 @@ class BannerView:
 
 
 @dataclass(frozen=True)
+class ChartLegendView:
+    label: str
+    tone: BadgeTone = "blue"
+
+
+@dataclass(frozen=True)
+class BarSegmentView:
+    label: str
+    pct_width: str
+    value_text: str
+    tone: BadgeTone = "blue"
+
+
+@dataclass(frozen=True)
+class BarGroupView:
+    label: str
+    subtitle: str
+    bars: tuple[BarSegmentView, ...]
+
+
+@dataclass(frozen=True)
+class GroupedBarChartView:
+    title: str
+    legend: tuple[ChartLegendView, ...]
+    groups: tuple[BarGroupView, ...]
+    caption: str | None = None
+
+
+@dataclass(frozen=True)
 class CardView:
     title: str
     subtitle: str | None = None
     controls: tuple[ControlFieldView, ...] = ()
     banner: BannerView | None = None
+    chart: GroupedBarChartView | None = None
     table: TableView | None = None
     code_block: str | None = None
 
@@ -376,18 +406,22 @@ def build_showcase_page_view(
         ("data-gw-bu-shares", str(gw_cfg.business_unit_shares)),
     )
 
+    all_tabs = (
+        build_sizing_tab(report, static_export=static_export),
+        build_burst_tab(report, static_export=static_export),
+        build_gateway_tab(report, static_export=static_export),
+        build_finops_tab(report),
+    )
+    hidden = set(pres.hidden_tabs)
+    visible_tabs = tuple(t for t in all_tabs if t.panel_id not in hidden) or all_tabs
+
     return PageView(
         page_title=page_title,
         brand_heading=pres.title,
         brand_subtitle=pres.subtitle,
         badges=tuple(badges),
         docs_link=docs_link,
-        tabs=(
-            build_sizing_tab(report, static_export=static_export),
-            build_burst_tab(report, static_export=static_export),
-            build_gateway_tab(report, static_export=static_export),
-            build_finops_tab(report),
-        ),
+        tabs=visible_tabs,
         include_script=True,
         live_api=not static_export,
         api_context=api_context,

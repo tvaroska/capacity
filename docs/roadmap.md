@@ -20,9 +20,21 @@ Decisions taken by the owner on 2026-11-17:
 | # | Milestone | Status |
 | :--- | :--- | :--- |
 | 1–5 | `v0.3.1` (`P0`), `v0.4.0` (`P1`), `v0.5.0` (`P2`), `v0.6.0` (`P3`), `v0.6.1` (`P0`–`P2` review fixes) | Shipped — see [`## Shipped`](#shipped) and [`archive/roadmap-history.md`](archive/roadmap-history.md) |
-| Next | `v0.7.0` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled (`0` open `- [ ]` tasks) |
+| 6 | `v0.7.0` — Cloud Console Capacity, Reallocation & Hourly Spillover Workbench | Scheduled (`6` open `- [ ]` tasks) |
+| Next | `v0.8.0+` — Promote selected items from [`## Unscheduled backlog`](#unscheduled-backlog) | Unscheduled |
 
 Each scheduled milestone ends in a minor tagged release.
+
+## Milestone 6 — `v0.7.0`: Cloud Console Capacity, Reallocation & Hourly Spillover Workbench
+
+Port the finalized Cloud Console visual design, per-model `P50`/`P75`/`P90`/`P95` reallocation workflow, and Tab 2 hourly 1-minute spillover line graph cleanly into `capacity` while preserving `ADR-004` (all capacities, percentiles, and reallocation math live in `capacity/engine/` + FastAPI; browser JS renders typed engine outputs with zero embedded formulas).
+
+- [ ] **Cloud Console theme & top app bar (`capacity/showcase/assets/workbench.{html,css}`, `scenario.py`, `view.py`):** Adopt Cloud Console GM3 Light palette (`#f8f9fa` canvas, `#ffffff` `4px`/`6px` hairline cards, `#1a73e8`/`#3367d6` Cloud Blue, flat `2px` underline tabs, dense `#f1f3f4` data tables, Cloud header bar with scope chip), plus `ScenarioPresentation.hidden_tabs` and card-trimming flags for focused executive views.
+- [ ] **KPI card clarity (`capacity/contract/scenario.py`, `capacity/showcase/tabs.py`):** Rename *Active vs 24x7 Duty Cycle* to *Active Window Share (Business Hours)*, add optional `total_requests` to `ModelInventoryAnnotation` so *Throttled Calls (% of Traffic)* reports exact `429` percentage alongside spillover share, and make the renewal-cliff KPI opt-in.
+- [ ] **Full-width *Contracted PT vs. Active Target Percentile* chart with model filter (`capacity/showcase/reallocation_cards.py`, `renderer.py`, `workbench.js`):** Render full-width grouped bars driven by a `Target P` (`P50`/`P75`/`P90`/`P95`) dropdown and model filter pills (auto-excluding high-scale outliers by default so peer models remain readable, rescaling dynamically to visible models).
+- [ ] **Full-width 1P & 3P per-model reallocation planners (`capacity/engine/reallocation.py`, `api.py`, `reallocation_cards.py`):** Separate 1P Gemini and 3P Claude reallocation tables with explicit formula (`Target GSUs = Contracted + From Existing (Realloc Δ) + Buy New GSUs`), per-row + bulk `Target P` selectors backed by `POST /api/v1/reallocate` on `capacity serve` (and pre-computed snapshots on `--html-out`), full-width *Recommended 1P GSU Reallocations* directly below 1P, and editable 3P what-if inputs when 3P Cloud Monitoring telemetry is not yet attached.
+- [ ] **Tab 2 hourly 1-minute PT spillover SVG line graph (`capacity/engine/reallocation.py`, `tabs.py`, `renderer.py`, `workbench.js`):** Compute per-model, per-hour 1-minute GSU arrays and per-local-day active `P50`/`P75`/`P90`/`P95` reference lines (`timezone_offset_hours` configurable, e.g. `EST` primary + `UTC` secondary), rendered as an interactive SVG line chart with model/hour selectors, `Worst First` / `Chronological` ordering, shaded red spillover area above contracted PT, toggleable daily `P` lines, and a minute-snapping mouseover crosshair + tooltip.
+- [ ] **Tests & `v0.7.0` release gate (`tests/test_reallocation.py`, `tests/test_portal_export.py`):** Verify `POST /api/v1/reallocate`, `hidden_tabs`, hourly spillover series, and Cloud Console HTML escaping invariants under `./scripts/gate.sh` (`proj-test capacity`), then tag `v0.7.0`.
 
 ## Unscheduled backlog
 

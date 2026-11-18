@@ -9,6 +9,7 @@ from __future__ import annotations
 from capacity.contract.requests import ModelTierPrefixCacheRequest
 from capacity.contract.results import ModelTierPrefixCacheAudit
 from capacity.contract.scenario import ShowcaseReport
+from capacity.showcase.reallocation_cards import build_reallocation_and_spillover_rows
 from capacity.showcase.view import (
     BadgeView,
     BannerView,
@@ -233,6 +234,7 @@ def build_sizing_tab(report: ShowcaseReport, *, static_export: bool) -> TabView:
             scen.gsu_sizing.inventory_annotations,
         ),
     )
+    realloc_rows = build_reallocation_and_spillover_rows(report)
     return TabView(
         panel_id="tab-sizing",
         button_label=(
@@ -241,7 +243,7 @@ def build_sizing_tab(report: ShowcaseReport, *, static_export: bool) -> TabView:
             else f"1. {brand_name} GSU Sizing, Lifecycle & Renewal"
         ),
         kpis=sizing_kpis,
-        rows=(CardRowView((sizing_card,)), *sh_rows),
+        rows=(*realloc_rows, CardRowView((sizing_card,)), *sh_rows),
         active=True,
     )
 

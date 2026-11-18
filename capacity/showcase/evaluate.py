@@ -53,6 +53,10 @@ from capacity.engine.chargeback import compute_focus_chargeback
 from capacity.engine.commitment import optimize_hybrid_commitment
 from capacity.engine.kpis import compute_finops_kpis
 from capacity.engine.pooling import evaluate_folder_pooling
+from capacity.engine.reallocation import (
+    build_gsu_reallocation_plan,
+    detect_critical_spillover_windows,
+)
 from capacity.engine.scheduler import (
     evaluate_batch_scavenger_economics,
     schedule_residual_capacity,
@@ -103,7 +107,11 @@ def evaluate_showcase_scenario(scenario: ShowcaseScenario | None = None) -> Show
     for raw_key, arr in gs.minute_tpm_series.items():
         max_len = max(max_len, len(arr))
         skey = SeriesKey.parse(raw_key, by_region=gs.by_region and "@" in raw_key)
-        sparse[skey] = minute_list_to_sparse(arr)
+        sparse[skey] = (
+            minute_list_to_sparse(arr, start=gs.series_start_utc)
+            if gs.series_start_utc is not None
+            else minute_list_to_sparse(arr)
+        )
     total_mins = max(gs.days * 24 * 60, max_len)
 
     gsu_recs = build_response(
@@ -174,6 +182,21 @@ def evaluate_showcase_scenario(scenario: ShowcaseScenario | None = None) -> Show
     folder_pooling = evaluate_folder_pooling(fo.folder_pooling, catalog=catalog)
     kpis = compute_finops_kpis(fo.kpis)
 
+    contracted_by_key = {
+        SeriesKey.parse(k, by_region=gs.by_region and "@" in k): (ann.contracted_gsus or 0)
+        for k, ann in gs.inventory_annotations.items()
+    }
+    spillover_windows = detect_critical_spillover_windows(sparse, contracted_by_key, catalog)
+    realloc_p50 = build_gsu_reallocation_plan(
+        gsu_recs.models, contracted_by_key, target_percentile="P50", catalog=catalog
+    )
+    realloc_p75 = build_gsu_reallocation_plan(
+        gsu_recs.models, contracted_by_key, target_percentile="P75", catalog=catalog
+    )
+    realloc_p95 = build_gsu_reallocation_plan(
+        gsu_recs.models, contracted_by_key, target_percentile="P95", catalog=catalog
+    )
+
     return ShowcaseReport(
         version=PACKAGE_VERSION,
         scenario_mode=is_custom_scenario,
@@ -194,6 +217,10 @@ def evaluate_showcase_scenario(scenario: ShowcaseScenario | None = None) -> Show
         residual_schedule=schedule,
         folder_pooling=folder_pooling,
         finops_kpis=kpis,
+        critical_spillover_windows=spillover_windows,
+        reallocation_p50=realloc_p50,
+        reallocation_p75=realloc_p75,
+        reallocation_p95=realloc_p95,
     )
 
 

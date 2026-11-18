@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Annotated, Literal, Self
 
 from pydantic import Field, model_validator
@@ -16,6 +17,7 @@ from capacity.contract.common import (
     LifecycleTrack,
     StrictModel,
 )
+from capacity.contract.reallocation import GsuReallocationPlan, SpilloverWindow
 from capacity.contract.requests import (
     BatchScavengerRequest,
     ChargebackRequest,
@@ -73,6 +75,9 @@ class ScenarioPresentation(StrictModel):
     primary_badge: str = Field(default="GM3 Light Tier-2 Showcase", max_length=80)
     secondary_badge: str = Field(default="FOCUS 1.2 & bq-eval CPVO Ready", max_length=80)
     wave_badge_label: str = Field(default="8x5 Business Wave", max_length=80)
+    hidden_tabs: list[Literal["tab-sizing", "tab-burst", "tab-gateway", "tab-finops"]] = Field(
+        default_factory=list
+    )
 
 
 class ModelInventoryAnnotation(StrictModel):
@@ -92,6 +97,7 @@ class ScenarioGsuSizing(StrictModel):
     by_region: bool = True
     active_only: bool = True
     forecast_hours: int = Field(default=24, ge=0, le=168)
+    series_start_utc: datetime | None = None
     minute_tpm_series: dict[str, MinuteTpmSeries] = Field(min_length=1, max_length=MAX_SERIES_KEYS)
     gsu_capacity_overrides: dict[str, Annotated[int, Field(ge=1, le=100_000_000)]] = Field(
         default_factory=dict, max_length=200
@@ -189,3 +195,7 @@ class ShowcaseReport(StrictModel):
     residual_schedule: ResidualScheduleReport
     folder_pooling: FolderPoolingReport
     finops_kpis: FinOpsKpiScorecard
+    critical_spillover_windows: list[SpilloverWindow] = Field(default_factory=list)
+    reallocation_p50: GsuReallocationPlan | None = None
+    reallocation_p75: GsuReallocationPlan | None = None
+    reallocation_p95: GsuReallocationPlan | None = None
