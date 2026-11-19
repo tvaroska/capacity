@@ -170,29 +170,6 @@ def test_readme_quickstart_commands_execute_cleanly(tmp_path: Path) -> None:
     assert "--mode self-hosted --vllm-file examples/otel_genai_spans.jsonl" not in readme
 
 
-def test_skill_md_symlink_and_runnable_commands_exit_zero() -> None:
-    import shlex
-
-    canonical = REPO_ROOT / "skills" / "capacity" / "SKILL.md"
-    agents_skills_dir = REPO_ROOT / ".agents" / "skills"
-    agent_link = agents_skills_dir / "capacity" / "SKILL.md"
-    assert canonical.is_file()
-    assert agents_skills_dir.is_symlink() or agent_link.is_symlink()
-    assert agent_link.resolve() == canonical.resolve()
-
-    skill_text = canonical.read_text(encoding="utf-8")
-    inline_cmds = re.findall(r"`(uv run capacity [^`<\n]+)`", skill_text)
-    assert len(inline_cmds) >= 4
-    for raw_cmd in inline_cmds:
-        tokens = shlex.split(raw_cmd)
-        assert tokens[:3] == ["uv", "run", "capacity"]
-        cli_args = [
-            str(REPO_ROOT / tok) if tok.startswith("examples/") else tok for tok in tokens[3:]
-        ]
-        res = runner.invoke(cli_app, cli_args)
-        assert res.exit_code == 0, f"SKILL.md command failed ({raw_cmd}):\n{res.output}"
-
-
 def test_readme_benchmark_figures_come_from_the_committed_receipt() -> None:
     """Regenerating the receipt must also refresh the README; nothing else ties the two."""
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")

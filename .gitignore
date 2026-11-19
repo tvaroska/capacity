@@ -5,7 +5,6 @@ __pycache__/
 dist/
 build/
 .claude/*
-!.claude/skills
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
