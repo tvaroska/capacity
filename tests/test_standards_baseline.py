@@ -94,16 +94,13 @@ def _selects(selected: list[str], rule: str) -> bool:
     )
 
 
-def _config_gaps() -> set[str] | None:
-    pyproject = REPO_ROOT / "pyproject.toml"
-    if not pyproject.is_file():
-        return None
-    config: dict[str, Any] = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+def _config_gaps_from_toml(config: dict[str, Any], *, has_uv_lock: bool) -> set[str]:
     tool: dict[str, Any] = config.get("tool", {})
     ruff: dict[str, Any] = tool.get("ruff", {})
     lint: dict[str, Any] = ruff.get("lint", {})
     selected: list[str] = lint.get("select", ruff.get("select", []))
-    ignored: list[str] = lint.get("ignore", ruff.get("ignore", []))
+    ignored: list[str] = list(lint.get("ignore", ruff.get("ignore", [])))
+    ignored.extend(lint.get("extend-ignore", ruff.get("extend-ignore", [])))
 
     gaps = {f"ruff:{r}" for r in REQUIRED_RUFF_RULES if not _selects(selected, r)}
     gaps |= {f"ruff-ignore:{r}" for r in BANNED_GLOBAL_IGNORES if r in ignored}
@@ -111,12 +108,19 @@ def _config_gaps() -> set[str] | None:
     mypy: dict[str, Any] | None = tool.get("mypy")
     if mypy is None:
         gaps.add("mypy:missing")
-    elif not (
-        mypy.get("strict") or (mypy.get("disallow_untyped_defs") and mypy.get("check_untyped_defs"))
-    ):
-        gaps.add("mypy:not-strict")
+    else:
+        if not (
+            mypy.get("strict")
+            or (mypy.get("disallow_untyped_defs") and mypy.get("check_untyped_defs"))
+        ):
+            gaps.add("mypy:not-strict")
+        disabled = mypy.get("disable_error_code")
+        if (isinstance(disabled, str) and disabled.strip()) or (
+            isinstance(disabled, list) and len(disabled) > 0
+        ):
+            gaps.add("mypy:disable-error-code")
 
-    if not (REPO_ROOT / "uv.lock").is_file():
+    if not has_uv_lock:
         gaps.add("uv-lock:missing")
 
     requires: str = config.get("project", {}).get("requires-python", "")
@@ -124,6 +128,14 @@ def _config_gaps() -> set[str] | None:
     if floor is None or (int(floor.group(1)), int(floor.group(2))) < MIN_PYTHON:
         gaps.add("python:below-3.12")
     return gaps
+
+
+def _config_gaps() -> set[str] | None:
+    pyproject = REPO_ROOT / "pyproject.toml"
+    if not pyproject.is_file():
+        return None
+    config: dict[str, Any] = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    return _config_gaps_from_toml(config, has_uv_lock=(REPO_ROOT / "uv.lock").is_file())
 
 
 def measure() -> dict[str, Any]:
@@ -196,6 +208,30 @@ class StandardsBaselineTest(unittest.TestCase):
             self.state["narration_comments"],
             self.debt["narration_comments"],
             "New numbered-step or banner comments; comments explain why, not what",
+        )
+
+    def test_config_gaps_catches_disable_error_code_and_extend_ignore(self) -> None:
+        clean_toml: dict[str, Any] = {
+            "project": {"requires-python": ">=3.12"},
+            "tool": {
+                "ruff": {"lint": {"select": list(REQUIRED_RUFF_RULES)}},
+                "mypy": {"strict": True},
+            },
+        }
+        self.assertEqual(_config_gaps_from_toml(clean_toml, has_uv_lock=True), set())
+
+        bad_toml: dict[str, Any] = {
+            "project": {"requires-python": ">=3.12"},
+            "tool": {
+                "ruff": {
+                    "lint": {"select": list(REQUIRED_RUFF_RULES), "extend-ignore": ["BLE001"]}
+                },
+                "mypy": {"strict": True, "disable_error_code": ["attr-defined", "no-untyped-def"]},
+            },
+        }
+        self.assertEqual(
+            _config_gaps_from_toml(bad_toml, has_uv_lock=True),
+            {"mypy:disable-error-code", "ruff-ignore:BLE001"},
         )
 
 
