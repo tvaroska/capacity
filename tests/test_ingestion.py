@@ -21,7 +21,10 @@ from capacity.engine.catalog import build_model_catalog
 from capacity.engine.chargeback import compute_focus_chargeback
 from capacity.engine.sizing import compute_recommendations
 from capacity.engine.stats import minute_list_to_sparse
-from capacity.ingest.request_logs import parse_inference_server_telemetry
+from capacity.ingest.request_logs import (
+    parse_bq_eval_capacity_export,
+    parse_inference_server_telemetry,
+)
 from capacity.showcase.evaluate import evaluate_showcase_scenario
 from capacity.telemetry import cloud_monitoring
 from capacity.telemetry.cloud_monitoring import fetch_throughput
@@ -322,3 +325,100 @@ def test_single_model_commands_reject_mixed_model_jsonl_unless_model_selected(
     audit = json.loads(opt_filtered.stdout)
     assert audit["profile_id"] == "gemma-3-27b-bf16"
     assert audit["p99_peak_replicas"] == 1
+
+
+def test_bq_eval_hourly_export_and_schema_v1_1_round_trip() -> None:
+    records = [
+        {
+            "usage_hour": "2026-11-22T10:00:00Z",
+            "apphub_application_id": "underwriting-agent",
+            "model_name": "gemini-3.8-flash",
+            "status_code": "OK",
+            "input_tokens": 250_000,
+            "cached_input_tokens": 50_000,
+            "cache_write_5m_tokens": 40_000,
+            "cache_write_1h_tokens": 10_000,
+            "output_tokens": 1_000,
+            "thinking_tokens": 0,
+            "weighted_burndown_tokens": 417_500.0,
+        },
+        {
+            "usage_hour": "2026-11-22T11:00:00Z",
+            "apphub_application_id": "underwriting-agent",
+            "model_name": "gemini-3.8-flash",
+            "status_code": "RATE_LIMITED",
+            "input_tokens": 10_000,
+            "cached_input_tokens": 2_000,
+            "output_tokens": 500,
+            "thinking_tokens": 100,
+            "weighted_burndown_tokens": 10_600.0,
+        },
+        {
+            "usage_hour": "2026-11-22T12:00:00Z",
+            "apphub_application_id": "claims-agent",
+            "model_name": "gemini-3.8-flash",
+            "status_code": "TIMEOUT",
+            "input_tokens": 5_000,
+            "cached_input_tokens": 0,
+            "output_tokens": 0,
+            "thinking_tokens": 0,
+            "weighted_burndown_tokens": 5_000.0,
+        },
+    ]
+    snap = _parse(_jsonl(records))
+    assert snap.model == "gemini-3.8-flash"
+    assert snap.http_429_count == 1
+    assert snap.prompt_tokens_total == 265_000
+    assert snap.cached_tokens_total == 52_000
+    assert snap.thoughts_tokens_total == 100
+    assert snap.weighted_burndown_tokens_total == pytest.approx(433_100.0)
+    assert snap.hourly_consumed_tpm_by_tenant["underwriting-agent"] == [
+        round(417_500.0 / 60.0, 2),
+        round(10_600.0 / 60.0, 2),
+        0.0,
+    ]
+    assert snap.hourly_consumed_tpm_by_tenant["claims-agent"] == [
+        0.0,
+        0.0,
+        round(5_000.0 / 60.0, 2),
+    ]
+
+    export_v11 = parse_bq_eval_capacity_export(
+        json.dumps(
+            {
+                "schema_version": "1.1",
+                "corpus_id": "m2-live",
+                "model": "gemini-3.8-flash",
+                "hours": ["2026-11-22T10:00:00+00:00"],
+                "three_pool_chargeback": {"reconciliation_drift_usd": 0.0, "rows": []},
+                "residual_schedule_request": {
+                    "model": "gemini-3.8-flash",
+                    "provisioned_gsus": 4,
+                    "safety_headroom_ratio": 0.85,
+                    "revenue_tpm_by_hour": [1000.0],
+                },
+                "burst_metrics_1m": [
+                    {"pool_id": "pool-1", "peak_burst_ratio": 2.4, "gateway_failover_count": 1}
+                ],
+                "app_risk_governance": [
+                    {"apphub_application_id": "underwriting-agent", "risk_tier": "RL-1"}
+                ],
+                "lob_model_lifecycle": [
+                    {"business_unit": "commercial_lines", "model_name": "gemini-3.8-flash"}
+                ],
+            }
+        )
+    )
+    assert export_v11["schema_version"] == "1.1"
+    assert len(export_v11["burst_metrics_1m"]) == 1  # type: ignore[arg-type]
+    assert len(export_v11["app_risk_governance"]) == 1  # type: ignore[arg-type]
+    assert len(export_v11["lob_model_lifecycle"]) == 1  # type: ignore[arg-type]
+
+    with pytest.raises(ValueError, match="Unsupported bq-eval capacity-export schema_version"):
+        parse_bq_eval_capacity_export(
+            {
+                "schema_version": "9.9",
+                "three_pool_chargeback": {},
+                "residual_schedule_request": {},
+            }
+        )

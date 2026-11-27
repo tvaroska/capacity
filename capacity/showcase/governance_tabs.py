@@ -438,7 +438,7 @@ def build_finops_tab(report: ShowcaseReport) -> TabView:
         KpiCardView(
             label="Cost / Verified Outcome (CPVO)",
             value=f"${kpis.cpvo_usd:.4f}",
-            badge=BadgeView("Bridges to bq-eval v_step1_cost_per_outcome", "green"),
+            badge=BadgeView("Bridges to bq-eval CPVO summary export", "green"),
             caption=f"CPWT_1M: ${kpis.cpwt_1m_usd:.4f} / 1M weighted tokens",
         ),
         KpiCardView(

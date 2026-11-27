@@ -114,6 +114,27 @@ def _float_from_maps(maps: Sequence[Mapping[str, object]], keys: Sequence[str]) 
     return fv if math.isfinite(fv) else 0.0
 
 
+def _status_code_from_maps(maps: Sequence[Mapping[str, object]]) -> int:
+    for key in ("http_status_code", "response_code", "http.response.status_code", "status_code"):
+        val = _lookup_first(maps, (key,))
+        if val is None:
+            continue
+        if isinstance(val, (int, float)):
+            return max(0, int(val))
+        raw = str(val).strip().upper()
+        if raw.isdigit():
+            return int(raw)
+        if raw == "RATE_LIMITED":
+            return 429
+        if raw == "TIMEOUT":
+            return 504
+        if raw == "ERROR":
+            return 500
+        if raw in {"OK", "UNSET", "SUCCESS"}:
+            return 200
+    return 0
+
+
 def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
     """Return a record's UTC time, or fail: a log without times has no rate to size from."""
     attrs = rec.get("attributes")
@@ -123,6 +144,7 @@ def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
     raw_ts = (
         rec.get("minute")
         or rec.get("timestamp")
+        or rec.get("usage_hour")
         or rec.get("receiveTimestamp")
         or rec.get("start_time")
         or rec.get("timeUnixNano")
@@ -132,8 +154,8 @@ def _record_time_utc(rec: Mapping[str, object], index: int) -> datetime:
     )
     if raw_ts is None:
         raise ValueError(
-            f"record {index + 1} has no timestamp (expected minute, timestamp, start_time, "
-            "timeUnixNano, startTimeUnixNano or attributes.timestamp)"
+            f"record {index + 1} has no timestamp (expected minute, timestamp, usage_hour, "
+            "start_time, timeUnixNano, startTimeUnixNano or attributes.timestamp)"
         )
 
     try:
@@ -249,6 +271,7 @@ def _record_raw_model(rec: Mapping[str, object], default_model: str) -> str:
         ),
         (
             "model",
+            "model_name",
             "model_id",
             "model_user_id",
             "publisher_model_id",
@@ -374,6 +397,7 @@ def parse_jsonl_or_json_logs(
             search_maps,
             (
                 "cached_tokens",
+                "cached_input_tokens",
                 "cached_content_token_count",
                 "gen_ai.usage.cached_tokens",
                 "cache_read_input_tokens",
@@ -433,6 +457,7 @@ def parse_jsonl_or_json_logs(
             (
                 "reasoning_tokens",
                 "thoughts_tokens",
+                "thinking_tokens",
                 "thoughts_token_count",
                 "gen_ai.usage.reasoning_tokens",
             ),
@@ -444,16 +469,24 @@ def parse_jsonl_or_json_logs(
             cat.get(rec_model) is not None or normalize_model_id(rec_model) in SELF_HOSTED_MODEL_IDS
         )
         known_model = rec_model if is_known else None
-        w_tok = compute_weighted_burndown_tokens(
-            input_tokens=p_tok,
-            output_tokens=o_tok,
-            thoughts_tokens=t_tok,
-            cached_tokens=c_tok,
-            model=known_model,
-            cache_write_5m_tokens=w5_tok,
-            cache_write_1h_tokens=w1_tok,
-            catalog=cat,
+        preweighted = _lookup_first(
+            (rec, payload_map),
+            ("precomputed_weighted_burndown_tokens", "weighted_burndown_tokens"),
         )
+        if preweighted is not None:
+            pw_val = float(str(preweighted))
+            w_tok = pw_val if math.isfinite(pw_val) and pw_val >= 0.0 else 0.0
+        else:
+            w_tok = compute_weighted_burndown_tokens(
+                input_tokens=p_tok,
+                output_tokens=o_tok,
+                thoughts_tokens=t_tok,
+                cached_tokens=c_tok,
+                model=known_model,
+                cache_write_5m_tokens=w5_tok,
+                cache_write_1h_tokens=w1_tok,
+                catalog=cat,
+            )
         prompt_total += p_tok
         cached_total += c_tok
         cache_write_5m_total += w5_tok
@@ -462,10 +495,7 @@ def parse_jsonl_or_json_logs(
         thoughts_total += t_tok
         weighted_total += w_tok
 
-        status_code = _int_from_maps(
-            (rec, payload_map, attr_map),
-            ("status_code", "http_status_code", "response_code", "http.response.status_code"),
-        )
+        status_code = _status_code_from_maps((rec, payload_map, attr_map))
         traffic_type_raw = _lookup_first(
             (rec, payload_map, p_usage_map, attr_map, top_label_map),
             ("traffic_type", "request_type", "gen_ai.vertex.traffic_type"),
@@ -512,6 +542,7 @@ def parse_jsonl_or_json_logs(
             (rec, req_label_map, top_label_map, payload_map, attr_map, res_attr_map),
             (
                 "tenant",
+                "apphub_application_id",
                 "team",
                 "x-business-unit",
                 "business_unit",
@@ -562,3 +593,39 @@ def parse_jsonl_or_json_logs(
         spillover_by_model_region=spill_by_mr,
         http_429_by_model_region=err429_by_mr,
     )
+
+
+def parse_bq_eval_capacity_export(payload: str | Mapping[str, object]) -> dict[str, object]:
+    """Validate and normalize a versioned `bq-eval capacity-export` payload (`v1.0` | `v1.1`)."""
+    raw_obj = json.loads(payload) if isinstance(payload, str) else payload
+    if not isinstance(raw_obj, Mapping):
+        raise ValueError("Expected JSON object from bq-eval capacity-export.")
+    version = str(raw_obj.get("schema_version", "1.0")).strip()
+    if version not in {"1.0", "1.1"}:
+        raise ValueError(f"Unsupported bq-eval capacity-export schema_version {version!r}")
+    tp_cb = raw_obj.get("three_pool_chargeback")
+    res_sched = raw_obj.get("residual_schedule_request")
+    if not isinstance(tp_cb, Mapping):
+        raise ValueError("bq-eval capacity-export missing object field 'three_pool_chargeback'")
+    if not isinstance(res_sched, Mapping):
+        raise ValueError("bq-eval capacity-export missing object field 'residual_schedule_request'")
+    raw_hours = raw_obj.get("hours")
+    hours = list(raw_hours) if isinstance(raw_hours, list) else []
+
+    def _list_of_maps(field: str) -> list[dict[str, object]]:
+        val = raw_obj.get(field, [])
+        if not isinstance(val, list):
+            raise ValueError(f"Expected list for {field!r} in bq-eval capacity-export.")
+        return [dict(item) for item in val if isinstance(item, Mapping)]
+
+    return {
+        "schema_version": version,
+        "corpus_id": str(raw_obj.get("corpus_id", "")),
+        "model": str(raw_obj.get("model", "")),
+        "hours": hours,
+        "three_pool_chargeback": dict(tp_cb),
+        "residual_schedule_request": dict(res_sched),
+        "burst_metrics_1m": _list_of_maps("burst_metrics_1m"),
+        "app_risk_governance": _list_of_maps("app_risk_governance"),
+        "lob_model_lifecycle": _list_of_maps("lob_model_lifecycle"),
+    }
